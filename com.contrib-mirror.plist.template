@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.contrib-mirror</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/bash</string>
+      <!-- UPDATE THIS PATH -->
+      <string>/path/to/private-work-contributions-mirror/sync.sh</string>
+    </array>
+
+    <!-- Run at midnight daily -->
+    <key>StartCalendarInterval</key>
+    <dict>
+      <key>Hour</key>
+      <integer>0</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+
+    <!-- Also run on load (e.g., after reboot) -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Optional: run every 15 minutes (900 seconds) -->
+    <!-- Uncomment if you want more frequent syncs -->
+    <!--
+    <key>StartInterval</key>
+    <integer>900</integer>
+    -->
+
+    <!-- UPDATE THESE PATHS -->
+    <key>StandardOutPath</key>
+    <string>/path/to/private-work-contributions-mirror/logs/sync.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/path/to/private-work-contributions-mirror/logs/sync.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>PATH</key>
+      <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+
+      <!-- Configure these for your setup -->
+      <key>WORK_DIR</key>
+      <string>/path/to/your/work/repos</string>
+      <key>MIRROR_DIR</key>
+      <string>/path/to/your/mirror/repo</string>
+      <key>EMAILS</key>
+      <string>your-work@company.com,your-personal@gmail.com</string>
+      <key>REMOTE_PREFIX</key>
+      <string>git@github.com:your-company/</string>
+      <key>SINCE</key>
+      <string>2024-01-01 00:00:00</string>
+    </dict>
+  </dict>
+</plist>

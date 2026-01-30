@@ -1,0 +1,15 @@
+# Cache directory (bare clones)
+.cache/
+
+# Logs
+logs/
+*.log
+
+# Mirror repo (user creates their own)
+mirror/
+
+# macOS
+.DS_Store
+
+# Temp files
+*.tmp
