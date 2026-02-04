@@ -34,6 +34,16 @@ EMAILS="${EMAILS:-your-work-email@company.com,your-personal@gmail.com}"
 # Only repos with origin URLs starting with this prefix will be synced
 REMOTE_PREFIX="${REMOTE_PREFIX:-git@github.com:your-company/}"
 
+# GitHub organization name (extracted from REMOTE_PREFIX if not set)
+GITHUB_ORG="${GITHUB_ORG:-}"
+
+# GitHub username for API queries (for PRs, reviews, issues)
+GITHUB_USERNAME="${GITHUB_USERNAME:-}"
+
+# Types of activity to track (comma-separated: commits,prs,reviews,issues)
+# Set to "commits" only to disable GitHub API integration
+ACTIVITY_TYPES="${ACTIVITY_TYPES:-commits,prs,reviews,issues}"
+
 # Log directory
 LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"
 
@@ -77,10 +87,73 @@ log() {
   echo "[$(timestamp)] $*"
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# GitHub Activity Functions (PRs, Reviews, Issues)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Convert ISO 8601 timestamp to git format
+# Input:  2024-01-15T10:30:45Z or 2024-01-15T10:30:45+05:30
+# Output: 2024-01-15 10:30:45 +0000 or 2024-01-15 10:30:45 +0530
+iso_to_git_format() {
+  local iso_ts="$1"
+  if [[ "$iso_ts" == *"Z" ]]; then
+    # UTC timestamp
+    echo "$iso_ts" | sed 's/T/ /; s/Z/ +0000/'
+  else
+    # Timestamp with offset like +05:30
+    echo "$iso_ts" | sed 's/T/ /; s/\([+-][0-9][0-9]\):\([0-9][0-9]\)$/ \1\2/'
+  fi
+}
+
+# Fetch GitHub activity timestamps (PRs, reviews, issues)
+fetch_github_activity() {
+  local since_date="$1"
+  local org="$2"
+
+  # Check if gh CLI is available
+  if ! command -v gh &>/dev/null; then
+    log "WARN: gh CLI not found, skipping GitHub activity fetch"
+    return
+  fi
+
+  # Check gh auth status
+  if ! gh auth status &>/dev/null; then
+    log "WARN: gh CLI not authenticated, skipping GitHub activity fetch"
+    return
+  fi
+
+  # PRs created
+  if [[ "$ACTIVITY_TYPES" == *"prs"* ]]; then
+    gh search prs --author="$GITHUB_USERNAME" --created=">=$since_date" \
+      --owner="$org" --json createdAt --jq '.[].createdAt' 2>/dev/null | \
+      while read -r ts; do
+        [[ -n "$ts" ]] && iso_to_git_format "$ts"
+      done
+  fi
+
+  # PR reviews
+  if [[ "$ACTIVITY_TYPES" == *"reviews"* ]]; then
+    gh search prs --reviewed-by="$GITHUB_USERNAME" --updated=">=$since_date" \
+      --owner="$org" --json updatedAt --jq '.[].updatedAt' 2>/dev/null | \
+      while read -r ts; do
+        [[ -n "$ts" ]] && iso_to_git_format "$ts"
+      done
+  fi
+
+  # Issues created
+  if [[ "$ACTIVITY_TYPES" == *"issues"* ]]; then
+    gh search issues --author="$GITHUB_USERNAME" --created=">=$since_date" \
+      --owner="$org" --json createdAt --jq '.[].createdAt' 2>/dev/null | \
+      while read -r ts; do
+        [[ -n "$ts" ]] && iso_to_git_format "$ts"
+      done
+  fi
+}
+
 tmp_pairs="$(mktemp)"
 tmp_sorted="$(mktemp)"
 cleanup() {
-  rm -f "$tmp_pairs" "$tmp_sorted" 2>/dev/null || true
+  rm -f "$tmp_pairs" "$tmp_sorted" /tmp/all_timestamps.txt 2>/dev/null || true
   rm -rf "$LOCK_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -188,8 +261,11 @@ fi
 tmp_origin="/tmp/origin_timestamps.txt"
 tmp_mirror="/tmp/mirror_timestamps.txt"
 tmp_missing="/tmp/missing_timestamps.txt"
+tmp_all_timestamps="/tmp/all_timestamps.txt"
 
-> "$tmp_origin"
+> "$tmp_all_timestamps"
+
+# Collect git commit timestamps
 for bare in "$CACHE_DIR"/*.git; do
   [[ -d "$bare" ]] || continue
 
@@ -202,7 +278,23 @@ for bare in "$CACHE_DIR"/*.git; do
   for email in "${EMAIL_ARRAY[@]}"; do
     git --git-dir="$bare" log --all --since="$SINCE" --author="$email" --format="%ai" 2>/dev/null || true
   done
-done | LC_ALL=C sort -u > "$tmp_origin"
+done >> "$tmp_all_timestamps"
+
+# Fetch GitHub activity timestamps (PRs, reviews, issues)
+if [[ "$ACTIVITY_TYPES" != "commits" ]] && [[ -n "$GITHUB_USERNAME" ]]; then
+  since_date="${SINCE%% *}"  # Extract date part only (YYYY-MM-DD)
+  # Extract org from REMOTE_PREFIX if GITHUB_ORG not set
+  if [[ -z "$GITHUB_ORG" ]]; then
+    GITHUB_ORG="$(echo "$REMOTE_PREFIX" | sed 's/.*github.com[:/]\([^/]*\).*/\1/')"
+  fi
+  log "Fetching GitHub activity (PRs, reviews, issues) since $since_date..."
+  fetch_github_activity "$since_date" "$GITHUB_ORG" >> "$tmp_all_timestamps"
+  github_count="$(wc -l < "$tmp_all_timestamps" | tr -d " ")"
+  log "Total timestamps (commits + GitHub activity): $github_count"
+fi
+
+# Deduplicate and sort
+LC_ALL=C sort -u "$tmp_all_timestamps" > "$tmp_origin"
 
 git -C "$MIRROR_DIR" log --format="%ai" 2>/dev/null | LC_ALL=C sort -u > "$tmp_mirror"
 comm -23 "$tmp_origin" "$tmp_mirror" > "$tmp_missing"
