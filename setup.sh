@@ -39,17 +39,20 @@ warn()  { echo "  [!] $*" >&2; }
 # ─────────────────────────────────────────────────────────────────────────────
 
 detect_work_dir() {
+  local best="" best_count=0
   for dir in "$HOME/work" "$HOME/projects" "$HOME/code" "$HOME/src" "$HOME/Sites/projects"; do
-    if [[ -d "$dir" ]]; then
-      # Find subdirs that contain git repos with a common org
-      for sub in "$dir"/*/; do
-        if find "$sub" -maxdepth 2 -name .git -print -quit 2>/dev/null | grep -q .; then
-          echo "$sub"
-          return
-        fi
-      done
-    fi
+    [[ -d "$dir" ]] || continue
+    for sub in "$dir"/*/; do
+      [[ -d "$sub" ]] || continue
+      local count
+      count="$(find "$sub" -maxdepth 2 -name .git -print 2>/dev/null | wc -l | tr -d ' ')"
+      if [[ "$count" -gt "$best_count" ]]; then
+        best_count="$count"
+        best="$sub"
+      fi
+    done
   done
+  [[ -n "$best" ]] && echo "$best"
 }
 
 detect_emails() {
@@ -83,16 +86,10 @@ detect_remote_prefix() {
   local work_dir="$1"
   [[ -d "$work_dir" ]] || return
 
-  # Collect origin URLs and find the most common org prefix
-  local urls=""
-  while read -r gitpath; do
-    local url
-    url="$(git -C "$(dirname "$gitpath")" remote get-url origin 2>/dev/null || true)"
-    [[ -n "$url" ]] && urls+="$url"$'\n'
-  done < <(find "$work_dir" -maxdepth 3 -name .git -print 2>/dev/null)
-
-  # Find most common org prefix (git@github.com:Org/ or https://github.com/Org/)
-  echo "$urls" | sed -n 's|\(.*github\.com[:/][^/]*/\).*|\1|p' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}'
+  # Collect origin URLs, extract org prefix, find most common
+  find "$work_dir" -maxdepth 3 -name .git -print 2>/dev/null | while read -r gitpath; do
+    git -C "$(dirname "$gitpath")" remote get-url origin 2>/dev/null || true
+  done | sed 's|/[^/]*\.git$||; s|/[^/]*$||; s|$|/|' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}'
 }
 
 detect_github_username() {
