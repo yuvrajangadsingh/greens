@@ -40,6 +40,12 @@ GITHUB_ORG="${GITHUB_ORG:-}"
 # GitHub username for API queries (for PRs, reviews, issues)
 GITHUB_USERNAME="${GITHUB_USERNAME:-}"
 
+# GitHub token for work account API access (optional)
+# Option A: Set GITHUB_TOKEN with a PAT from your work account (https://github.com/settings/tokens, 'repo' scope)
+# Option B: Login with both accounts via `gh auth login`, set GITHUB_USERNAME to your work account
+# If neither is set, gh CLI uses whatever account is currently active
+GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+
 # Types of activity to track (comma-separated: commits,prs,reviews,issues)
 # Set to "commits" only to disable GitHub API integration
 ACTIVITY_TYPES="${ACTIVITY_TYPES:-commits,prs,reviews,issues}"
@@ -114,6 +120,18 @@ fetch_github_activity() {
   if ! command -v gh &>/dev/null; then
     log "WARN: gh CLI not found, skipping GitHub activity fetch"
     return
+  fi
+
+  # Auth: GITHUB_TOKEN takes priority, otherwise try account switching
+  if [[ -n "$GITHUB_TOKEN" ]]; then
+    export GITHUB_TOKEN
+  elif [[ -n "$GITHUB_USERNAME" ]]; then
+    local original_account
+    original_account=$(gh auth status --active 2>&1 | grep 'Logged in' | sed 's/.*account //' | awk '{print $1}' || true)
+    if [[ "$original_account" != "$GITHUB_USERNAME" ]]; then
+      gh auth switch --user "$GITHUB_USERNAME" &>/dev/null || true
+    fi
+    trap 'if [[ -n "${original_account:-}" && "${original_account}" != "$GITHUB_USERNAME" ]]; then gh auth switch --user "$original_account" &>/dev/null || true; fi' RETURN
   fi
 
   # Check gh auth status

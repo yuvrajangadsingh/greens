@@ -42,8 +42,46 @@ Before                              After
 # Install gh (macOS)
 brew install gh
 
-# Authenticate
+# Authenticate (see Auth Methods below)
 gh auth login
+```
+
+### Auth Methods for GitHub Activity Tracking
+
+If your work GitHub account differs from your personal one, you need to give the script access to your work org. Pick **one** method:
+
+| Method | Best for | Setup |
+|:-------|:---------|:------|
+| **A. Personal Access Token** | HTTPS users, CI/CD, simplest setup | Create a PAT, set `GITHUB_TOKEN` |
+| **B. Multi-account gh CLI** | SSH users with multiple GitHub accounts | `gh auth login` with both accounts, set `GITHUB_USERNAME` |
+| **C. Single account** | Your default `gh` account already has org access | Nothing extra needed |
+
+**Method A: Personal Access Token (recommended)**
+
+1. On your **work** GitHub account, go to [Settings > Tokens](https://github.com/settings/tokens)
+2. Create a token with `repo` scope
+3. Set it in your environment:
+```bash
+export GITHUB_TOKEN="ghp_your_work_account_token"
+```
+
+**Method B: Multi-account gh CLI**
+
+```bash
+# Login with your work account (in addition to personal)
+gh auth login
+# Select your work account when prompted
+
+# Set your work username so the script can switch automatically
+export GITHUB_USERNAME="your-work-username"
+```
+The script will switch to your work account for API calls and switch back automatically.
+
+**Method C: Single account**
+
+If your default `gh` account already has access to the private org, just set `GITHUB_USERNAME` and you're done.
+```bash
+export GITHUB_USERNAME="your-github-username"
 ```
 
 ---
@@ -178,7 +216,8 @@ crontab -e
 | `EMAILS` | Yes | - | Comma-separated git emails to match |
 | `REMOTE_PREFIX` | Yes | - | Only sync repos with origins starting with this |
 | `SINCE` | No | `2024-01-01` | Only sync activity after this date |
-| `GITHUB_USERNAME` | No | - | Your GitHub username (enables API features) |
+| `GITHUB_USERNAME` | No | - | Your work GitHub username (enables API features) |
+| `GITHUB_TOKEN` | No | - | Work account PAT (alternative to multi-account gh CLI) |
 | `GITHUB_ORG` | No | (auto) | GitHub org name (auto-detected from REMOTE_PREFIX) |
 | `ACTIVITY_TYPES` | No | `commits,prs,reviews,issues` | What to track |
 | `FORCE` | No | `0` | Set to `1` to bypass daily limit |
@@ -217,7 +256,7 @@ A: No. Only timestamps are mirrored. The mirror repo contains empty commits with
 A: No. The script creates bare caches and never modifies your working directories.
 
 **Q: What if I have multiple GitHub accounts (work/personal)?**
-A: Use SSH config with different hosts. Set `REMOTE_PREFIX` to match your work repos only.
+A: Use SSH config with different hosts for repo access. For GitHub API (PRs/reviews), either set `GITHUB_TOKEN` with a work account PAT, or login with both accounts via `gh auth login` and set `GITHUB_USERNAME`. See **Auth Methods** above.
 
 **Q: Can I backfill old contributions?**
 A: Yes. Set `SINCE` to an earlier date and run with `FORCE=1`.
@@ -230,6 +269,7 @@ A: Check:
 1. `gh auth status` - are you logged in?
 2. `gh search prs --owner=YOUR_ORG --limit=1` - can you access the org?
 3. Is `GITHUB_USERNAME` set correctly?
+4. If using a PAT, is `GITHUB_TOKEN` set and does it have `repo` scope?
 
 ---
 
