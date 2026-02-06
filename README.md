@@ -250,22 +250,28 @@ gh search prs --author=YOUR_USERNAME --owner=YOUR_ORG --limit=1
 ## FAQ
 
 **Q: Is any code exposed?**
-A: No. Only timestamps are mirrored. The mirror repo contains empty commits with no content.
+
+No. Only timestamps are mirrored. The mirror repo contains empty commits with no content.
 
 **Q: Will this affect my private repos?**
-A: No. The script creates bare caches and never modifies your working directories.
+
+No. The script creates bare caches and never modifies your working directories.
 
 **Q: What if I have multiple GitHub accounts (work/personal)?**
-A: Use SSH config with different hosts for repo access. For GitHub API (PRs/reviews), either set `GITHUB_TOKEN` with a work account PAT, or login with both accounts via `gh auth login` and set `GITHUB_USERNAME`. See **Auth Methods** above.
+
+Use SSH config with different hosts for repo access. For GitHub API (PRs/reviews), either set `GITHUB_TOKEN` with a work account PAT, or login with both accounts via `gh auth login` and set `GITHUB_USERNAME`. See **Auth Methods** above.
 
 **Q: Can I backfill old contributions?**
-A: Yes. Set `SINCE` to an earlier date and run with `FORCE=1`.
+
+Yes. Set `SINCE` to an earlier date and run with `FORCE=1`.
 
 **Q: The script says "Already synced today"**
-A: It only runs once per day by default. Use `FORCE=1 ./sync.sh` to override.
+
+It only runs once per day by default. Use `FORCE=1 ./sync.sh` to override.
 
 **Q: GitHub API features not working?**
-A: Check:
+
+Check:
 1. `gh auth status` - are you logged in?
 2. `gh search prs --owner=YOUR_ORG --limit=1` - can you access the org?
 3. Is `GITHUB_USERNAME` set correctly?
