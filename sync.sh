@@ -10,6 +10,23 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VERSION="1.0.0"
+
+# Source config file if it exists
+# Config uses ${VAR:-value} so env vars always take precedence
+CONFIG_FILE="${CONTRIB_MIRROR_CONFIG:-$HOME/.contrib-mirror/config}"
+[[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
+
+# CLI flags
+case "${1:-}" in
+  --setup)   exec "$SCRIPT_DIR/setup.sh" ;;
+  --help|-h) echo "Usage: contrib-mirror [--setup|--help|--version]"
+             echo "  --setup    Run interactive setup wizard"
+             echo "  --version  Show version"
+             echo "  --help     Show this help"
+             exit 0 ;;
+  --version) echo "contrib-mirror $VERSION"; exit 0 ;;
+esac
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration (override via environment or edit below)

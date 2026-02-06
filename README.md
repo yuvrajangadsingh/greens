@@ -2,14 +2,6 @@
 
 Mirror commit timestamps from private work repos to your GitHub contribution graph—without exposing any code.
 
-## The Problem
-
-You work hard on private repos, but your GitHub profile shows empty squares. Recruiters, collaborators, and the open source community can't see your actual activity.
-
-## The Solution
-
-This script mirrors your work activity to a public repo. **No code is exposed**—only timestamps.
-
 ```
 Before                              After
 ┌────────────────────────┐          ┌────────────────────────┐
@@ -22,169 +14,109 @@ Before                              After
 
 ---
 
-## Prerequisites
+## Install
 
-### Required
+**One-liner (recommended):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yuvrajangadsingh/private-work-contributions-mirror/main/install.sh | bash
+```
+
+**Homebrew:**
+
+```bash
+brew tap yuvrajangadsingh/contrib-mirror
+brew install contrib-mirror
+```
+
+**Manual:**
+
+```bash
+git clone https://github.com/yuvrajangadsingh/private-work-contributions-mirror.git
+cd private-work-contributions-mirror
+bash setup.sh
+```
+
+The installer runs an interactive setup wizard that auto-detects your repos, emails, and GitHub org.
+
+## Usage
+
+```bash
+contrib-mirror            # run sync
+contrib-mirror --setup    # reconfigure
+contrib-mirror --help     # show help
+contrib-mirror --version  # show version
+```
+
+---
+
+## Prerequisites
 
 | Requirement | Why | Check |
 |:------------|:----|:------|
 | **Git** | Clone repos, create commits | `git --version` |
 | **Bash** | Run the script | `bash --version` |
-| **Access to private repos** | Fetch commits (SSH or HTTPS) | See below |
+| **Access to private repos** | Fetch commits (SSH or HTTPS) | `git remote -v` in any work repo |
+| **GitHub CLI** (optional) | Track PRs, reviews, issues | [cli.github.com](https://cli.github.com/) |
 
-The script works with **both SSH and HTTPS** repo access:
-
-| Method | REMOTE_PREFIX | Check |
-|:-------|:-------------|:------|
-| **SSH** | `git@github.com:your-company/` | `ssh -T git@github.com` |
-| **HTTPS** | `https://github.com/your-company/` | `git ls-remote https://github.com/your-company/any-repo.git` |
-
-Run `git remote -v` in any work repo to see which format you use.
-
-### Optional (for PR/review/issue tracking)
-
-| Requirement | Why | Install |
-|:------------|:----|:--------|
-| **GitHub CLI** | Fetch PRs, reviews, issues | [cli.github.com](https://cli.github.com/) |
-
-```bash
-# Install gh (macOS)
-brew install gh
-
-# Authenticate (see Auth Methods below)
-gh auth login
-```
+Works with **both SSH and HTTPS** repo access.
 
 ### Auth Methods for GitHub Activity Tracking
 
-If your work GitHub account differs from your personal one, you need to give the script access to your work org. Pick **one** method:
+If your work GitHub account differs from your personal one, pick **one** method:
 
 | Method | Best for | Setup |
 |:-------|:---------|:------|
-| **A. Personal Access Token** | HTTPS users, CI/CD, simplest setup | Create a PAT, set `GITHUB_TOKEN` |
-| **B. Multi-account gh CLI** | SSH users with multiple GitHub accounts | `gh auth login` with both accounts, set `GITHUB_USERNAME` |
-| **C. Single account** | Your default `gh` account already has org access | Nothing extra needed |
-
-**Method A: Personal Access Token (recommended)**
-
-1. On your **work** GitHub account, go to [Settings > Tokens](https://github.com/settings/tokens)
-2. Create a token with `repo` scope
-3. Set it in your environment:
-```bash
-export GITHUB_TOKEN="ghp_your_work_account_token"
-```
-
-**Method B: Multi-account gh CLI**
-
-```bash
-# Login with your work account (in addition to personal)
-gh auth login
-# Select your work account when prompted
-
-# Set your work username so the script can switch automatically
-export GITHUB_USERNAME="your-work-username"
-```
-The script will switch to your work account for API calls and switch back automatically.
-
-**Method C: Single account**
-
-If your default `gh` account already has access to the private org, just set `GITHUB_USERNAME` and you're done.
-```bash
-export GITHUB_USERNAME="your-github-username"
-```
+| **A. Personal Access Token** | HTTPS users, CI/CD, simplest | Create PAT with `repo` scope, set `GITHUB_TOKEN` |
+| **B. Multi-account gh CLI** | SSH users with multiple accounts | `gh auth login` both accounts, set `GITHUB_USERNAME` |
+| **C. Single account** | Default `gh` account has org access | Just set `GITHUB_USERNAME` |
 
 ---
 
-## Setup (5 minutes)
+## Manual Setup (alternative to installer)
 
-### Step 1: Create a mirror repo on GitHub
+If you prefer to configure manually instead of using the setup wizard:
+
+### 1. Create a mirror repo on GitHub
 
 1. Go to [github.com/new](https://github.com/new)
 2. Name it something like `work-contributions-mirror`
 3. Make it **public** (so it shows on your profile)
 4. Don't initialize with README
 
-### Step 2: Clone the mirror repo locally
+### 2. Clone and configure
 
 ```bash
 git clone git@github.com:YOUR_USERNAME/work-contributions-mirror.git ~/mirror
-cd ~/mirror
-git commit --allow-empty -m "init"
-git push
+cd ~/mirror && git commit --allow-empty -m "init" && git push
 ```
 
-### Step 3: Clone this script
+Export environment variables or edit `~/.contrib-mirror/config`:
 
 ```bash
-git clone https://github.com/yuvrajangadsingh/private-work-contributions-mirror.git
-cd private-work-contributions-mirror
-chmod +x sync.sh
+WORK_DIR="$HOME/work"
+EMAILS="you@company.com"
+REMOTE_PREFIX="git@github.com:your-company/"
+MIRROR_DIR="$HOME/mirror"
+GITHUB_USERNAME="your-github-username"
 ```
 
-### Step 4: Configure
+### 3. Automate (optional)
 
-Create a config file or export environment variables:
-
-```bash
-# Required
-export WORK_DIR="$HOME/work"                          # Directory with your work repos
-export MIRROR_DIR="$HOME/mirror"                      # Mirror repo from Step 2
-export EMAILS="you@company.com,personal@gmail.com"    # Your git email(s)
-
-# Set REMOTE_PREFIX based on how you access repos (run `git remote -v` to check):
-export REMOTE_PREFIX="git@github.com:your-company/"   # SSH users
-# export REMOTE_PREFIX="https://github.com/your-company/"  # HTTPS users
-
-# Optional
-export SINCE="2024-01-01 00:00:00"                    # Start date for sync
-export GITHUB_USERNAME="your-github-username"         # For PR/review/issue tracking
-export GITHUB_TOKEN="ghp_your_token"                  # If using PAT for API access
-```
-
-**Finding your values:**
-
-```bash
-# Find your git email
-git config user.email
-
-# Find your remote prefix (run in any work repo)
-git remote -v | grep origin
-# Output: git@github.com:acme-corp/repo.git
-# Your REMOTE_PREFIX: git@github.com:acme-corp/
-```
-
-### Step 5: Run
-
-```bash
-./sync.sh
-```
-
-First run will take longer (cloning repos). Subsequent runs are fast.
-
----
-
-## Automate (run daily)
-
-### macOS (launchd)
-
+**macOS (launchd):**
 ```bash
 cp com.contrib-mirror.plist.template ~/Library/LaunchAgents/com.contrib-mirror.plist
-
-# Edit paths in the plist
-nano ~/Library/LaunchAgents/com.contrib-mirror.plist
-
-# Load it
+# Edit paths, then:
 launchctl load ~/Library/LaunchAgents/com.contrib-mirror.plist
 ```
 
-### Linux (cron)
-
+**Linux (cron):**
 ```bash
-crontab -e
-
-# Add this line (runs daily at midnight)
-0 0 * * * cd /path/to/private-work-contributions-mirror && ./sync.sh >> logs/sync.log 2>&1
+# Add to crontab -e:
+0 0 * * * /path/to/sync.sh >> /path/to/logs/sync.log 2>&1
 ```
+
+The setup wizard (`contrib-mirror --setup`) handles all of this automatically.
 
 ---
 
