@@ -30,7 +30,16 @@ Before                              After
 |:------------|:----|:------|
 | **Git** | Clone repos, create commits | `git --version` |
 | **Bash** | Run the script | `bash --version` |
-| **SSH access** to private repos | Fetch commits | `ssh -T git@github.com` |
+| **Access to private repos** | Fetch commits (SSH or HTTPS) | See below |
+
+The script works with **both SSH and HTTPS** repo access:
+
+| Method | REMOTE_PREFIX | Check |
+|:-------|:-------------|:------|
+| **SSH** | `git@github.com:your-company/` | `ssh -T git@github.com` |
+| **HTTPS** | `https://github.com/your-company/` | `git ls-remote https://github.com/your-company/any-repo.git` |
+
+Run `git remote -v` in any work repo to see which format you use.
 
 ### Optional (for PR/review/issue tracking)
 
@@ -121,11 +130,15 @@ Create a config file or export environment variables:
 export WORK_DIR="$HOME/work"                          # Directory with your work repos
 export MIRROR_DIR="$HOME/mirror"                      # Mirror repo from Step 2
 export EMAILS="you@company.com,personal@gmail.com"    # Your git email(s)
-export REMOTE_PREFIX="git@github.com:your-company/"   # Only sync repos matching this
+
+# Set REMOTE_PREFIX based on how you access repos (run `git remote -v` to check):
+export REMOTE_PREFIX="git@github.com:your-company/"   # SSH users
+# export REMOTE_PREFIX="https://github.com/your-company/"  # HTTPS users
 
 # Optional
 export SINCE="2024-01-01 00:00:00"                    # Start date for sync
 export GITHUB_USERNAME="your-github-username"         # For PR/review/issue tracking
+export GITHUB_TOKEN="ghp_your_token"                  # If using PAT for API access
 ```
 
 **Finding your values:**
