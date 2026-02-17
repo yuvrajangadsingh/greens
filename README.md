@@ -1,6 +1,6 @@
 # Private Work Contributions Mirror
 
-Mirror commit timestamps from private work repos to your GitHub contribution graph—without exposing any code.
+Mirror commit timestamps (and optionally messages) from private work repos to your GitHub contribution graph—without exposing any code.
 
 ```
 Before                              After
@@ -165,6 +165,7 @@ The setup wizard (`contrib-mirror --setup`) handles all of this automatically.
 | `GITHUB_TOKEN` | No | - | Work account PAT (alternative to multi-account gh CLI) |
 | `GITHUB_ORG` | No | (auto) | GitHub org name (auto-detected from REMOTE_PREFIX) |
 | `ACTIVITY_TYPES` | No | `commits,prs,reviews,issues` | What to track |
+| `COPY_MESSAGES` | No | `0` | Set to `1` to copy commit messages (not just timestamps) |
 | `FORCE` | No | `0` | Set to `1` to bypass daily limit |
 | `LOG_DIR` | No | `./logs` | Where to write logs |
 | `CACHE_DIR` | No | `./.cache` | Where to store bare clones |
@@ -196,7 +197,7 @@ gh search prs --author=YOUR_USERNAME --owner=YOUR_ORG --limit=1
 
 **Q: Is any code exposed?**
 
-No. Only timestamps are mirrored. The mirror repo contains empty commits with no content.
+No. By default, only timestamps are mirrored. The mirror repo contains empty commits with no content. If you enable `COPY_MESSAGES=1`, commit messages will be visible in the public mirror—no code is ever exposed.
 
 **Q: Will this affect my private repos?**
 

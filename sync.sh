@@ -10,7 +10,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 # Source config file if it exists
 # Config uses ${VAR:-value} so env vars always take precedence
@@ -66,6 +66,10 @@ GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 # Types of activity to track (comma-separated: commits,prs,reviews,issues)
 # Set to "commits" only to disable GitHub API integration
 ACTIVITY_TYPES="${ACTIVITY_TYPES:-commits,prs,reviews,issues}"
+
+# Copy commit messages to mirror (0=timestamps only, 1=include messages)
+# WARNING: Messages from private repos may contain sensitive info
+COPY_MESSAGES="${COPY_MESSAGES:-0}"
 
 # Log directory
 LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"
@@ -185,10 +189,61 @@ fetch_github_activity() {
   fi
 }
 
+# Fetch GitHub activity with titles (timestamp<TAB>message format)
+fetch_github_activity_with_messages() {
+  local since_date="$1"
+  local org="$2"
+
+  if ! command -v gh &>/dev/null; then
+    log "WARN: gh CLI not found, skipping GitHub activity fetch"
+    return
+  fi
+
+  if [[ -n "$GITHUB_TOKEN" ]]; then
+    export GITHUB_TOKEN
+  elif [[ -n "$GITHUB_USERNAME" ]]; then
+    local original_account
+    original_account=$(gh auth status --active 2>&1 | grep 'Logged in' | sed 's/.*account //' | awk '{print $1}' || true)
+    if [[ "$original_account" != "$GITHUB_USERNAME" ]]; then
+      gh auth switch --user "$GITHUB_USERNAME" &>/dev/null || true
+    fi
+    trap 'if [[ -n "${original_account:-}" && "${original_account}" != "$GITHUB_USERNAME" ]]; then gh auth switch --user "$original_account" &>/dev/null || true; fi' RETURN
+  fi
+
+  if ! gh auth status &>/dev/null; then
+    log "WARN: gh CLI not authenticated, skipping GitHub activity fetch"
+    return
+  fi
+
+  if [[ "$ACTIVITY_TYPES" == *"prs"* ]]; then
+    gh search prs --author="$GITHUB_USERNAME" --created=">=$since_date" \
+      --owner="$org" --json createdAt,title --jq '.[] | .createdAt + "\t" + "PR: " + .title' 2>/dev/null | \
+      while IFS=$'\t' read -r ts msg; do
+        [[ -n "$ts" ]] && echo "$(iso_to_git_format "$ts")	$msg"
+      done
+  fi
+
+  if [[ "$ACTIVITY_TYPES" == *"reviews"* ]]; then
+    gh search prs --reviewed-by="$GITHUB_USERNAME" --updated=">=$since_date" \
+      --owner="$org" --json updatedAt,title --jq '.[] | .updatedAt + "\t" + "Review: " + .title' 2>/dev/null | \
+      while IFS=$'\t' read -r ts msg; do
+        [[ -n "$ts" ]] && echo "$(iso_to_git_format "$ts")	$msg"
+      done
+  fi
+
+  if [[ "$ACTIVITY_TYPES" == *"issues"* ]]; then
+    gh search issues --author="$GITHUB_USERNAME" --created=">=$since_date" \
+      --owner="$org" --json createdAt,title --jq '.[] | .createdAt + "\t" + "Issue: " + .title' 2>/dev/null | \
+      while IFS=$'\t' read -r ts msg; do
+        [[ -n "$ts" ]] && echo "$(iso_to_git_format "$ts")	$msg"
+      done
+  fi
+}
+
 tmp_pairs="$(mktemp)"
 tmp_sorted="$(mktemp)"
 cleanup() {
-  rm -f "$tmp_pairs" "$tmp_sorted" /tmp/all_timestamps.txt 2>/dev/null || true
+  rm -f "$tmp_pairs" "$tmp_sorted" /tmp/contrib_mirror_*.txt 2>/dev/null || true
   rm -rf "$LOCK_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -293,14 +348,15 @@ fi
 # Collect unique timestamps
 # ─────────────────────────────────────────────────────────────────────────────
 
-tmp_origin="/tmp/origin_timestamps.txt"
-tmp_mirror="/tmp/mirror_timestamps.txt"
-tmp_missing="/tmp/missing_timestamps.txt"
-tmp_all_timestamps="/tmp/all_timestamps.txt"
+tmp_all_data="/tmp/contrib_mirror_all.txt"
+tmp_origin_ts="/tmp/contrib_mirror_origin_ts.txt"
+tmp_mirror_ts="/tmp/contrib_mirror_mirror_ts.txt"
+tmp_missing_ts="/tmp/contrib_mirror_missing_ts.txt"
+tmp_missing_data="/tmp/contrib_mirror_missing_data.txt"
 
-> "$tmp_all_timestamps"
+> "$tmp_all_data"
 
-# Collect git commit timestamps
+# Collect git commits (with or without messages based on COPY_MESSAGES)
 for bare in "$CACHE_DIR"/*.git; do
   [[ -d "$bare" ]] || continue
 
@@ -311,32 +367,60 @@ for bare in "$CACHE_DIR"/*.git; do
   esac
 
   for email in "${EMAIL_ARRAY[@]}"; do
-    git --git-dir="$bare" log --all --since="$SINCE" --author="$email" --format="%ai" 2>/dev/null || true
+    if [[ "$COPY_MESSAGES" == "1" ]]; then
+      git --git-dir="$bare" log --all --since="$SINCE" --author="$email" --format="%ai	%s" 2>/dev/null || true
+    else
+      git --git-dir="$bare" log --all --since="$SINCE" --author="$email" --format="%ai" 2>/dev/null || true
+    fi
   done
-done >> "$tmp_all_timestamps"
+done >> "$tmp_all_data"
 
-# Fetch GitHub activity timestamps (PRs, reviews, issues)
+# Fetch GitHub activity (PRs, reviews, issues)
 if [[ "$ACTIVITY_TYPES" != "commits" ]] && [[ -n "$GITHUB_USERNAME" ]]; then
   since_date="${SINCE%% *}"  # Extract date part only (YYYY-MM-DD)
-  # Extract org from REMOTE_PREFIX if GITHUB_ORG not set
   if [[ -z "$GITHUB_ORG" ]]; then
     GITHUB_ORG="$(echo "$REMOTE_PREFIX" | sed 's/.*github.com[:/]\([^/]*\).*/\1/')"
   fi
   log "Fetching GitHub activity (PRs, reviews, issues) since $since_date..."
-  fetch_github_activity "$since_date" "$GITHUB_ORG" >> "$tmp_all_timestamps"
-  github_count="$(wc -l < "$tmp_all_timestamps" | tr -d " ")"
-  log "Total timestamps (commits + GitHub activity): $github_count"
+
+  if [[ "$COPY_MESSAGES" == "1" ]]; then
+    # Fetch with titles (timestamp<TAB>message format)
+    fetch_github_activity_with_messages "$since_date" "$GITHUB_ORG" >> "$tmp_all_data"
+  else
+    # Fetch timestamps only
+    fetch_github_activity "$since_date" "$GITHUB_ORG" >> "$tmp_all_data"
+  fi
+
+  total_count="$(wc -l < "$tmp_all_data" | tr -d " ")"
+  log "Total entries (commits + GitHub activity): $total_count"
 fi
 
-# Deduplicate and sort
-LC_ALL=C sort -u "$tmp_all_timestamps" > "$tmp_origin"
+# Deduplicate and extract timestamps for comparison
+if [[ "$COPY_MESSAGES" == "1" ]]; then
+  LC_ALL=C sort -t$'\t' -k1,1 -u "$tmp_all_data" > "$tmp_all_data.sorted"
+  mv "$tmp_all_data.sorted" "$tmp_all_data"
+  cut -f1 "$tmp_all_data" | LC_ALL=C sort -u > "$tmp_origin_ts"
+else
+  LC_ALL=C sort -u "$tmp_all_data" > "$tmp_origin_ts"
+fi
 
-git -C "$MIRROR_DIR" log --format="%ai" 2>/dev/null | LC_ALL=C sort -u > "$tmp_mirror"
-comm -23 "$tmp_origin" "$tmp_mirror" > "$tmp_missing"
+git -C "$MIRROR_DIR" log --format="%ai" 2>/dev/null | LC_ALL=C sort -u > "$tmp_mirror_ts"
+comm -23 "$tmp_origin_ts" "$tmp_mirror_ts" > "$tmp_missing_ts"
 
-origin_count="$(wc -l < "$tmp_origin" | tr -d " ")"
-mirror_count="$(wc -l < "$tmp_mirror" | tr -d " ")"
-missing_count="$(wc -l < "$tmp_missing" | tr -d " ")"
+# Build missing data file (with messages if enabled)
+if [[ "$COPY_MESSAGES" == "1" ]]; then
+  > "$tmp_missing_data"
+  while IFS= read -r ts; do
+    [[ -z "$ts" ]] && continue
+    msg="$(grep "^${ts}	" "$tmp_all_data" 2>/dev/null | head -1 | cut -f2-)"
+    [[ -z "$msg" ]] && msg="sync"
+    printf '%s\t%s\n' "$ts" "$msg" >> "$tmp_missing_data"
+  done < "$tmp_missing_ts"
+fi
+
+origin_count="$(wc -l < "$tmp_origin_ts" | tr -d " ")"
+mirror_count="$(wc -l < "$tmp_mirror_ts" | tr -d " ")"
+missing_count="$(wc -l < "$tmp_missing_ts" | tr -d " ")"
 
 log "Origin timestamps: $origin_count"
 log "Mirror timestamps: $mirror_count"
@@ -349,10 +433,18 @@ log "Missing (to sync): $missing_count"
 if [[ "$missing_count" -gt 0 ]]; then
   log "Adding $missing_count commits to mirror..."
   cd "$MIRROR_DIR"
-  while IFS= read -r ts; do
-    [[ -z "$ts" ]] && continue
-    GIT_AUTHOR_DATE="$ts" GIT_COMMITTER_DATE="$ts" git commit --allow-empty -m "sync" --quiet
-  done < "$tmp_missing"
+  if [[ "$COPY_MESSAGES" == "1" ]]; then
+    while IFS=$'\t' read -r ts msg; do
+      [[ -z "$ts" ]] && continue
+      [[ -z "$msg" ]] && msg="sync"
+      GIT_AUTHOR_DATE="$ts" GIT_COMMITTER_DATE="$ts" git commit --allow-empty -m "$msg" --quiet
+    done < "$tmp_missing_data"
+  else
+    while IFS= read -r ts; do
+      [[ -z "$ts" ]] && continue
+      GIT_AUTHOR_DATE="$ts" GIT_COMMITTER_DATE="$ts" git commit --allow-empty -m "sync" --quiet
+    done < "$tmp_missing_ts"
+  fi
   log "Mirror commits added."
 else
   log "Mirror already up to date."
@@ -427,10 +519,13 @@ done | sort -u > "$tmp_dates"
 total_active_days="$(wc -l < "$tmp_dates" | tr -d " ")"
 repo_count="$(echo "$sorted_repos" | grep -c '|' || echo 0)"
 
+mirror_mode="timestamps only"
+[[ "$COPY_MESSAGES" == "1" ]] && mirror_mode="timestamps + messages"
+
 cat > "$STATUS_FILE" << EOF
 # Work Contributions Mirror
 
-This repository mirrors commit timestamps from private work repositories to maintain GitHub contribution visibility.
+This repository mirrors commit ${mirror_mode} from private work repositories to maintain GitHub contribution visibility.
 
 ---
 

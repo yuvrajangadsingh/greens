@@ -149,6 +149,18 @@ else
   activity_types="commits"
 fi
 
+echo ""
+info "By default, mirror commits contain only timestamps (no code or messages)."
+printf "  Also copy commit messages to mirror? [y/N]: " >&2
+read -r copy_msgs_reply
+if [[ "$copy_msgs_reply" =~ ^[Yy] ]]; then
+  copy_messages="1"
+  warn "Commit messages from private repos will be visible in the public mirror."
+else
+  copy_messages="0"
+  ok "Timestamps only (no message content exposed)"
+fi
+
 # Mirror repo setup
 mirror_dir="${MIRROR_DIR:-$CONFIG_DIR/mirror}"
 echo ""
@@ -185,6 +197,7 @@ REMOTE_PREFIX="\${REMOTE_PREFIX:-$remote_prefix}"
 MIRROR_DIR="\${MIRROR_DIR:-$mirror_dir}"
 GITHUB_USERNAME="\${GITHUB_USERNAME:-$github_username}"
 ACTIVITY_TYPES="\${ACTIVITY_TYPES:-$activity_types}"
+COPY_MESSAGES="\${COPY_MESSAGES:-$copy_messages}"
 SINCE="\${SINCE:-$since}"
 EOF
 
