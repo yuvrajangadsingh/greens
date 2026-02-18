@@ -199,6 +199,7 @@ GITHUB_USERNAME="\${GITHUB_USERNAME:-$github_username}"
 ACTIVITY_TYPES="\${ACTIVITY_TYPES:-$activity_types}"
 COPY_MESSAGES="\${COPY_MESSAGES:-$copy_messages}"
 SINCE="\${SINCE:-$since}"
+SYNC_HOUR="\${SYNC_HOUR:-$sync_hour}"
 EOF
 
 echo ""
@@ -216,6 +217,17 @@ echo "  3) Skip"
 printf "  Choice [1]: " >&2
 read -r sched_choice
 sched_choice="${sched_choice:-1}"
+
+sync_hour="0"
+if [[ "$sched_choice" == "1" || "$sched_choice" == "2" ]]; then
+  default_sync_hour="${SYNC_HOUR:-0}"
+  sync_hour="$(prompt "What hour to run daily sync? (0-23, 0=midnight)" "$default_sync_hour")"
+  # Validate
+  if ! [[ "$sync_hour" =~ ^[0-9]+$ ]] || [[ "$sync_hour" -gt 23 ]]; then
+    warn "Invalid hour '$sync_hour', defaulting to 0 (midnight)"
+    sync_hour="0"
+  fi
+fi
 
 sync_path="$SCRIPT_DIR/sync.sh"
 
@@ -241,7 +253,7 @@ case "$sched_choice" in
     <key>StartCalendarInterval</key>
     <dict>
       <key>Hour</key>
-      <integer>0</integer>
+      <integer>$sync_hour</integer>
       <key>Minute</key>
       <integer>0</integer>
     </dict>
@@ -263,13 +275,13 @@ PLIST
     # Load the agent
     launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
     launchctl bootstrap "gui/$(id -u)" "$plist"
-    ok "Daily sync scheduled via launchd (midnight)"
+    ok "Daily sync scheduled via launchd (${sync_hour}:00)"
     ;;
   2)
-    cron_line="0 0 * * * /bin/bash $sync_path >> $CONFIG_DIR/logs/sync.log 2>&1"
+    cron_line="0 $sync_hour * * * /bin/bash $sync_path >> $CONFIG_DIR/logs/sync.log 2>&1"
     mkdir -p "$CONFIG_DIR/logs"
     (crontab -l 2>/dev/null | grep -v "$sync_path"; echo "$cron_line") | crontab -
-    ok "Daily sync scheduled via cron (midnight)"
+    ok "Daily sync scheduled via cron (${sync_hour}:00)"
     ;;
   *)
     info "Skipped. Run manually: contrib-mirror"

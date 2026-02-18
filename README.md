@@ -166,6 +166,7 @@ The setup wizard (`contrib-mirror --setup`) handles all of this automatically.
 | `GITHUB_ORG` | No | (auto) | GitHub org name (auto-detected from REMOTE_PREFIX) |
 | `ACTIVITY_TYPES` | No | `commits,prs,reviews,issues` | What to track |
 | `COPY_MESSAGES` | No | `0` | Set to `1` to copy commit messages (not just timestamps) |
+| `SYNC_HOUR` | No | `0` | Hour to run daily sync (0-23, 0=midnight) |
 | `FORCE` | No | `0` | Set to `1` to bypass daily limit |
 | `LOG_DIR` | No | `./logs` | Where to write logs |
 | `CACHE_DIR` | No | `./.cache` | Where to store bare clones |
