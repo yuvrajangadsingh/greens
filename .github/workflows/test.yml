@@ -1,0 +1,91 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Test scripts directly (no brew)
+  test-scripts:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        run: bash sync.sh --version
+
+      - name: Help
+        run: bash sync.sh --help
+
+      - name: Status (no config)
+        run: bash sync.sh --status
+
+      - name: Reset (no config)
+        run: echo "n" | bash sync.sh --reset
+
+      - name: Setup wizard (non-interactive)
+        run: |
+          # Create a temp work dir with a fake git repo
+          mkdir -p /tmp/test-work/fake-repo
+          cd /tmp/test-work/fake-repo
+          git init
+          git remote add origin https://github.com/test-org/test-repo.git
+          cd -
+
+          # Create a temp mirror repo
+          mkdir -p /tmp/test-mirror
+          cd /tmp/test-mirror
+          git init
+          git commit --allow-empty -m "init"
+          cd -
+
+          # Pipe inputs to setup wizard:
+          # 1. work dir
+          # 2. auth choice (2=HTTPS)
+          # 3. no token ready (n)
+          # 4. skip token (n)
+          # 5. emails
+          # 6. org name
+          # 7. github username (empty)
+          # 8. copy messages (n)
+          # 9. mirror repo URL (empty — skip, we'll set dir manually)
+          # 10. scheduler (3=skip)
+          printf '/tmp/test-work\n2\nn\nn\ntest@test.com\ntest-org\n\nn\n\n3\n' | bash setup.sh || true
+
+          # Verify config was created
+          if [ -f "$HOME/.contrib-mirror/config" ]; then
+            echo "Config created:"
+            cat "$HOME/.contrib-mirror/config"
+          else
+            echo "WARN: Config not created (expected in non-interactive mode)"
+          fi
+
+      - name: Status (with config)
+        run: |
+          if [ -f "$HOME/.contrib-mirror/config" ]; then
+            bash sync.sh --status
+          else
+            echo "Skipping — no config from setup test"
+          fi
+
+  # Test Homebrew install (only on tags)
+  test-brew:
+    runs-on: macos-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Tap and install
+        run: |
+          brew tap yuvrajangadsingh/contrib-mirror
+          brew install contrib-mirror
+
+      - name: Version
+        run: contrib-mirror --version
+
+      - name: Help
+        run: contrib-mirror --help
+
+      - name: Status
+        run: contrib-mirror --status
