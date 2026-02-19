@@ -599,19 +599,38 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
           printf "  Paste token (hidden): " >&2
           read -rs mirror_token
           echo "" >&2
-          if [[ -n "$mirror_token" ]]; then
-            # Embed token in remote URL: https://TOKEN@github.com/user/repo.git
-            authed_url="$(echo "$mirror_url" | sed "s|https://|https://${mirror_token}@|")"
-            git -C "$mirror_dir" remote set-url origin "$authed_url"
-            if git -C "$mirror_dir" push origin HEAD 2>/dev/null; then
-              ok "Push access works now"
-            else
-              warn "Still can't push. Check that the token has repo scope and the repo exists."
-            fi
+        else
+          echo ""
+          info "No worries — here's how to create one:"
+          echo ""
+          info "  1. Go to: https://github.com/settings/tokens/new"
+          info "     (Make sure you're logged into your PERSONAL GitHub, not work)"
+          info "  2. Note: contrib-mirror-push"
+          info "  3. Expiration: 90 days (or custom)"
+          info "  4. Select scopes:"
+          info "     [x] repo"
+          info "  5. Click 'Generate token' and copy it"
+          echo ""
+          if confirm "Ready to paste the token?"; then
+            printf "  Paste token (hidden): " >&2
+            read -rs mirror_token
+            echo "" >&2
+          else
+            mirror_token=""
+          fi
+        fi
+        if [[ -n "${mirror_token:-}" ]]; then
+          # Embed token in remote URL: https://TOKEN@github.com/user/repo.git
+          authed_url="$(echo "$mirror_url" | sed "s|https://|https://${mirror_token}@|")"
+          git -C "$mirror_dir" remote set-url origin "$authed_url"
+          if git -C "$mirror_dir" push origin HEAD 2>/dev/null; then
+            ok "Push access works now"
+          else
+            warn "Still can't push. Check that the token has repo scope and the repo exists on GitHub."
           fi
         else
-          info "You can fix this later by running:"
-          info "  git -C $mirror_dir remote set-url origin https://<token>@github.com/<user>/<repo>.git"
+          warn "Skipping — your sync will run but commits won't push to GitHub."
+          info "Fix later: contrib-mirror --setup"
         fi
       else
         info "Check that your SSH key has access to push to this repo."
