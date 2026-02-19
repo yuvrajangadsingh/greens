@@ -10,7 +10,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.3.0"
+VERSION="1.3.1"
 
 # Source config file if it exists
 # Config uses ${VAR:-value} so env vars always take precedence
@@ -269,9 +269,9 @@ if [[ "${FORCE:-0}" != "1" ]] && [[ -f "$SUCCESS_STAMP_FILE" ]]; then
 fi
 
 log "Starting contribution mirror sync"
-log "WORK_DIR=$WORK_DIR"
-log "MIRROR_DIR=$MIRROR_DIR"
-log "SINCE=$SINCE"
+log ""
+log "Step 1/5: Finding work repos in $WORK_DIR"
+log "  (Looking for git repos that match your org: $REMOTE_PREFIX)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Discover repos
@@ -310,6 +310,10 @@ LC_ALL=C sort -u "$tmp_pairs" > "$tmp_sorted"
 # ─────────────────────────────────────────────────────────────────────────────
 # Fetch into bare caches (safe for local WIP)
 # ─────────────────────────────────────────────────────────────────────────────
+
+repo_total="$(wc -l < "$tmp_sorted" | tr -d " ")"
+log ""
+log "Step 2/5: Caching $repo_total repos (read-only copies — your code stays untouched)"
 
 failures=0
 fetched_ok=0
@@ -362,6 +366,9 @@ tmp_missing_ts="/tmp/contrib_mirror_missing_ts.txt"
 tmp_missing_data="/tmp/contrib_mirror_missing_data.txt"
 
 > "$tmp_all_data"
+
+log ""
+log "Step 3/5: Scanning commit history for your work (emails: $EMAILS)"
 
 # Collect git commits (with or without messages based on COPY_MESSAGES)
 for bare in "$CACHE_DIR"/*.git; do
@@ -437,8 +444,11 @@ log "Missing (to sync): $missing_count"
 # Add missing commits to mirror
 # ─────────────────────────────────────────────────────────────────────────────
 
+log ""
+log "Step 4/5: Creating mirror commits (these show up as green squares on GitHub)"
+
 if [[ "$missing_count" -gt 0 ]]; then
-  log "Adding $missing_count commits to mirror..."
+  log "Adding $missing_count new commits to mirror..."
   cd "$MIRROR_DIR"
   if [[ "$COPY_MESSAGES" == "1" ]]; then
     while IFS=$'\t' read -r ts msg; do
@@ -582,9 +592,22 @@ fi
 # Push
 # ─────────────────────────────────────────────────────────────────────────────
 
-log "Pushing mirror..."
-git push origin main >/dev/null 2>&1 || git push origin master >/dev/null 2>&1
-log "Mirror pushed."
+log ""
+log "Step 5/5: Pushing to GitHub (making your contribution graph green)"
+
+push_output=""
+if push_output="$(git push origin main 2>&1)"; then
+  log "Mirror pushed."
+elif push_output="$(git push origin master 2>&1)"; then
+  log "Mirror pushed."
+else
+  log "ERROR: Push to mirror repo failed."
+  log "$push_output"
+  log ""
+  log "Your commits were created locally but won't show on GitHub until push works."
+  log "Fix: re-run 'contrib-mirror --setup' to reconfigure push access,"
+  log "  or manually: git -C \"$MIRROR_DIR\" remote set-url origin https://<token>@github.com/<user>/<repo>.git"
+fi
 
 log "Mirror tip: $(git -C "$MIRROR_DIR" log -1 --format='%h %ai %s')"
 echo "$today" > "$SUCCESS_STAMP_FILE"

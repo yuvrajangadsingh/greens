@@ -536,7 +536,8 @@ fi
 mirror_dir="${MIRROR_DIR:-$CONFIG_DIR/mirror}"
 echo ""
 info "The mirror repo is where your contribution dots appear on GitHub."
-info "It needs to be a public repo (so GitHub counts the commits)."
+info "It can be public or private. If private, enable 'Private contributions'"
+info "in GitHub Settings > Profile so the green squares show on your profile."
 echo ""
 if [[ ! -d "$mirror_dir/.git" ]]; then
   # Offer to create via gh if available
@@ -576,6 +577,46 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
       git -C "$mirror_dir" commit --allow-empty -m "init" --quiet
     }
     ok "Mirror repo ready at $mirror_dir"
+
+    # Test push access
+    echo ""
+    info "Testing push access to mirror repo..."
+    if git -C "$mirror_dir" push origin HEAD 2>/dev/null; then
+      ok "Push access works"
+    else
+      warn "Can't push to mirror repo. Commits will be created locally but won't appear on GitHub."
+      echo ""
+      if [[ "$mirror_url" == https://* ]]; then
+        info "HTTPS repos need authentication to push. Options:"
+        echo ""
+        info "  Option 1: Embed a Personal Access Token in the URL"
+        info "  ─────────────────────────────────────────────────"
+        info "  Create a PAT on your PERSONAL GitHub account (not work):"
+        info "    https://github.com/settings/tokens/new"
+        info "    Scope: [x] repo"
+        echo ""
+        if confirm "Do you have a personal GitHub token for push access?"; then
+          printf "  Paste token (hidden): " >&2
+          read -rs mirror_token
+          echo "" >&2
+          if [[ -n "$mirror_token" ]]; then
+            # Embed token in remote URL: https://TOKEN@github.com/user/repo.git
+            authed_url="$(echo "$mirror_url" | sed "s|https://|https://${mirror_token}@|")"
+            git -C "$mirror_dir" remote set-url origin "$authed_url"
+            if git -C "$mirror_dir" push origin HEAD 2>/dev/null; then
+              ok "Push access works now"
+            else
+              warn "Still can't push. Check that the token has repo scope and the repo exists."
+            fi
+          fi
+        else
+          info "You can fix this later by running:"
+          info "  git -C $mirror_dir remote set-url origin https://<token>@github.com/<user>/<repo>.git"
+        fi
+      else
+        info "Check that your SSH key has access to push to this repo."
+      fi
+    fi
   fi
 else
   ok "Mirror repo already exists at $mirror_dir"
