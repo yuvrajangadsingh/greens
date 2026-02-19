@@ -274,15 +274,14 @@ guide_auth_setup() {
     info "For cloning work repos, make sure you have a credential helper:"
     info "  Check: git config credential.helper"
     echo ""
-    if [[ -n "$github_username" ]]; then
-      info "For GitHub API (PR/review tracking), you'll need a Personal Access Token."
-      echo ""
-      prompt_for_token
-    fi
+    info "For GitHub API (PR/review tracking), you'll need a Personal Access Token."
+    echo ""
+    prompt_for_token
 
   else
-    info "Couldn't detect auth method (no repos found yet). That's fine —"
-    info "the sync script supports both SSH and HTTPS repos."
+    info "Auth method not determined. You can set up auth later."
+    info "  SSH:   ssh-keygen + add key to GitHub"
+    info "  HTTPS: gh auth login  OR  set up a PAT"
   fi
 
   echo ""
@@ -352,6 +351,14 @@ detect_github_username() {
   fi
 }
 
+detect_org_name() {
+  local work_dir="$1"
+  [[ -d "$work_dir" ]] || return 0
+  find "$work_dir" -maxdepth 3 -name .git -print 2>/dev/null | while read -r gitpath; do
+    git -C "$(dirname "$gitpath")" remote get-url origin 2>/dev/null || true
+  done | sed -n 's|.*github\.com[:/]\([^/]*\)/.*|\1|p' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}'
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
@@ -359,6 +366,9 @@ detect_github_username() {
 echo ""
 echo "Private Work Contributions Mirror - Setup"
 echo "=========================================="
+echo ""
+echo "  This tool mirrors your private work commit activity to a public"
+echo "  GitHub repo, so your contribution graph reflects all your work."
 
 # Check prerequisites first
 check_prerequisites
@@ -370,20 +380,16 @@ if [[ -f "$CONFIG_FILE" ]]; then
   echo ""
 fi
 
-# Detect values
+# ── Step 1: Work directory ──────────────────────────────────────────────────
+
 info "Scanning for git repos..."
 detected_work_dir="$(detect_work_dir)"
 detected_emails="$(detect_emails)"
-detected_prefix=""
-if [[ -n "$detected_work_dir" ]]; then
-  detected_prefix="$(detect_remote_prefix "$detected_work_dir")"
-fi
 detected_username="$(detect_github_username)"
 
 # Use existing config values as fallback, then detected, then empty
 default_work_dir="${WORK_DIR:-${detected_work_dir:-}}"
 default_emails="${EMAILS:-${detected_emails:-}}"
-default_prefix="${REMOTE_PREFIX:-${detected_prefix:-}}"
 default_username="${GITHUB_USERNAME:-${detected_username:-}}"
 default_since="${SINCE:-2024-01-01 00:00:00}"
 
@@ -392,8 +398,8 @@ default_work_dir="${default_work_dir%/}"
 
 echo ""
 if [[ -z "$default_work_dir" ]]; then
-  info "No work repos directory detected automatically."
-  info "This should be the parent folder containing your work git repos."
+  info "Where are your work git repositories?"
+  info "This should be the parent folder containing your work repos."
   info ""
   info "  Example structure:"
   info "    ~/work/"
@@ -403,6 +409,12 @@ if [[ -z "$default_work_dir" ]]; then
   echo ""
 fi
 work_dir="$(prompt "Work repos directory" "$default_work_dir")"
+
+# Resolve to absolute path
+work_dir="${work_dir/#\~/$HOME}"
+if [[ -n "$work_dir" && "$work_dir" != /* ]]; then
+  work_dir="$(cd "$work_dir" 2>/dev/null && pwd || echo "$(pwd)/$work_dir")"
+fi
 work_dir="${work_dir%/}"
 
 if [[ -n "$work_dir" ]] && [[ ! -d "$work_dir" ]]; then
@@ -414,15 +426,88 @@ if [[ -n "$work_dir" ]] && [[ ! -d "$work_dir" ]]; then
   fi
 fi
 
-# Detect auth method and guide user
-DETECTED_TOKEN=""
+# Show found repos
+repo_count=0
 if [[ -d "$work_dir" ]]; then
+  while IFS= read -r _gitpath; do
+    ((repo_count++)) || true
+  done < <(find "$work_dir" -maxdepth 2 -name .git -print 2>/dev/null)
+
+  if [[ "$repo_count" -gt 0 ]]; then
+    echo ""
+    ok "Found $repo_count git repo(s) in $work_dir/"
+    _shown=0
+    while IFS= read -r _g; do
+      info "  ├── $(basename "$(dirname "$_g")")"
+      ((_shown++)) || true
+      [[ "$_shown" -ge 5 ]] && break
+    done < <(find "$work_dir" -maxdepth 2 -name .git -print 2>/dev/null)
+    if [[ "$repo_count" -gt 5 ]]; then
+      info "  └── ... and $((repo_count - 5)) more"
+    fi
+  else
+    echo ""
+    warn "No git repos found in $work_dir/ yet"
+    info "Clone your work repos there, then run: contrib-mirror"
+  fi
+fi
+
+# ── Step 2: Auth & org detection ────────────────────────────────────────────
+
+auth_method="unknown"
+detected_org=""
+if [[ -d "$work_dir" ]] && [[ "$repo_count" -gt 0 ]]; then
   auth_method="$(detect_auth_method "$work_dir")"
+  detected_org="$(detect_org_name "$work_dir")"
+fi
+
+# If we couldn't detect auth method, ask
+if [[ "$auth_method" == "unknown" ]]; then
+  echo ""
+  echo "  How do you access work repos on GitHub?"
+  echo "    1) SSH   (git@github.com:org/repo.git)"
+  echo "    2) HTTPS (https://github.com/org/repo.git)"
+  echo "    3) Not sure yet — skip"
+  printf "  Choice [1]: " >&2
+  read -r auth_choice
+  auth_choice="${auth_choice:-1}"
+  case "$auth_choice" in
+    2) auth_method="https" ;;
+    3) auth_method="unknown" ;;
+    *) auth_method="ssh" ;;
+  esac
+fi
+
+if [[ "$auth_method" != "unknown" ]]; then
+  echo ""
+  info "Using $(echo "$auth_method" | tr '[:lower:]' '[:upper:]') for GitHub access"
+fi
+
+# Auth guidance
+DETECTED_TOKEN=""
+if [[ "$auth_method" != "unknown" ]]; then
   guide_auth_setup "$auth_method" "${default_username:-}"
 fi
 
-emails="$(prompt "Git author emails (comma-separated)" "$default_emails")"
-remote_prefix="$(prompt "Remote URL prefix (e.g. git@github.com:YourOrg/)" "$default_prefix")"
+# ── Step 3: User inputs ────────────────────────────────────────────────────
+
+emails="$(prompt "Git author email(s) for work commits (comma-separated)" "$default_emails")"
+
+# Ask for org name, construct remote prefix automatically
+echo ""
+org_name="$(prompt "Work GitHub org/owner name" "${detected_org:-}")"
+if [[ -n "$org_name" ]]; then
+  if [[ "$auth_method" == "ssh" ]]; then
+    remote_prefix="git@github.com:${org_name}/"
+  else
+    remote_prefix="https://github.com/${org_name}/"
+  fi
+  ok "Remote prefix: $remote_prefix"
+else
+  # Fallback for users who don't use GitHub or have unusual setups
+  remote_prefix="$(prompt "Remote URL prefix (e.g. git@github.com:YourOrg/)" "")"
+fi
+
 github_username="$(prompt "GitHub username (for PR/review/issue tracking)" "$default_username")"
 since="$(prompt "Mirror commits since" "$default_since")"
 
@@ -444,13 +529,42 @@ else
   ok "Timestamps only (no message content exposed)"
 fi
 
-# Mirror repo setup
+# ── Step 4: Mirror repo ────────────────────────────────────────────────────
+
 mirror_dir="${MIRROR_DIR:-$CONFIG_DIR/mirror}"
 echo ""
-info "Mirror repo will be at: $mirror_dir"
+info "The mirror repo is where your contribution dots appear on GitHub."
+info "It needs to be a public repo (so GitHub counts the commits)."
+echo ""
 if [[ ! -d "$mirror_dir/.git" ]]; then
-  mirror_url="$(prompt "Mirror repo URL (create an empty repo on GitHub first)" "")"
-  if [[ -n "$mirror_url" ]]; then
+  # Offer to create via gh if available
+  if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+    if confirm "Create a new public mirror repo on GitHub?"; then
+      mirror_repo_name="$(prompt "Repo name" "work-contributions-mirror")"
+      gh_user="$(gh api user -q .login 2>/dev/null || echo "")"
+      if [[ -n "$gh_user" ]]; then
+        info "Creating github.com/$gh_user/$mirror_repo_name ..."
+      fi
+      if gh repo create "$mirror_repo_name" --public --description "Mirror of private work contributions" 2>/dev/null; then
+        ok "Created repo on GitHub"
+        # Get clone URL matching auth method
+        if [[ "$auth_method" == "ssh" ]]; then
+          mirror_url="$(gh repo view "$mirror_repo_name" --json sshUrl -q .sshUrl 2>/dev/null)"
+        else
+          mirror_url="$(gh repo view "$mirror_repo_name" --json url -q .url 2>/dev/null)"
+        fi
+      else
+        warn "Couldn't create repo. Create it manually on GitHub."
+        mirror_url="$(prompt "Mirror repo URL" "")"
+      fi
+    else
+      mirror_url="$(prompt "Mirror repo URL (create an empty public repo on GitHub first)" "")"
+    fi
+  else
+    mirror_url="$(prompt "Mirror repo URL (create an empty public repo on GitHub first)" "")"
+  fi
+
+  if [[ -n "${mirror_url:-}" ]]; then
     info "Cloning mirror repo..."
     git clone "$mirror_url" "$mirror_dir" 2>/dev/null || {
       info "Initializing new mirror repo..."
@@ -459,10 +573,10 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
       git -C "$mirror_dir" remote add origin "$mirror_url"
       git -C "$mirror_dir" commit --allow-empty -m "init" --quiet
     }
-    ok "Mirror repo ready"
+    ok "Mirror repo ready at $mirror_dir"
   fi
 else
-  ok "Mirror repo already exists"
+  ok "Mirror repo already exists at $mirror_dir"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

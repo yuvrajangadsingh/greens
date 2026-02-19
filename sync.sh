@@ -10,7 +10,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.2.2"
+VERSION="1.3.0"
 
 # Source config file if it exists
 # Config uses ${VAR:-value} so env vars always take precedence
@@ -27,6 +27,13 @@ case "${1:-}" in
              exit 0 ;;
   --version) echo "contrib-mirror $VERSION"; exit 0 ;;
 esac
+
+# Auto-run setup on first use
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo "No config found. Starting setup wizard..."
+  echo ""
+  exec "$SCRIPT_DIR/setup.sh"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration (override via environment or edit below)
