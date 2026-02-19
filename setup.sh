@@ -114,7 +114,7 @@ check_prerequisites() {
 
 detect_auth_method() {
   local work_dir="$1"
-  [[ -d "$work_dir" ]] || return
+  [[ -d "$work_dir" ]] || { echo "unknown"; return 0; }
 
   local ssh_count=0 https_count=0
   while IFS= read -r gitpath; do
@@ -306,7 +306,7 @@ detect_work_dir() {
       fi
     done
   done
-  [[ -n "$best" ]] && echo "$best"
+  echo "${best:-}"
 }
 
 detect_emails() {
@@ -338,7 +338,7 @@ detect_emails() {
 
 detect_remote_prefix() {
   local work_dir="$1"
-  [[ -d "$work_dir" ]] || return
+  [[ -d "$work_dir" ]] || return 0
 
   # Collect origin URLs, extract org prefix, find most common
   find "$work_dir" -maxdepth 3 -name .git -print 2>/dev/null | while read -r gitpath; do
@@ -391,8 +391,28 @@ default_since="${SINCE:-2024-01-01 00:00:00}"
 default_work_dir="${default_work_dir%/}"
 
 echo ""
+if [[ -z "$default_work_dir" ]]; then
+  info "No work repos directory detected automatically."
+  info "This should be the parent folder containing your work git repos."
+  info ""
+  info "  Example structure:"
+  info "    ~/work/"
+  info "      ├── backend-api/      (.git)"
+  info "      ├── auth-service/     (.git)"
+  info "      └── data-pipeline/    (.git)"
+  echo ""
+fi
 work_dir="$(prompt "Work repos directory" "$default_work_dir")"
 work_dir="${work_dir%/}"
+
+if [[ -n "$work_dir" ]] && [[ ! -d "$work_dir" ]]; then
+  warn "Directory '$work_dir' doesn't exist yet."
+  if confirm "Create it now?"; then
+    mkdir -p "$work_dir"
+    ok "Created $work_dir"
+    info "Clone your work repos into this directory, then run: contrib-mirror"
+  fi
+fi
 
 # Detect auth method and guide user
 DETECTED_TOKEN=""

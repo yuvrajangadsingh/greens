@@ -10,7 +10,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.1.0"
+VERSION="1.2.1"
 
 # Source config file if it exists
 # Config uses ${VAR:-value} so env vars always take precedence
@@ -39,7 +39,7 @@ WORK_DIR="${WORK_DIR:-$HOME/work}"
 CACHE_DIR="${CACHE_DIR:-$SCRIPT_DIR/.cache}"
 
 # Your public mirror repo (create this on GitHub first)
-MIRROR_DIR="${MIRROR_DIR:-$SCRIPT_DIR/mirror}"
+MIRROR_DIR="${MIRROR_DIR:-$HOME/.contrib-mirror/mirror}"
 
 # Only sync commits after this date
 SINCE="${SINCE:-2024-01-01 00:00:00}"
