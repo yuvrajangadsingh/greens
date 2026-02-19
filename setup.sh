@@ -33,6 +33,260 @@ confirm() {
 info()  { echo "  $*" >&2; }
 ok()    { echo "  [ok] $*" >&2; }
 warn()  { echo "  [!] $*" >&2; }
+fail()  { echo "  [✗] $*" >&2; }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Prerequisites check
+# ─────────────────────────────────────────────────────────────────────────────
+
+check_prerequisites() {
+  echo ""
+  echo "Checking prerequisites..."
+  echo ""
+  local has_errors=0
+
+  # Git
+  if command -v git &>/dev/null; then
+    ok "git $(git --version | awk '{print $3}')"
+  else
+    fail "git not found"
+    info "  Install: https://git-scm.com/downloads"
+    info "  macOS:   xcode-select --install"
+    info "  Ubuntu:  sudo apt install git"
+    has_errors=1
+  fi
+
+  # Bash version
+  local bash_ver="${BASH_VERSION%%(*}"
+  if [[ "${bash_ver%%.*}" -ge 4 ]]; then
+    ok "bash $bash_ver"
+  else
+    warn "bash $bash_ver (version 4+ recommended)"
+    info "  macOS ships bash 3.x. Install newer: brew install bash"
+  fi
+
+  # SSH key
+  local has_ssh_key=0
+  if [[ -f "$HOME/.ssh/id_ed25519.pub" ]] || [[ -f "$HOME/.ssh/id_rsa.pub" ]]; then
+    ok "SSH key found"
+    has_ssh_key=1
+  else
+    warn "No SSH key found (needed if your repos use SSH remotes)"
+    info "  Generate one: ssh-keygen -t ed25519 -C \"your@email.com\""
+    info "  Then add to GitHub: https://github.com/settings/keys"
+  fi
+
+  # SSH access to GitHub
+  if [[ "$has_ssh_key" == "1" ]]; then
+    if ssh -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
+      ok "SSH access to GitHub works"
+    else
+      warn "SSH to github.com didn't confirm auth (may still work with HTTPS repos)"
+    fi
+  fi
+
+  # gh CLI (optional)
+  if command -v gh &>/dev/null; then
+    ok "gh CLI $(gh --version | head -1 | awk '{print $3}')"
+    if gh auth status &>/dev/null 2>&1; then
+      ok "gh CLI authenticated"
+    else
+      warn "gh CLI installed but not logged in"
+      info "  Run: gh auth login"
+    fi
+  else
+    warn "gh CLI not found (optional — needed for PR/review/issue tracking)"
+    info "  Install: brew install gh  OR  https://cli.github.com/"
+  fi
+
+  echo ""
+
+  if [[ "$has_errors" == "1" ]]; then
+    echo "  Fix the issues above and re-run setup."
+    echo ""
+    exit 1
+  fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Auth detection & guidance
+# ─────────────────────────────────────────────────────────────────────────────
+
+detect_auth_method() {
+  local work_dir="$1"
+  [[ -d "$work_dir" ]] || return
+
+  local ssh_count=0 https_count=0
+  while IFS= read -r gitpath; do
+    local url
+    url="$(git -C "$(dirname "$gitpath")" remote get-url origin 2>/dev/null || true)"
+    if [[ "$url" == git@* ]] || [[ "$url" == ssh://* ]]; then
+      ((ssh_count++)) || true
+    elif [[ "$url" == https://* ]]; then
+      ((https_count++)) || true
+    fi
+  done < <(find "$work_dir" -maxdepth 3 -name .git -print 2>/dev/null)
+
+  if [[ "$ssh_count" -gt "$https_count" ]]; then
+    echo "ssh"
+  elif [[ "$https_count" -gt 0 ]]; then
+    echo "https"
+  else
+    echo "unknown"
+  fi
+}
+
+show_token_guide() {
+  echo ""
+  echo "  How to create a GitHub Personal Access Token"
+  echo "  ─────────────────────────────────────────────"
+  echo ""
+  echo "  Option 1: Fine-grained token (recommended)"
+  echo "  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+  echo "  1. Go to: https://github.com/settings/personal-access-tokens/new"
+  echo "  2. Token name: contrib-mirror"
+  echo "  3. Expiration: 90 days (or custom)"
+  echo "  4. Resource owner: Select your work org"
+  echo "  5. Repository access: All repositories"
+  echo "  6. Permissions → Repository permissions:"
+  echo "     • Commit statuses  → Read-only"
+  echo "     • Contents         → Read-only"
+  echo "     • Issues           → Read-only"
+  echo "     • Metadata         → Read-only (auto-selected)"
+  echo "     • Pull requests    → Read-only"
+  echo "  7. Click 'Generate token' and copy it"
+  echo ""
+  echo "  Option 2: Classic token (simpler, broader access)"
+  echo "  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+  echo "  1. Go to: https://github.com/settings/tokens/new"
+  echo "  2. Note: contrib-mirror"
+  echo "  3. Expiration: 90 days (or custom)"
+  echo "  4. Select scopes:"
+  echo "     • [x] repo (full control — includes private repo read)"
+  echo "  5. Click 'Generate token' and copy it"
+  echo ""
+  echo "  Either token type works. Fine-grained is more secure (least privilege)."
+  echo ""
+}
+
+prompt_for_token() {
+  if confirm "Do you have a GitHub PAT ready?"; then
+    local token
+    printf "  Paste your token (hidden): " >&2
+    read -rs token
+    echo "" >&2
+    if [[ -n "$token" ]]; then
+      # Quick validation — check token format
+      if [[ "$token" == ghp_* ]] || [[ "$token" == github_pat_* ]]; then
+        DETECTED_TOKEN="$token"
+        ok "Token saved (will be written to config)"
+      else
+        warn "Token doesn't look like a GitHub PAT (expected ghp_... or github_pat_...)"
+        if confirm "  Save it anyway?"; then
+          DETECTED_TOKEN="$token"
+          ok "Token saved"
+        fi
+      fi
+    fi
+  else
+    echo ""
+    info "No worries — here's how to create one:"
+    show_token_guide
+    if confirm "Want to enter a token now?"; then
+      local token
+      printf "  Paste your token (hidden): " >&2
+      read -rs token
+      echo "" >&2
+      if [[ -n "$token" ]]; then
+        DETECTED_TOKEN="$token"
+        ok "Token saved (will be written to config)"
+      fi
+    else
+      warn "Skipping — PR/review/issue tracking won't work without a token."
+      info "  You can add it later: contrib-mirror --setup"
+    fi
+  fi
+}
+
+guide_auth_setup() {
+  local auth_method="$1" github_username="$2"
+
+  echo ""
+  echo "Auth Setup"
+  echo "----------"
+
+  if [[ "$auth_method" == "ssh" ]]; then
+    info "Your repos use SSH remotes."
+    echo ""
+
+    # Check if they have multi-account SSH config
+    local has_multi_ssh=0
+    if [[ -f "$HOME/.ssh/config" ]]; then
+      if grep -qi "github" "$HOME/.ssh/config" 2>/dev/null; then
+        local host_count
+        host_count="$(grep -ci "host.*github" "$HOME/.ssh/config" 2>/dev/null || echo "0")"
+        if [[ "$host_count" -gt 1 ]]; then
+          has_multi_ssh=1
+          ok "Multi-account SSH config detected ($host_count GitHub hosts)"
+        fi
+      fi
+    fi
+
+    if [[ "$has_multi_ssh" == "0" ]]; then
+      info "You have a single SSH key for GitHub — that works fine if your"
+      info "one GitHub account has access to both personal and work repos."
+      echo ""
+      if confirm "Do you use separate GitHub accounts for work and personal?"; then
+        echo ""
+        info "You'll need either:"
+        echo ""
+        info "  Option A: SSH config with separate hosts (recommended)"
+        info "  ─────────────────────────────────────────────────────"
+        info "  Add to ~/.ssh/config:"
+        echo ""
+        info "    # Personal"
+        info "    Host github.com"
+        info "      HostName github.com"
+        info "      IdentityFile ~/.ssh/id_personal"
+        echo ""
+        info "    # Work"
+        info "    Host github-work"
+        info "      HostName github.com"
+        info "      IdentityFile ~/.ssh/id_work"
+        echo ""
+        info "  Then clone work repos with: git clone git@github-work:org/repo.git"
+        echo ""
+        info "  Option B: Personal Access Token for API calls"
+        info "  ──────────────────────────────────────────────"
+        show_token_guide
+        if confirm "Want to set up a token now?"; then
+          prompt_for_token
+        elif ! confirm "Continue setup without multi-account auth?"; then
+          info "Set up SSH or PAT first, then re-run: contrib-mirror --setup"
+          exit 0
+        fi
+      fi
+    fi
+
+  elif [[ "$auth_method" == "https" ]]; then
+    info "Your repos use HTTPS remotes."
+    echo ""
+    info "For cloning work repos, make sure you have a credential helper:"
+    info "  Check: git config credential.helper"
+    echo ""
+    if [[ -n "$github_username" ]]; then
+      info "For GitHub API (PR/review tracking), you'll need a Personal Access Token."
+      echo ""
+      prompt_for_token
+    fi
+
+  else
+    info "Couldn't detect auth method (no repos found yet). That's fine —"
+    info "the sync script supports both SSH and HTTPS repos."
+  fi
+
+  echo ""
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Auto-detection
@@ -105,7 +359,9 @@ detect_github_username() {
 echo ""
 echo "Private Work Contributions Mirror - Setup"
 echo "=========================================="
-echo ""
+
+# Check prerequisites first
+check_prerequisites
 
 # Load existing config if present
 if [[ -f "$CONFIG_FILE" ]]; then
@@ -137,6 +393,13 @@ default_work_dir="${default_work_dir%/}"
 echo ""
 work_dir="$(prompt "Work repos directory" "$default_work_dir")"
 work_dir="${work_dir%/}"
+
+# Detect auth method and guide user
+DETECTED_TOKEN=""
+if [[ -d "$work_dir" ]]; then
+  auth_method="$(detect_auth_method "$work_dir")"
+  guide_auth_setup "$auth_method" "${default_username:-}"
+fi
 
 emails="$(prompt "Git author emails (comma-separated)" "$default_emails")"
 remote_prefix="$(prompt "Remote URL prefix (e.g. git@github.com:YourOrg/)" "$default_prefix")"
@@ -201,6 +464,13 @@ COPY_MESSAGES="\${COPY_MESSAGES:-$copy_messages}"
 SINCE="\${SINCE:-$since}"
 SYNC_HOUR="\${SYNC_HOUR:-$sync_hour}"
 EOF
+
+# Add token if provided during auth setup
+if [[ -n "$DETECTED_TOKEN" ]]; then
+  cat >> "$CONFIG_FILE" << EOF
+GITHUB_TOKEN="\${GITHUB_TOKEN:-$DETECTED_TOKEN}"
+EOF
+fi
 
 echo ""
 ok "Config saved to $CONFIG_FILE"
