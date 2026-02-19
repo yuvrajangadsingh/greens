@@ -10,7 +10,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.4.0"
+VERSION="1.4.2"
 
 # Source config file if it exists
 # Config uses ${VAR:-value} so env vars always take precedence
@@ -146,7 +146,7 @@ fetch_github_activity() {
 
   # Check if gh CLI is available
   if ! command -v gh &>/dev/null; then
-    log "WARN: gh CLI not found, skipping GitHub activity fetch"
+    echo "[$(date "+%Y-%m-%d %H:%M:%S %z")] WARN: gh CLI not found, skipping GitHub activity fetch" >&2
     return
   fi
 
@@ -164,7 +164,7 @@ fetch_github_activity() {
 
   # Check gh auth status
   if ! gh auth status &>/dev/null; then
-    log "WARN: gh CLI not authenticated, skipping GitHub activity fetch"
+    echo "[$(date "+%Y-%m-%d %H:%M:%S %z")] WARN: gh CLI not authenticated, skipping GitHub activity fetch" >&2
     return
   fi
 
@@ -202,7 +202,7 @@ fetch_github_activity_with_messages() {
   local org="$2"
 
   if ! command -v gh &>/dev/null; then
-    log "WARN: gh CLI not found, skipping GitHub activity fetch"
+    echo "[$(date "+%Y-%m-%d %H:%M:%S %z")] WARN: gh CLI not found, skipping GitHub activity fetch" >&2
     return
   fi
 
@@ -218,7 +218,7 @@ fetch_github_activity_with_messages() {
   fi
 
   if ! gh auth status &>/dev/null; then
-    log "WARN: gh CLI not authenticated, skipping GitHub activity fetch"
+    echo "[$(date "+%Y-%m-%d %H:%M:%S %z")] WARN: gh CLI not authenticated, skipping GitHub activity fetch" >&2
     return
   fi
 
@@ -418,7 +418,7 @@ else
   LC_ALL=C sort -u "$tmp_all_data" > "$tmp_origin_ts"
 fi
 
-git -C "$MIRROR_DIR" log --format="%ai" 2>/dev/null | LC_ALL=C sort -u > "$tmp_mirror_ts"
+{ git -C "$MIRROR_DIR" log --format="%ai" 2>/dev/null || true; } | LC_ALL=C sort -u > "$tmp_mirror_ts"
 comm -23 "$tmp_origin_ts" "$tmp_mirror_ts" > "$tmp_missing_ts"
 
 # Build missing data file (with messages if enabled)
