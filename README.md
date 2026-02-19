@@ -81,7 +81,7 @@ If you prefer to configure manually instead of using the setup wizard:
 
 1. Go to [github.com/new](https://github.com/new)
 2. Name it something like `work-contributions-mirror`
-3. Make it **public** (so it shows on your profile)
+3. Make it **public** or **private** (if private, enable "Private contributions" in [GitHub Settings > Profile](https://github.com/settings/profile))
 4. Don't initialize with README
 
 ### 2. Clone and configure
@@ -145,10 +145,10 @@ The setup wizard (`contrib-mirror --setup`) handles all of this automatically.
 
 1. **Discover** repos in `WORK_DIR` matching `REMOTE_PREFIX`
 2. **Cache** as bare clones (no file content, just git history)
-3. **Extract** commit timestamps for your email(s)
+3. **Extract** commit timestamps for your email(s) — **scans all branches** (feature, hotfix, etc.), not just main. No double-counting after merge since git deduplicates by commit hash.
 4. **Fetch** PR/review/issue timestamps via GitHub API (optional)
 5. **Mirror** as empty commits with matching timestamps
-6. **Push** to your public mirror repo
+6. **Push** to your mirror repo
 
 ---
 
@@ -207,6 +207,14 @@ No. The script creates bare caches and never modifies your working directories.
 **Q: What if I have multiple GitHub accounts (work/personal)?**
 
 Use SSH config with different hosts for repo access. For GitHub API (PRs/reviews), either set `GITHUB_TOKEN` with a work account PAT, or login with both accounts via `gh auth login` and set `GITHUB_USERNAME`. See **Auth Methods** above.
+
+**Q: Does it check all branches or just main?**
+
+All branches. The script scans commits across every branch (feature, hotfix, release, etc.) using `git log --all`. Commits aren't double-counted after merge—git deduplicates by commit hash. For squash merges, old branch commits are pruned once the remote branch is deleted.
+
+**Q: Can the mirror repo be private?**
+
+Yes. Enable "Include private contributions on my profile" in [GitHub Settings > Profile](https://github.com/settings/profile) so the green squares show to visitors.
 
 **Q: Can I backfill old contributions?**
 

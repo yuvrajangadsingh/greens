@@ -368,7 +368,8 @@ tmp_missing_data="/tmp/contrib_mirror_missing_data.txt"
 > "$tmp_all_data"
 
 log ""
-log "Step 3/5: Scanning commit history for your work (emails: $EMAILS)"
+log "Step 3/5: Scanning commits across all branches (emails: $EMAILS)"
+log "  (Checks every branch — feature, hotfix, etc. No double-counting after merge)"
 
 # Collect git commits (with or without messages based on COPY_MESSAGES)
 for bare in "$CACHE_DIR"/*.git; do
