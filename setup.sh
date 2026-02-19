@@ -648,8 +648,10 @@ fi
 echo ""
 echo "Set up automatic daily sync?"
 echo "  1) launchd (macOS) - recommended"
+echo "     Runs missed syncs when your Mac wakes up. Survives reboots."
 echo "  2) cron"
-echo "  3) Skip"
+echo "     Skips if your Mac was asleep/off at the scheduled time."
+echo "  3) Skip — run manually with: contrib-mirror"
 printf "  Choice [1]: " >&2
 read -r sched_choice
 sched_choice="${sched_choice:-1}"
