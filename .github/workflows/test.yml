@@ -71,15 +71,32 @@ jobs:
             echo "Skipping — no config from setup test"
           fi
 
-  # Test Homebrew install (only on tags)
+  # Test Homebrew install + upgrade (only on tags)
   test-brew:
     runs-on: macos-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
-      - name: Tap and install
+      - name: Install previous version
         run: |
           brew tap yuvrajangadsingh/contrib-mirror
-          brew install contrib-mirror
+          # Roll the tap back one commit to get the previous formula
+          TAP_DIR="$(brew --repo yuvrajangadsingh/contrib-mirror)"
+          cd "$TAP_DIR"
+          PREV_COMMIT="$(git log --oneline -2 | tail -1 | awk '{print $1}')"
+          git checkout "$PREV_COMMIT" -- Formula/contrib-mirror.rb
+          cd -
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install contrib-mirror
+          echo "Installed version:"
+          contrib-mirror --version
+
+      - name: Upgrade to current version
+        run: |
+          # Restore tap to latest
+          TAP_DIR="$(brew --repo yuvrajangadsingh/contrib-mirror)"
+          cd "$TAP_DIR" && git checkout main -- Formula/contrib-mirror.rb && cd -
+          HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade contrib-mirror
+          echo "Upgraded version:"
+          contrib-mirror --version
 
       - name: Version
         run: contrib-mirror --version
