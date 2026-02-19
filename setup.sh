@@ -358,7 +358,17 @@ detect_org_name() {
   [[ -d "$work_dir" ]] || return 0
   find "$work_dir" -maxdepth 3 -name .git -print 2>/dev/null | while read -r gitpath; do
     git -C "$(dirname "$gitpath")" remote get-url origin 2>/dev/null || true
-  done | sed -n 's|.*github\.com[:/]\([^/]*\)/.*|\1|p' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}'
+  done | sed -n 's|.*[:/]\([^/]*\)/[^/]*$|\1|p' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}'
+}
+
+detect_ssh_host() {
+  local work_dir="$1"
+  [[ -d "$work_dir" ]] || { echo "github.com"; return 0; }
+  local host
+  host="$(find "$work_dir" -maxdepth 3 -name .git -print 2>/dev/null | while read -r gitpath; do
+    git -C "$(dirname "$gitpath")" remote get-url origin 2>/dev/null || true
+  done | sed -n 's|^git@\([^:]*\):.*|\1|p' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')"
+  echo "${host:-github.com}"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -458,9 +468,11 @@ fi
 
 auth_method="unknown"
 detected_org=""
+detected_ssh_host="github.com"
 if [[ -d "$work_dir" ]] && [[ "$repo_count" -gt 0 ]]; then
   auth_method="$(detect_auth_method "$work_dir")"
   detected_org="$(detect_org_name "$work_dir")"
+  detected_ssh_host="$(detect_ssh_host "$work_dir")"
 fi
 
 # If we couldn't detect auth method, ask
@@ -500,7 +512,7 @@ echo ""
 org_name="$(prompt "Work GitHub org/owner name" "${detected_org:-}")"
 if [[ -n "$org_name" ]]; then
   if [[ "$auth_method" == "ssh" ]]; then
-    remote_prefix="git@github.com:${org_name}/"
+    remote_prefix="git@${detected_ssh_host}:${org_name}/"
   else
     remote_prefix="https://github.com/${org_name}/"
   fi
@@ -760,7 +772,7 @@ echo ""
 ok "Config saved to $CONFIG_FILE"
 
 echo ""
-ok "Setup complete! Run 'contrib-mirror' to sync now."
+ok "Setup complete!"
 echo ""
 echo "  ┌─────────────────────────────────────────────────────────────┐"
 echo "  │  IMPORTANT: Enable private contributions on GitHub          │"

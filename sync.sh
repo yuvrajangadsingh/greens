@@ -10,7 +10,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.4.2"
+VERSION="1.5.0"
 
 # Source config file if it exists
 # Config uses ${VAR:-value} so env vars always take precedence
@@ -20,19 +20,135 @@ CONFIG_FILE="${CONTRIB_MIRROR_CONFIG:-$HOME/.contrib-mirror/config}"
 # CLI flags
 case "${1:-}" in
   --setup)   exec "$SCRIPT_DIR/setup.sh" ;;
-  --help|-h) echo "Usage: contrib-mirror [--setup|--help|--version]"
+  --help|-h) echo "Usage: contrib-mirror [--setup|--status|--reset|--help|--version]"
              echo "  --setup    Run interactive setup wizard"
+             echo "  --status   Show current config and sync status"
+             echo "  --reset    Remove config, caches, and scheduler"
              echo "  --version  Show version"
              echo "  --help     Show this help"
              exit 0 ;;
   --version) echo "contrib-mirror $VERSION"; exit 0 ;;
+  --status)
+    echo "contrib-mirror $VERSION"
+    echo ""
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+      echo "  Not configured. Run: contrib-mirror"
+      exit 0
+    fi
+    source "$CONFIG_FILE"
+    echo "  Config:       $CONFIG_FILE"
+    echo "  Work dir:     ${WORK_DIR:-not set}"
+    if [[ -d "${WORK_DIR:-}" ]]; then
+      repo_count="$(find "$WORK_DIR" -maxdepth 2 -name .git -print 2>/dev/null | wc -l | tr -d ' ')"
+      echo "  Repos found:  $repo_count"
+    fi
+    echo "  Remote prefix: ${REMOTE_PREFIX:-not set}"
+    echo "  Emails:       ${EMAILS:-not set}"
+    echo "  Mirror dir:   ${MIRROR_DIR:-not set}"
+    if [[ -d "${MIRROR_DIR:-}" ]] && [[ -d "${MIRROR_DIR}/.git" ]]; then
+      mirror_commits="$(git -C "$MIRROR_DIR" rev-list --count HEAD 2>/dev/null || echo "0")"
+      echo "  Mirror commits: $mirror_commits"
+    fi
+    echo "  GitHub user:  ${GITHUB_USERNAME:-not set}"
+    echo "  Activity:     ${ACTIVITY_TYPES:-commits}"
+    echo "  Since:        ${SINCE:-not set}"
+    # Last sync
+    log_dir="${LOG_DIR:-$SCRIPT_DIR/logs}"
+    stamp_file="${SUCCESS_STAMP_FILE:-$log_dir/last-success-date}"
+    if [[ -f "$stamp_file" ]]; then
+      echo "  Last sync:    $(cat "$stamp_file")"
+    else
+      echo "  Last sync:    never"
+    fi
+    # Scheduler
+    if launchctl list 2>/dev/null | grep -q "com.contrib-mirror"; then
+      echo "  Scheduler:    launchd (active)"
+    elif crontab -l 2>/dev/null | grep -q "sync.sh"; then
+      echo "  Scheduler:    cron"
+    else
+      echo "  Scheduler:    none (manual)"
+    fi
+    exit 0 ;;
+  --reset)
+    echo "contrib-mirror — reset"
+    echo ""
+    confirm_reset() {
+      printf "  %s [y/N]: " "$1" >&2
+      read -r reply
+      [[ "$reply" =~ ^[Yy] ]]
+    }
+    # 1. Scheduler
+    if launchctl list 2>/dev/null | grep -q "com.contrib-mirror"; then
+      if confirm_reset "Remove launchd scheduler?"; then
+        launchctl bootout "gui/$(id -u)/com.contrib-mirror" 2>/dev/null || true
+        rm -f "$HOME/Library/LaunchAgents/com.contrib-mirror.plist"
+        echo "  [ok] launchd agent removed"
+      fi
+    fi
+    if crontab -l 2>/dev/null | grep -q "sync.sh"; then
+      if confirm_reset "Remove cron entry?"; then
+        crontab -l 2>/dev/null | grep -v "sync.sh" | crontab -
+        echo "  [ok] cron entry removed"
+      fi
+    fi
+    # 2. Cache
+    config_dir="$HOME/.contrib-mirror"
+    cache_dir="$SCRIPT_DIR/.cache"
+    if [[ -d "$cache_dir" ]]; then
+      if confirm_reset "Remove cache dir ($cache_dir)?"; then
+        rm -rf "$cache_dir"
+        echo "  [ok] cache removed"
+      fi
+    fi
+    # 3. Mirror (before config removal — needs MIRROR_DIR from config)
+    mirror="${MIRROR_DIR:-$config_dir/mirror}"
+    if [[ -d "$mirror" ]]; then
+      if confirm_reset "Remove mirror repo ($mirror)? This deletes all mirrored commits."; then
+        rm -rf "$mirror"
+        echo "  [ok] mirror removed"
+      fi
+    fi
+    # 4. Config
+    if [[ -f "$CONFIG_FILE" ]]; then
+      if confirm_reset "Remove config ($CONFIG_FILE)?"; then
+        rm -f "$CONFIG_FILE"
+        echo "  [ok] config removed"
+      fi
+    fi
+    # 5. Logs
+    log_dir="${LOG_DIR:-$SCRIPT_DIR/logs}"
+    config_log_dir="$config_dir/logs"
+    for d in "$log_dir" "$config_log_dir"; do
+      if [[ -d "$d" ]]; then
+        if confirm_reset "Remove logs ($d)?"; then
+          rm -rf "$d"
+          echo "  [ok] logs removed"
+        fi
+      fi
+    done
+    # 6. Config dir if empty
+    if [[ -d "$config_dir" ]] && [[ -z "$(ls -A "$config_dir" 2>/dev/null)" ]]; then
+      rmdir "$config_dir" 2>/dev/null || true
+    fi
+    echo ""
+    echo "  Done. Run 'contrib-mirror' to set up again."
+    exit 0 ;;
 esac
 
 # Auto-run setup on first use
 if [[ ! -f "$CONFIG_FILE" ]]; then
   echo "No config found. Starting setup wizard..."
   echo ""
-  exec "$SCRIPT_DIR/setup.sh"
+  "$SCRIPT_DIR/setup.sh"
+  # If setup failed or user exited without creating config, bail
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    exit 1
+  fi
+  # Reload config written by setup
+  source "$CONFIG_FILE"
+  echo ""
+  echo "Starting first sync..."
+  echo ""
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -394,7 +510,7 @@ done >> "$tmp_all_data"
 if [[ "$ACTIVITY_TYPES" != "commits" ]] && [[ -n "$GITHUB_USERNAME" ]]; then
   since_date="${SINCE%% *}"  # Extract date part only (YYYY-MM-DD)
   if [[ -z "$GITHUB_ORG" ]]; then
-    GITHUB_ORG="$(echo "$REMOTE_PREFIX" | sed 's/.*github.com[:/]\([^/]*\).*/\1/')"
+    GITHUB_ORG="$(echo "$REMOTE_PREFIX" | sed 's|.*[:/]\([^/]*\)/$|\1|')"
   fi
   log "Fetching GitHub activity (PRs, reviews, issues) since $since_date..."
 
