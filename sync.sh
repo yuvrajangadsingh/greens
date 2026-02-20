@@ -206,6 +206,22 @@ LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"
 SUCCESS_STAMP_FILE="${SUCCESS_STAMP_FILE:-$LOG_DIR/last-success-date}"
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Auto-fill missing config (prompt inline, no full setup needed)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if [[ -f "$CONFIG_FILE" ]] && [[ -z "$MIRROR_EMAIL" ]]; then
+  echo "Your mirror commits need a personal GitHub email to show as green squares."
+  echo "This must match a verified email on your GitHub account."
+  printf "  Personal GitHub email: " >&2
+  read -r MIRROR_EMAIL
+  if [[ -n "$MIRROR_EMAIL" ]]; then
+    echo "MIRROR_EMAIL=\"\${MIRROR_EMAIL:-$MIRROR_EMAIL}\"" >> "$CONFIG_FILE"
+    echo "  Saved to config."
+    echo ""
+  fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Setup
 # ─────────────────────────────────────────────────────────────────────────────
 
