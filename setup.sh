@@ -523,6 +523,11 @@ else
 fi
 
 github_username="$(prompt "GitHub username (for PR/review/issue tracking)" "$default_username")"
+
+# Personal email for mirror commits — GitHub uses this to attribute green squares
+default_mirror_email="$(git config user.email 2>/dev/null || echo "")"
+mirror_email="$(prompt "Personal GitHub email (for green squares on your profile)" "$default_mirror_email")"
+
 since="$(prompt "Mirror commits since" "$default_since")"
 
 if [[ -n "$github_username" ]] && confirm "Track PRs, reviews, and issues too?"; then
@@ -755,6 +760,7 @@ EMAILS="\${EMAILS:-$emails}"
 REMOTE_PREFIX="\${REMOTE_PREFIX:-$remote_prefix}"
 MIRROR_DIR="\${MIRROR_DIR:-$mirror_dir}"
 GITHUB_USERNAME="\${GITHUB_USERNAME:-$github_username}"
+MIRROR_EMAIL="\${MIRROR_EMAIL:-$mirror_email}"
 ACTIVITY_TYPES="\${ACTIVITY_TYPES:-$activity_types}"
 COPY_MESSAGES="\${COPY_MESSAGES:-$copy_messages}"
 SINCE="\${SINCE:-$since}"

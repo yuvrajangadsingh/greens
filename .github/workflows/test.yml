@@ -50,10 +50,11 @@ jobs:
           # 5. emails
           # 6. org name
           # 7. github username (empty)
-          # 8. copy messages (n)
-          # 9. mirror repo URL (empty — skip, we'll set dir manually)
-          # 10. scheduler (3=skip)
-          printf '/tmp/test-work\n2\nn\nn\ntest@test.com\ntest-org\n\nn\n\n3\n' | bash setup.sh || true
+          # 8. mirror email (personal github email)
+          # 9. copy messages (n)
+          # 10. mirror repo URL (empty — skip, we'll set dir manually)
+          # 11. scheduler (3=skip)
+          printf '/tmp/test-work\n2\nn\nn\ntest@test.com\ntest-org\n\npersonal@test.com\nn\n\n3\n' | bash setup.sh || true
 
           # Verify config was created
           if [ -f "$HOME/.contrib-mirror/config" ]; then
@@ -69,6 +70,22 @@ jobs:
             bash sync.sh --status
           else
             echo "Skipping — no config from setup test"
+          fi
+
+      - name: Mirror email in commits
+        run: |
+          # Verify MIRROR_EMAIL overrides author on commits
+          mkdir -p /tmp/test-mirror-email && cd /tmp/test-mirror-email
+          git init && git commit --allow-empty -m "init"
+          mirror_env=(env GIT_AUTHOR_EMAIL="personal@test.com" GIT_COMMITTER_EMAIL="personal@test.com")
+          GIT_AUTHOR_DATE="2026-01-01 12:00:00" GIT_COMMITTER_DATE="2026-01-01 12:00:00" \
+            "${mirror_env[@]}" git commit --allow-empty -m "test" --quiet
+          author_email="$(git log -1 --format='%ae')"
+          if [ "$author_email" = "personal@test.com" ]; then
+            echo "PASS: mirror commit authored as personal@test.com"
+          else
+            echo "FAIL: expected personal@test.com, got $author_email"
+            exit 1
           fi
 
   # Test Homebrew install + upgrade (only on tags)

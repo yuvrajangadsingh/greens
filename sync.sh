@@ -10,7 +10,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.5.0"
+VERSION="1.5.1"
 
 # Source config file if it exists
 # Config uses ${VAR:-value} so env vars always take precedence
@@ -49,6 +49,7 @@ case "${1:-}" in
       mirror_commits="$(git -C "$MIRROR_DIR" rev-list --count HEAD 2>/dev/null || echo "0")"
       echo "  Mirror commits: $mirror_commits"
     fi
+    echo "  Mirror email: ${MIRROR_EMAIL:-$(git config user.email 2>/dev/null || echo "not set")}"
     echo "  GitHub user:  ${GITHUB_USERNAME:-not set}"
     echo "  Activity:     ${ACTIVITY_TYPES:-commits}"
     echo "  Since:        ${SINCE:-not set}"
@@ -189,6 +190,10 @@ GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 # Types of activity to track (comma-separated: commits,prs,reviews,issues)
 # Set to "commits" only to disable GitHub API integration
 ACTIVITY_TYPES="${ACTIVITY_TYPES:-commits,prs,reviews,issues}"
+
+# Personal GitHub email for mirror commits (must match a verified email on your GitHub account)
+# If not set, falls back to git's global user.email
+MIRROR_EMAIL="${MIRROR_EMAIL:-}"
 
 # Copy commit messages to mirror (0=timestamps only, 1=include messages)
 # WARNING: Messages from private repos may contain sensitive info
@@ -564,19 +569,26 @@ log "Missing (to sync): $missing_count"
 log ""
 log "Step 4/5: Creating mirror commits (these show up as green squares on GitHub)"
 
+# Set author identity for mirror commits — must match a verified email on the personal GitHub account
+mirror_env=()
+if [[ -n "$MIRROR_EMAIL" ]]; then
+  mirror_env=(env GIT_AUTHOR_EMAIL="$MIRROR_EMAIL" GIT_COMMITTER_EMAIL="$MIRROR_EMAIL")
+fi
+
 if [[ "$missing_count" -gt 0 ]]; then
   log "Adding $missing_count new commits to mirror..."
   cd "$MIRROR_DIR"
+
   if [[ "$COPY_MESSAGES" == "1" ]]; then
     while IFS=$'\t' read -r ts msg; do
       [[ -z "$ts" ]] && continue
       [[ -z "$msg" ]] && msg="sync"
-      GIT_AUTHOR_DATE="$ts" GIT_COMMITTER_DATE="$ts" git commit --allow-empty -m "$msg" --quiet
+      GIT_AUTHOR_DATE="$ts" GIT_COMMITTER_DATE="$ts" "${mirror_env[@]}" git commit --allow-empty -m "$msg" --quiet
     done < "$tmp_missing_data"
   else
     while IFS= read -r ts; do
       [[ -z "$ts" ]] && continue
-      GIT_AUTHOR_DATE="$ts" GIT_COMMITTER_DATE="$ts" git commit --allow-empty -m "sync" --quiet
+      GIT_AUTHOR_DATE="$ts" GIT_COMMITTER_DATE="$ts" "${mirror_env[@]}" git commit --allow-empty -m "sync" --quiet
     done < "$tmp_missing_ts"
   fi
   log "Mirror commits added."
@@ -701,7 +713,7 @@ rm -f "$tmp_repo_stats" "$tmp_dates" 2>/dev/null || true
 cd "$MIRROR_DIR"
 git add README.md
 if ! git diff --cached --quiet && [[ "$missing_count" -gt 0 ]]; then
-  git commit -m "Update sync status" --quiet
+  "${mirror_env[@]}" git commit -m "Update sync status" --quiet
   log "Status file updated."
 fi
 
