@@ -93,21 +93,21 @@ jobs:
     runs-on: macos-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
-      - name: Tap and install
+      - name: Tap and install greens
         run: |
           brew tap yuvrajangadsingh/contrib-mirror
-          brew install contrib-mirror
+          brew install greens
 
       - name: Version
-        run: contrib-mirror --version
+        run: greens --version
 
       - name: Help
-        run: contrib-mirror --help
+        run: greens --help
 
       - name: Status
-        run: contrib-mirror --status
+        run: greens --status
 
       - name: Upgrade (no-op, validates command works)
         run: |
-          brew upgrade contrib-mirror 2>&1 || true
-          contrib-mirror --version
+          brew upgrade greens 2>&1 || true
+          greens --version

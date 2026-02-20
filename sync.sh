@@ -10,7 +10,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.5.1"
+VERSION="1.6.0"
 
 # Source config file if it exists
 # Config uses ${VAR:-value} so env vars always take precedence
@@ -20,19 +20,19 @@ CONFIG_FILE="${CONTRIB_MIRROR_CONFIG:-$HOME/.contrib-mirror/config}"
 # CLI flags
 case "${1:-}" in
   --setup)   exec "$SCRIPT_DIR/setup.sh" ;;
-  --help|-h) echo "Usage: contrib-mirror [--setup|--status|--reset|--help|--version]"
+  --help|-h) echo "Usage: greens [--setup|--status|--reset|--help|--version]"
              echo "  --setup    Run interactive setup wizard"
              echo "  --status   Show current config and sync status"
              echo "  --reset    Remove config, caches, and scheduler"
              echo "  --version  Show version"
              echo "  --help     Show this help"
              exit 0 ;;
-  --version) echo "contrib-mirror $VERSION"; exit 0 ;;
+  --version) echo "greens $VERSION"; exit 0 ;;
   --status)
-    echo "contrib-mirror $VERSION"
+    echo "greens $VERSION"
     echo ""
     if [[ ! -f "$CONFIG_FILE" ]]; then
-      echo "  Not configured. Run: contrib-mirror"
+      echo "  Not configured. Run: greens"
       exit 0
     fi
     source "$CONFIG_FILE"
@@ -62,7 +62,7 @@ case "${1:-}" in
       echo "  Last sync:    never"
     fi
     # Scheduler
-    if launchctl list 2>/dev/null | grep -q "com.contrib-mirror"; then
+    if launchctl list 2>/dev/null | grep -q "com.greens"; then
       echo "  Scheduler:    launchd (active)"
     elif crontab -l 2>/dev/null | grep -q "sync.sh"; then
       echo "  Scheduler:    cron"
@@ -71,7 +71,7 @@ case "${1:-}" in
     fi
     exit 0 ;;
   --reset)
-    echo "contrib-mirror — reset"
+    echo "greens — reset"
     echo ""
     confirm_reset() {
       printf "  %s [y/N]: " "$1" >&2
@@ -79,10 +79,10 @@ case "${1:-}" in
       [[ "$reply" =~ ^[Yy] ]]
     }
     # 1. Scheduler
-    if launchctl list 2>/dev/null | grep -q "com.contrib-mirror"; then
+    if launchctl list 2>/dev/null | grep -q "com.greens"; then
       if confirm_reset "Remove launchd scheduler?"; then
-        launchctl bootout "gui/$(id -u)/com.contrib-mirror" 2>/dev/null || true
-        rm -f "$HOME/Library/LaunchAgents/com.contrib-mirror.plist"
+        launchctl bootout "gui/$(id -u)/com.greens" 2>/dev/null || true
+        rm -f "$HOME/Library/LaunchAgents/com.greens.plist"
         echo "  [ok] launchd agent removed"
       fi
     fi
@@ -132,7 +132,7 @@ case "${1:-}" in
       rmdir "$config_dir" 2>/dev/null || true
     fi
     echo ""
-    echo "  Done. Run 'contrib-mirror' to set up again."
+    echo "  Done. Run 'greens' to set up again."
     exit 0 ;;
 esac
 
@@ -231,7 +231,7 @@ mkdir -p "$CACHE_DIR" "$LOG_DIR"
 IFS=',' read -ra EMAIL_ARRAY <<< "$EMAILS"
 
 # Lock to prevent concurrent runs
-LOCK_DIR="/tmp/contrib-mirror-sync.lock"
+LOCK_DIR="/tmp/greens-sync.lock"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   existing_pid=""
   if [[ -f "$LOCK_DIR/pid" ]]; then
@@ -387,7 +387,7 @@ fetch_github_activity_with_messages() {
 tmp_pairs="$(mktemp)"
 tmp_sorted="$(mktemp)"
 cleanup() {
-  rm -f "$tmp_pairs" "$tmp_sorted" /tmp/contrib_mirror_*.txt 2>/dev/null || true
+  rm -f "$tmp_pairs" "$tmp_sorted" /tmp/greens_*.txt 2>/dev/null || true
   rm -rf "$LOCK_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -496,11 +496,11 @@ fi
 # Collect unique timestamps
 # ─────────────────────────────────────────────────────────────────────────────
 
-tmp_all_data="/tmp/contrib_mirror_all.txt"
-tmp_origin_ts="/tmp/contrib_mirror_origin_ts.txt"
-tmp_mirror_ts="/tmp/contrib_mirror_mirror_ts.txt"
-tmp_missing_ts="/tmp/contrib_mirror_missing_ts.txt"
-tmp_missing_data="/tmp/contrib_mirror_missing_data.txt"
+tmp_all_data="/tmp/greens_all.txt"
+tmp_origin_ts="/tmp/greens_origin_ts.txt"
+tmp_mirror_ts="/tmp/greens_mirror_ts.txt"
+tmp_missing_ts="/tmp/greens_missing_ts.txt"
+tmp_missing_data="/tmp/greens_missing_data.txt"
 
 > "$tmp_all_data"
 
@@ -750,7 +750,7 @@ else
   log "$push_output"
   log ""
   log "Your commits were created locally but won't show on GitHub until push works."
-  log "Fix: re-run 'contrib-mirror --setup' to reconfigure push access,"
+  log "Fix: re-run 'greens --setup' to reconfigure push access,"
   log "  or manually: git -C \"$MIRROR_DIR\" remote set-url origin https://<token>@github.com/<user>/<repo>.git"
 fi
 

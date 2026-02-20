@@ -144,7 +144,7 @@ show_token_guide() {
   echo "  Option 1: Fine-grained token (recommended)"
   echo "  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
   echo "  1. Go to: https://github.com/settings/personal-access-tokens/new"
-  echo "  2. Token name: contrib-mirror"
+  echo "  2. Token name: greens"
   echo "  3. Expiration: 90 days (or custom)"
   echo "  4. Resource owner: Select your work org"
   echo "  5. Repository access: All repositories"
@@ -159,7 +159,7 @@ show_token_guide() {
   echo "  Option 2: Classic token (simpler, but gives write access too)"
   echo "  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
   echo "  1. Go to: https://github.com/settings/tokens/new"
-  echo "  2. Note: contrib-mirror"
+  echo "  2. Note: greens"
   echo "  3. Expiration: 90 days (or custom)"
   echo "  4. Select scopes:"
   echo "     • [x] repo (full control — no read-only option for private repos)"
@@ -205,7 +205,7 @@ prompt_for_token() {
       fi
     else
       warn "Skipping — PR/review/issue tracking won't work without a token."
-      info "  You can add it later: contrib-mirror --setup"
+      info "  You can add it later: greens --setup"
     fi
   fi
 }
@@ -264,7 +264,7 @@ guide_auth_setup() {
         if confirm "Want to set up a token now?"; then
           prompt_for_token
         elif ! confirm "Continue setup without multi-account auth?"; then
-          info "Set up SSH or PAT first, then re-run: contrib-mirror --setup"
+          info "Set up SSH or PAT first, then re-run: greens --setup"
           exit 0
         fi
       fi
@@ -434,7 +434,7 @@ if [[ -n "$work_dir" ]] && [[ ! -d "$work_dir" ]]; then
   if confirm "Create it now?"; then
     mkdir -p "$work_dir"
     ok "Created $work_dir"
-    info "Clone your work repos into this directory, then run: contrib-mirror"
+    info "Clone your work repos into this directory, then run: greens"
   fi
 fi
 
@@ -460,7 +460,7 @@ if [[ -d "$work_dir" ]]; then
   else
     echo ""
     warn "No git repos found in $work_dir/ yet"
-    info "Clone your work repos there, then run: contrib-mirror"
+    info "Clone your work repos there, then run: greens"
   fi
 fi
 
@@ -622,7 +622,7 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
           echo ""
           info "  1. Go to: https://github.com/settings/tokens/new"
           info "     (Make sure you're logged into your PERSONAL GitHub, not work)"
-          info "  2. Note: contrib-mirror-push"
+          info "  2. Note: greens-push"
           info "  3. Expiration: 90 days (or custom)"
           info "  4. Select scopes:"
           info "     [x] repo"
@@ -647,7 +647,7 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
           fi
         else
           warn "Skipping — your sync will run but commits won't push to GitHub."
-          info "Fix later: contrib-mirror --setup"
+          info "Fix later: greens --setup"
         fi
       else
         info "Check that your SSH key has access to push to this repo."
@@ -668,7 +668,7 @@ echo "  1) launchd (macOS) - recommended"
 echo "     Runs missed syncs when your Mac wakes up. Survives reboots."
 echo "  2) cron"
 echo "     Skips if your Mac was asleep/off at the scheduled time."
-echo "  3) Skip — run manually with: contrib-mirror"
+echo "  3) Skip — run manually with: greens"
 printf "  Choice [1]: " >&2
 read -r sched_choice
 sched_choice="${sched_choice:-1}"
@@ -688,7 +688,7 @@ sync_path="$SCRIPT_DIR/sync.sh"
 
 case "$sched_choice" in
   1)
-    label="com.contrib-mirror"
+    label="com.greens"
     plist="$HOME/Library/LaunchAgents/$label.plist"
     log_dir="$CONFIG_DIR/logs"
     mkdir -p "$log_dir"
@@ -739,7 +739,7 @@ PLIST
     ok "Daily sync scheduled via cron (${sync_hour}:00)"
     ;;
   *)
-    info "Skipped. Run manually: contrib-mirror"
+    info "Skipped. Run manually: greens"
     ;;
 esac
 
