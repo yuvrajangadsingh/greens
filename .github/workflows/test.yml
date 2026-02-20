@@ -95,7 +95,7 @@ jobs:
     steps:
       - name: Tap and install greens
         run: |
-          brew tap yuvrajangadsingh/contrib-mirror
+          brew tap yuvrajangadsingh/greens
           brew install greens
 
       - name: Version
