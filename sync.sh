@@ -10,7 +10,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.6.1"
+VERSION="1.6.2"
 
 # Source config file if it exists
 # Config uses ${VAR:-value} so env vars always take precedence
@@ -20,13 +20,59 @@ CONFIG_FILE="${CONTRIB_MIRROR_CONFIG:-$HOME/.contrib-mirror/config}"
 # CLI flags
 case "${1:-}" in
   --setup)   exec "$SCRIPT_DIR/setup.sh" ;;
-  --help|-h) echo "Usage: greens [--setup|--status|--reset|--help|--version]"
+  --help|-h) echo "Usage: greens [--setup|--status|--resync|--reset|--help|--version]"
              echo "  --setup    Run interactive setup wizard"
              echo "  --status   Show current config and sync status"
+             echo "  --resync   Wipe mirror history (local + remote) and sync fresh"
              echo "  --reset    Remove config, caches, and scheduler"
              echo "  --version  Show version"
              echo "  --help     Show this help"
              exit 0 ;;
+  --resync)
+    echo "greens — resync"
+    echo ""
+    echo "  This will wipe all mirror commits (local + remote) and sync fresh."
+    printf "  Continue? [y/N]: " >&2
+    read -r reply
+    if [[ ! "$reply" =~ ^[Yy] ]]; then
+      echo "  Cancelled."
+      exit 0
+    fi
+    source "$CONFIG_FILE" 2>/dev/null || { echo "  No config found. Run: greens"; exit 1; }
+    MIRROR_DIR="${MIRROR_DIR:-$HOME/.contrib-mirror/mirror}"
+    # Save remote URL before wiping
+    remote_url=""
+    if [[ -d "$MIRROR_DIR/.git" ]]; then
+      remote_url="$(git -C "$MIRROR_DIR" remote get-url origin 2>/dev/null || true)"
+    fi
+    if [[ -z "$remote_url" ]]; then
+      echo "  No remote URL found in mirror repo."
+      printf "  Enter mirror repo URL (with token if HTTPS): " >&2
+      read -r remote_url
+      if [[ -z "$remote_url" ]]; then
+        echo "  Cancelled."
+        exit 1
+      fi
+    fi
+    # Wipe and re-init mirror
+    rm -rf "$MIRROR_DIR"
+    mkdir -p "$MIRROR_DIR"
+    git -C "$MIRROR_DIR" init --quiet
+    git -C "$MIRROR_DIR" remote add origin "$remote_url"
+    git -C "$MIRROR_DIR" commit --allow-empty -m "init" --quiet
+    # Force push empty state to wipe remote
+    if git -C "$MIRROR_DIR" push origin main --force 2>/dev/null || git -C "$MIRROR_DIR" push origin master --force 2>/dev/null; then
+      echo "  [ok] Remote history wiped."
+    else
+      echo "  [!] Could not push to remote. You may need to re-run --setup for push access."
+      exit 1
+    fi
+    # Delete stamp so sync runs
+    rm -f "${LOG_DIR:-$HOME/.contrib-mirror/logs}/last-success-date" "$SCRIPT_DIR/logs/last-success-date" 2>/dev/null
+    echo "  [ok] Starting fresh sync..."
+    echo ""
+    FORCE=1 exec "$0"
+    ;;
   --version) echo "greens $VERSION"; exit 0 ;;
   --status)
     echo "greens $VERSION"
