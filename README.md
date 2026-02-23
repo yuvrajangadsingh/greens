@@ -16,17 +16,10 @@ Before                              After
 
 ## Install
 
-**One-liner (recommended):**
+**Homebrew (recommended):**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yuvrajangadsingh/private-work-contributions-mirror/main/install.sh | bash
-```
-
-**Homebrew:**
-
-```bash
-brew tap yuvrajangadsingh/contrib-mirror
-brew install contrib-mirror
+brew install yuvrajangadsingh/greens/greens
 ```
 
 **Manual:**
@@ -37,15 +30,18 @@ cd private-work-contributions-mirror
 bash setup.sh
 ```
 
-The installer runs an interactive setup wizard that auto-detects your repos, emails, and GitHub org.
+Setup runs automatically on first use — just run `greens`.
 
 ## Usage
 
 ```bash
-contrib-mirror            # run sync
-contrib-mirror --setup    # reconfigure
-contrib-mirror --help     # show help
-contrib-mirror --version  # show version
+greens              # run sync (auto-runs setup on first use)
+greens --setup      # reconfigure
+greens --status     # show current config and sync status
+greens --resync     # wipe mirror history (local + remote) and sync fresh
+greens --reset      # remove config, caches, and scheduler
+greens --version    # show version
+greens --help       # show help
 ```
 
 ---
@@ -70,53 +66,6 @@ If your work GitHub account differs from your personal one, pick **one** method:
 | **A. Personal Access Token** | HTTPS users, CI/CD, simplest | Create PAT with `repo` scope, set `GITHUB_TOKEN` |
 | **B. Multi-account gh CLI** | SSH users with multiple accounts | `gh auth login` both accounts, set `GITHUB_USERNAME` |
 | **C. Single account** | Default `gh` account has org access | Just set `GITHUB_USERNAME` |
-
----
-
-## Manual Setup (alternative to installer)
-
-If you prefer to configure manually instead of using the setup wizard:
-
-### 1. Create a mirror repo on GitHub
-
-1. Go to [github.com/new](https://github.com/new)
-2. Name it something like `work-contributions-mirror`
-3. Make it **public** or **private** (if private, enable "Private contributions" in [GitHub Settings > Profile](https://github.com/settings/profile))
-4. Don't initialize with README
-
-### 2. Clone and configure
-
-```bash
-git clone git@github.com:YOUR_USERNAME/work-contributions-mirror.git ~/mirror
-cd ~/mirror && git commit --allow-empty -m "init" && git push
-```
-
-Export environment variables or edit `~/.contrib-mirror/config`:
-
-```bash
-WORK_DIR="$HOME/work"
-EMAILS="you@company.com"
-REMOTE_PREFIX="git@github.com:your-company/"
-MIRROR_DIR="$HOME/mirror"
-GITHUB_USERNAME="your-github-username"
-```
-
-### 3. Automate (optional)
-
-**macOS (launchd):**
-```bash
-cp com.contrib-mirror.plist.template ~/Library/LaunchAgents/com.contrib-mirror.plist
-# Edit paths, then:
-launchctl load ~/Library/LaunchAgents/com.contrib-mirror.plist
-```
-
-**Linux (cron):**
-```bash
-# Add to crontab -e:
-0 0 * * * /path/to/sync.sh >> /path/to/logs/sync.log 2>&1
-```
-
-The setup wizard (`contrib-mirror --setup`) handles all of this automatically.
 
 ---
 
@@ -145,7 +94,7 @@ The setup wizard (`contrib-mirror --setup`) handles all of this automatically.
 
 1. **Discover** repos in `WORK_DIR` matching `REMOTE_PREFIX`
 2. **Cache** as bare clones (no file content, just git history)
-3. **Extract** commit timestamps for your email(s) — **scans all branches** (feature, hotfix, etc.), not just main. No double-counting after merge since git deduplicates by commit hash.
+3. **Extract** commit timestamps for your email(s) — uses exact email matching, scans all branches (feature, hotfix, etc.), no double-counting after merge
 4. **Fetch** PR/review/issue timestamps via GitHub API (optional)
 5. **Mirror** as empty commits with matching timestamps
 6. **Push** to your mirror repo
@@ -157,16 +106,16 @@ The setup wizard (`contrib-mirror --setup`) handles all of this automatically.
 | Variable | Required | Default | Description |
 |:---------|:--------:|:--------|:------------|
 | `WORK_DIR` | Yes | `$HOME/work` | Directory containing your work repos |
-| `MIRROR_DIR` | Yes | `./mirror` | Your public mirror repo (local clone) |
-| `EMAILS` | Yes | - | Comma-separated git emails to match |
+| `MIRROR_DIR` | Yes | `~/.contrib-mirror/mirror` | Your public mirror repo (local clone) |
+| `EMAILS` | Yes | - | Comma-separated git emails to match (exact match) |
 | `REMOTE_PREFIX` | Yes | - | Only sync repos with origins starting with this |
+| `MIRROR_EMAIL` | Yes | - | Personal GitHub email for mirror commits (must match a verified email on your GitHub account) |
 | `SINCE` | No | `2024-01-01` | Only sync activity after this date |
 | `GITHUB_USERNAME` | No | - | Your work GitHub username (enables API features) |
 | `GITHUB_TOKEN` | No | - | Work account PAT (alternative to multi-account gh CLI) |
 | `GITHUB_ORG` | No | (auto) | GitHub org name (auto-detected from REMOTE_PREFIX) |
 | `ACTIVITY_TYPES` | No | `commits,prs,reviews,issues` | What to track |
 | `COPY_MESSAGES` | No | `0` | Set to `1` to copy commit messages (not just timestamps) |
-| `SYNC_HOUR` | No | `0` | Hour to run daily sync (0-23, 0=midnight) |
 | `FORCE` | No | `0` | Set to `1` to bypass daily limit |
 | `LOG_DIR` | No | `./logs` | Where to write logs |
 | `CACHE_DIR` | No | `./.cache` | Where to store bare clones |
@@ -218,11 +167,15 @@ Yes. Enable "Include private contributions on my profile" in [GitHub Settings > 
 
 **Q: Can I backfill old contributions?**
 
-Yes. Set `SINCE` to an earlier date and run with `FORCE=1`.
+Yes. Set `SINCE` to an earlier date and run with `FORCE=1 greens`.
 
 **Q: The script says "Already synced today"**
 
-It only runs once per day by default. Use `FORCE=1 ./sync.sh` to override.
+It only runs once per day by default. Use `FORCE=1 greens` to override.
+
+**Q: My mirror has wrong commits or someone else's activity**
+
+Run `greens --resync`. It wipes the mirror (local + remote) and does a clean sync.
 
 **Q: GitHub API features not working?**
 
@@ -261,6 +214,7 @@ After running, your mirror repo's README shows:
 | "gh CLI not authenticated" | Run `gh auth login` |
 | Empty contribution graph | Wait 24h for GitHub to update, or check mirror repo has commits |
 | Wrong timestamps | Check `EMAILS` matches your git config |
+| Mirror has wrong commits | Run `greens --resync` to wipe and re-sync |
 
 ---
 
