@@ -10,7 +10,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.6.0"
+VERSION="1.6.1"
 
 # Source config file if it exists
 # Config uses ${VAR:-value} so env vars always take precedence
@@ -520,9 +520,9 @@ for bare in "$CACHE_DIR"/*.git; do
 
   for email in "${EMAIL_ARRAY[@]}"; do
     if [[ "$COPY_MESSAGES" == "1" ]]; then
-      git --git-dir="$bare" log --all --since="$SINCE" --author="$email" --format="%ai	%s" 2>/dev/null || true
+      git --git-dir="$bare" log --all --since="$SINCE" --author="<$email>" --format="%ai	%s" 2>/dev/null || true
     else
-      git --git-dir="$bare" log --all --since="$SINCE" --author="$email" --format="%ai" 2>/dev/null || true
+      git --git-dir="$bare" log --all --since="$SINCE" --author="<$email>" --format="%ai" 2>/dev/null || true
     fi
   done
 done >> "$tmp_all_data"
@@ -634,7 +634,7 @@ for bare in "$CACHE_DIR"/*.git; do
 
   repo_commits=0
   for email in "${EMAIL_ARRAY[@]}"; do
-    count="$(git --git-dir="$bare" log --all --since="$SINCE" --author="$email" --format="%H" 2>/dev/null | wc -l | tr -d " ")"
+    count="$(git --git-dir="$bare" log --all --since="$SINCE" --author="<$email>" --format="%H" 2>/dev/null | wc -l | tr -d " ")"
     repo_commits=$((repo_commits + count))
   done
 
@@ -674,7 +674,7 @@ for bare in "$CACHE_DIR"/*.git; do
     *) continue ;;
   esac
   for email in "${EMAIL_ARRAY[@]}"; do
-    git --git-dir="$bare" log --all --since="$SINCE" --author="$email" --format="%ad" --date=short 2>/dev/null || true
+    git --git-dir="$bare" log --all --since="$SINCE" --author="<$email>" --format="%ad" --date=short 2>/dev/null || true
   done
 done | sort -u > "$tmp_dates"
 
