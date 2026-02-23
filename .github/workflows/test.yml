@@ -23,6 +23,11 @@ jobs:
       - name: Status (no config)
         run: bash sync.sh --status
 
+      - name: Resync (no config)
+        run: |
+          # Should fail gracefully with no config
+          bash sync.sh --resync 2>&1 || true
+
       - name: Reset (no config)
         run: echo "n" | bash sync.sh --reset
 
@@ -70,6 +75,37 @@ jobs:
             bash sync.sh --status
           else
             echo "Skipping — no config from setup test"
+          fi
+
+      - name: Resync (with config, no mirror remote)
+        run: |
+          # Should prompt for confirmation, we say no
+          echo "n" | bash sync.sh --resync 2>&1 || true
+
+      - name: Exact email matching
+        run: |
+          # Verify --author="<email>" does exact matching
+          mkdir -p /tmp/test-exact-match && cd /tmp/test-exact-match
+          git init
+          # Commit with a longer email that contains a shorter one as substring
+          GIT_AUTHOR_EMAIL="yuvraj@test.com" GIT_COMMITTER_EMAIL="yuvraj@test.com" \
+            git commit --allow-empty -m "commit by yuvraj"
+          GIT_AUTHOR_EMAIL="raj@test.com" GIT_COMMITTER_EMAIL="raj@test.com" \
+            git commit --allow-empty -m "commit by raj"
+
+          # Substring match (old behavior) would return both
+          substring_count="$(git log --all --author="raj@test.com" --format="%H" | wc -l | tr -d ' ')"
+          # Exact match (new behavior) should return only raj's commit
+          exact_count="$(git log --all --author="<raj@test.com>" --format="%H" | wc -l | tr -d ' ')"
+
+          echo "Substring match count: $substring_count (expected 2)"
+          echo "Exact match count: $exact_count (expected 1)"
+
+          if [ "$exact_count" -eq 1 ]; then
+            echo "PASS: exact email matching works"
+          else
+            echo "FAIL: expected 1 commit for exact match, got $exact_count"
+            exit 1
           fi
 
       - name: Mirror email in commits
