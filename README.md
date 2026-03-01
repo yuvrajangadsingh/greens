@@ -4,15 +4,9 @@ Your work is real. Your contribution graph should show it.
 
 If you commit to private/org repos all day but your GitHub profile looks empty, greens fixes that. It mirrors commit timestamps (and optionally PRs, reviews, issues) to a public repo without exposing any code.
 
-```
-Before                              After
-┌────────────────────────┐          ┌────────────────────────┐
-│ ░░░░░░░░░░░░░░░░░░░░░░ │          │ ░█░██░█░░█░██░█░░█░██░ │
-│ ░░░░░░░░░░░░░░░░░░░░░░ │    →     │ ░█░██░█░░█░██░█░░█░██░ │
-│ ░░░░░░░░░░░░░░░░░░░░░░ │          │ ░█░██░█░░█░██░█░░█░██░ │
-└────────────────────────┘          └────────────────────────┘
-  Private work invisible              Real activity visible
-```
+<p align="center">
+  <img src="assets/demo.svg" alt="greens demo" width="600">
+</p>
 
 ## Install
 
