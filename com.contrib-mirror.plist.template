@@ -9,7 +9,7 @@
     <array>
       <string>/bin/bash</string>
       <!-- UPDATE THIS PATH -->
-      <string>/path/to/private-work-contributions-mirror/sync.sh</string>
+      <string>/path/to/greens/sync.sh</string>
     </array>
 
     <!-- Run at midnight daily -->
@@ -34,9 +34,9 @@
 
     <!-- UPDATE THESE PATHS -->
     <key>StandardOutPath</key>
-    <string>/path/to/private-work-contributions-mirror/logs/sync.out.log</string>
+    <string>/path/to/greens/logs/sync.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/path/to/private-work-contributions-mirror/logs/sync.err.log</string>
+    <string>/path/to/greens/logs/sync.err.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>

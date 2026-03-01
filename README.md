@@ -1,6 +1,6 @@
-# Private Work Contributions Mirror
+# greens
 
-Mirror commit timestamps (and optionally messages) from private work repos to your GitHub contribution graph—without exposing any code.
+Mirror commit timestamps (and optionally messages) from private work repos to your GitHub contribution graph, without exposing any code.
 
 ```
 Before                              After
@@ -25,8 +25,8 @@ brew install yuvrajangadsingh/greens/greens
 **Manual:**
 
 ```bash
-git clone https://github.com/yuvrajangadsingh/private-work-contributions-mirror.git
-cd private-work-contributions-mirror
+git clone https://github.com/yuvrajangadsingh/greens.git
+cd greens
 bash setup.sh
 ```
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Interactive setup wizard for private-work-contributions-mirror
+# Interactive setup wizard for greens
 #
 set -euo pipefail
 

@@ -7,7 +7,7 @@ Config dir stays `~/.contrib-mirror` for backward compat.
 
 1. Make all code + CI changes, commit, push to main
 2. Tag: `git tag v1.X.0 && git push origin v1.X.0`
-3. Get sha: `curl -sL https://github.com/yuvrajangadsingh/private-work-contributions-mirror/archive/refs/tags/v1.X.0.tar.gz | shasum -a 256`
+3. Get sha: `curl -sL https://github.com/yuvrajangadsingh/greens/archive/refs/tags/v1.X.0.tar.gz | shasum -a 256`
 4. Update `homebrew-contrib-mirror/Formula/greens.rb` with new tag URL + sha256
 5. Push formula: `cd homebrew-contrib-mirror && git add . && git commit && git push`
 
@@ -15,8 +15,8 @@ Config dir stays `~/.contrib-mirror` for backward compat.
 
 ## Repos
 
-- Main: `yuvrajangadsingh/private-work-contributions-mirror`
-- Homebrew tap: `yuvrajangadsingh/homebrew-contrib-mirror`
+- Main: `yuvrajangadsingh/greens`
+- Homebrew tap: `yuvrajangadsingh/homebrew-greens`
 
 ## CI
 

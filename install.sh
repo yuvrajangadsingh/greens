@@ -1,16 +1,16 @@
 #!/bin/bash
 #
-# One-liner installer for private-work-contributions-mirror
-# Usage: curl -fsSL https://raw.githubusercontent.com/yuvrajangadsingh/private-work-contributions-mirror/main/install.sh | bash
+# One-liner installer for greens
+# Usage: curl -fsSL https://raw.githubusercontent.com/yuvrajangadsingh/greens/main/install.sh | bash
 #
 set -euo pipefail
 
 INSTALL_DIR="$HOME/.contrib-mirror/src"
-REPO_URL="https://github.com/yuvrajangadsingh/private-work-contributions-mirror.git"
-BIN_NAME="contrib-mirror"
+REPO_URL="https://github.com/yuvrajangadsingh/greens.git"
+BIN_NAME="greens"
 
 echo ""
-echo "Installing private-work-contributions-mirror..."
+echo "Installing greens..."
 echo ""
 
 # Check dependencies
