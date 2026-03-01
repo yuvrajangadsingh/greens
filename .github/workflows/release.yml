@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  update-formula:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get tag version
+        id: tag
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute tarball sha256
+        id: sha
+        run: |
+          url="https://github.com/yuvrajangadsingh/greens/archive/refs/tags/${{ steps.tag.outputs.version }}.tar.gz"
+          sha=$(curl -sL "$url" | shasum -a 256 | cut -d' ' -f1)
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Update homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_PAT }}
+        run: |
+          # Fetch current formula
+          formula=$(gh api repos/yuvrajangadsingh/homebrew-greens/contents/Formula/greens.rb --jq '.content' | base64 -d)
+          file_sha=$(gh api repos/yuvrajangadsingh/homebrew-greens/contents/Formula/greens.rb --jq '.sha')
+
+          # Update url and sha256
+          updated=$(echo "$formula" | sed "s|url \".*\"|url \"${{ steps.sha.outputs.url }}\"|" | sed "s|sha256 \".*\"|sha256 \"${{ steps.sha.outputs.sha256 }}\"|")
+
+          # Push update
+          content=$(echo "$updated" | base64 -w 0)
+          gh api repos/yuvrajangadsingh/homebrew-greens/contents/Formula/greens.rb \
+            -X PUT \
+            -f message="greens ${{ steps.tag.outputs.version }}" \
+            -f content="$content" \
+            -f sha="$file_sha"
