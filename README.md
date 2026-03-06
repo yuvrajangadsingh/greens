@@ -37,6 +37,8 @@ bash setup.sh
 
 No code is exposed. The mirror contains empty commits with only timestamps.
 
+**Works with any git remote.** Your source repos can be on GitHub, GitLab, Bitbucket, or self-hosted. greens scans the local clone, not the remote. The mirror destination is GitHub (GitLab/Bitbucket mirror support is [planned](https://github.com/yuvrajangadsingh/greens/issues/1)).
+
 ## Usage
 
 ```bash
