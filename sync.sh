@@ -19,8 +19,11 @@ CONFIG_FILE="${CONTRIB_MIRROR_CONFIG:-$HOME/.contrib-mirror/config}"
 
 # CLI flags
 case "${1:-}" in
-  --setup)   exec "$SCRIPT_DIR/setup.sh" ;;
-  --help|-h) echo "Usage: greens [--setup|--status|--resync|--reset|--help|--version]"
+  --setup|init)   exec "$SCRIPT_DIR/setup.sh" ;;
+  sync)      ;; # alias: greens sync = greens (default)
+  --help|-h) echo "Usage: greens [sync|init|--setup|--status|--resync|--reset|--help|--version]"
+             echo "  sync       Run sync (default, same as bare greens)"
+             echo "  init       Run interactive setup wizard (alias for --setup)"
              echo "  --setup    Run interactive setup wizard"
              echo "  --status   Show current config and sync status"
              echo "  --resync   Wipe mirror history (local + remote) and sync fresh"

@@ -43,6 +43,8 @@ No code is exposed. The mirror contains empty commits with only timestamps.
 
 ```bash
 greens              # sync (runs setup on first use)
+greens sync         # same as above
+greens init         # run setup wizard (alias for --setup)
 greens --status     # show config and sync status
 greens --setup      # reconfigure
 greens --resync     # wipe and re-sync from scratch
