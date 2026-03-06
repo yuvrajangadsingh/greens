@@ -10,7 +10,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.6.2"
+VERSION="1.6.3"
 
 # Source config file if it exists
 # Config uses ${VAR:-value} so env vars always take precedence
