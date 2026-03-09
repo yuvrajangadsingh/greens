@@ -522,11 +522,19 @@ else
   remote_prefix="$(prompt "Remote URL prefix (e.g. git@github.com:YourOrg/)" "")"
 fi
 
-github_username="$(prompt "GitHub username (for PR/review/issue tracking)" "$default_username")"
+github_username="$(prompt "Work GitHub username (for PR/review/issue tracking)" "$default_username")"
 
 # Personal email for mirror commits — GitHub uses this to attribute green squares
-default_mirror_email="$(git config user.email 2>/dev/null || echo "")"
-mirror_email="$(prompt "Personal GitHub email (for green squares on your profile)" "$default_mirror_email")"
+# Preserve existing config on rerun, but do NOT auto-detect from git (it's likely the work email)
+default_mirror_email="${MIRROR_EMAIL:-}"
+echo ""
+info "Your PERSONAL GitHub email (not work). This is how GitHub"
+info "knows to light up green squares on YOUR profile."
+mirror_email="$(prompt "Personal GitHub email" "$default_mirror_email")"
+if [[ -z "$mirror_email" ]]; then
+  warn "No email provided. Green squares won't appear until you set this."
+  info "Fix later: greens --setup"
+fi
 
 since="$(prompt "Mirror commits since" "$default_since")"
 
@@ -534,6 +542,19 @@ if [[ -n "$github_username" ]] && confirm "Track PRs, reviews, and issues too?";
   activity_types="commits,prs,reviews,issues"
 else
   activity_types="commits"
+fi
+
+# Warn if mirror email matches work email
+if [[ -n "$mirror_email" && -n "$emails" ]]; then
+  for e in ${emails//,/ }; do
+    if [[ "$e" == "$mirror_email" ]]; then
+      echo ""
+      warn "Your mirror email ($mirror_email) matches a work email."
+      warn "This should be your PERSONAL GitHub email for green squares to show"
+      warn "on your personal profile. If this is wrong, re-run: greens --setup"
+      break
+    fi
+  done
 fi
 
 echo ""
@@ -551,6 +572,24 @@ fi
 # ── Step 4: Mirror repo ────────────────────────────────────────────────────
 
 mirror_dir="${MIRROR_DIR:-$CONFIG_DIR/mirror}"
+
+# Validate mirror isn't inside work directory
+resolved_mirror="$mirror_dir"
+if parent="$(cd "$(dirname "$mirror_dir")" 2>/dev/null && pwd)"; then
+  resolved_mirror="$parent/$(basename "$mirror_dir")"
+fi
+resolved_work=""
+if [[ -n "$work_dir" ]]; then
+  resolved_work="$(cd "$work_dir" 2>/dev/null && pwd)" || resolved_work="$work_dir"
+fi
+if [[ -n "$resolved_work" ]] && [[ "$resolved_mirror" == "$resolved_work" || "$resolved_mirror" == "$resolved_work/"* ]]; then
+  echo ""
+  warn "Mirror directory ($mirror_dir) is inside your work directory ($work_dir)."
+  warn "This will cause the sync to scan the mirror as a work repo."
+  info "Using default location: $CONFIG_DIR/mirror"
+  mirror_dir="$CONFIG_DIR/mirror"
+fi
+
 echo ""
 info "The mirror repo is where your contribution dots appear on GitHub."
 info "It can be public or private. If private, enable 'Private contributions'"
@@ -563,19 +602,53 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
       mirror_repo_name="$(prompt "Repo name" "work-contributions-mirror")"
       gh_user="$(gh api user -q .login 2>/dev/null || echo "")"
       if [[ -n "$gh_user" ]]; then
-        info "Creating github.com/$gh_user/$mirror_repo_name ..."
-      fi
-      if gh repo create "$mirror_repo_name" --public --description "Mirror of private work contributions" 2>/dev/null; then
-        ok "Created repo on GitHub"
-        # Get clone URL matching auth method
-        if [[ "$auth_method" == "ssh" ]]; then
-          mirror_url="$(gh repo view "$mirror_repo_name" --json sshUrl -q .sshUrl 2>/dev/null)"
-        else
-          mirror_url="$(gh repo view "$mirror_repo_name" --json url -q .url 2>/dev/null)"
+        # Check if gh is authenticated as work account (matches org or work username)
+        is_work_account=0
+        if [[ -n "${org_name:-}" && "$gh_user" == "$org_name" ]]; then
+          is_work_account=1
+        elif [[ -n "${github_username:-}" && "$gh_user" == "$github_username" ]]; then
+          is_work_account=1
         fi
-      else
-        warn "Couldn't create repo. Create it manually on GitHub."
-        mirror_url="$(prompt "Mirror repo URL" "")"
+
+        if [[ "$is_work_account" -eq 1 ]]; then
+          echo ""
+          warn "gh is authenticated as '$gh_user', which matches your work account."
+          warn "The mirror repo should be on your PERSONAL GitHub account."
+          info "Switch accounts: gh auth login"
+          echo ""
+          if ! confirm "Create repo under $gh_user anyway?"; then
+            mirror_url="$(prompt "Mirror repo URL (create it manually on your personal account)" "")"
+            skip_gh_create=1
+          fi
+        else
+          # Always confirm the target account before creating
+          echo ""
+          info "gh is authenticated as '$gh_user'."
+          if ! confirm "Create repo under $gh_user?"; then
+            mirror_url="$(prompt "Mirror repo URL (create it manually)" "")"
+            skip_gh_create=1
+          fi
+        fi
+
+        if [[ -z "${mirror_url:-}" && -z "${skip_gh_create:-}" ]]; then
+          info "Creating github.com/$gh_user/$mirror_repo_name ..."
+        fi
+      fi
+      if [[ -z "${mirror_url:-}" && -z "${skip_gh_create:-}" ]]; then
+        if gh repo create "$mirror_repo_name" --public --description "Mirror of private work contributions" 2>/dev/null; then
+          ok "Created repo on GitHub"
+          # Get clone URL matching auth method
+          if [[ "$auth_method" == "ssh" ]]; then
+            mirror_url="$(gh repo view "$mirror_repo_name" --json sshUrl -q .sshUrl 2>/dev/null)"
+          else
+            mirror_url="$(gh repo view "$mirror_repo_name" --json url -q .url 2>/dev/null)"
+          fi
+        else
+          warn "Couldn't create repo. Create it manually on GitHub."
+          mirror_url="$(prompt "Mirror repo URL" "")"
+        fi
+      elif [[ -z "${mirror_url:-}" ]]; then
+        mirror_url="$(prompt "Mirror repo URL (create it manually on your personal account)" "")"
       fi
     else
       mirror_url="$(prompt "Mirror repo URL (create an empty public repo on GitHub first)" "")"

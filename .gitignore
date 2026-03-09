@@ -13,3 +13,6 @@ mirror/
 
 # Temp files
 *.tmp
+
+# Launch notes
+launch-posts.md
