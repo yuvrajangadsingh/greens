@@ -790,9 +790,7 @@ log ""
 log "Step 5/5: Pushing to GitHub (making your contribution graph green)"
 
 push_output=""
-if push_output="$(git push origin main 2>&1)"; then
-  log "Mirror pushed."
-elif push_output="$(git push origin master 2>&1)"; then
+if push_output="$(git -C "$MIRROR_DIR" push origin HEAD 2>&1)"; then
   log "Mirror pushed."
 else
   log "ERROR: Push to mirror repo failed."

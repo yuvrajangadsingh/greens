@@ -35,6 +35,102 @@ ok()    { echo "  [ok] $*" >&2; }
 warn()  { echo "  [!] $*" >&2; }
 fail()  { echo "  [✗] $*" >&2; }
 
+# Mask credentials in URLs (https://TOKEN@github.com/... -> https://****@github.com/...)
+mask_url() {
+  echo "$1" | sed 's|https://[^@]*@|https://****@|'
+}
+
+# Detect personal SSH host and GitHub username.
+# Parses ~/.ssh/config for GitHub hosts, runs ssh -T on each,
+# returns the one that ISN'T the work account.
+# Sets: PERSONAL_SSH_HOST, PERSONAL_GH_USER
+detect_personal_ssh() {
+  local work_user="${1:-}" work_host="${2:-}"
+  PERSONAL_SSH_HOST=""
+  PERSONAL_GH_USER=""
+
+  [[ ! -f "$HOME/.ssh/config" ]] && return 1
+
+  # Extract all GitHub host aliases from SSH config
+  local hosts=()
+  while IFS= read -r line; do
+    # Match "Host github*" or "Host *github*" lines, extract the alias
+    local h
+    h="$(echo "$line" | sed -n 's/^[Hh]ost[[:space:]][[:space:]]*//p' | tr -d ' ')"
+    [[ -n "$h" && "$h" != "*" ]] && hosts+=("$h")
+  done < <(grep -i "^[[:space:]]*host[[:space:]].*github" "$HOME/.ssh/config" 2>/dev/null | grep -iv "hostname")
+
+  [[ ${#hosts[@]} -lt 2 ]] && return 1
+
+  for h in "${hosts[@]}"; do
+    # Skip the known work host
+    [[ "$h" == "$work_host" ]] && continue
+
+    # Test SSH and extract username
+    local ssh_output
+    ssh_output="$(ssh -T -o BatchMode=yes -o ConnectTimeout=5 "git@$h" 2>&1 || true)"
+    local gh_user
+    gh_user="$(echo "$ssh_output" | sed -n 's/.*Hi \([^!]*\)!.*/\1/p' | head -1)"
+
+    if [[ -n "$gh_user" && "$gh_user" != "$work_user" ]]; then
+      PERSONAL_SSH_HOST="$h"
+      PERSONAL_GH_USER="$gh_user"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Prompt for HTTPS token and embed in mirror remote URL.
+# Usage: fix_https_auth <mirror_dir> <current_url>
+fix_https_auth() {
+  local mdir="$1" url="$2" mirror_token=""
+  info "HTTPS repos need authentication to push."
+  echo ""
+  info "Create a PAT on your PERSONAL GitHub account (not work):"
+  info "  https://github.com/settings/tokens/new"
+  info "  Scope: [x] repo"
+  echo ""
+  if confirm "Do you have a personal GitHub token for push access?"; then
+    printf "  Paste token (hidden): " >&2
+    read -rs mirror_token
+    echo "" >&2
+  else
+    echo ""
+    info "How to create one:"
+    info "  1. Go to: https://github.com/settings/tokens/new"
+    info "     (Make sure you're logged into your PERSONAL GitHub, not work)"
+    info "  2. Note: greens-push"
+    info "  3. Expiration: 90 days"
+    info "  4. Select scopes: [x] repo"
+    info "  5. Click 'Generate token' and copy it"
+    echo ""
+    if confirm "Ready to paste the token?"; then
+      printf "  Paste token (hidden): " >&2
+      read -rs mirror_token
+      echo "" >&2
+    else
+      mirror_token=""
+    fi
+  fi
+  if [[ -n "${mirror_token:-}" ]]; then
+    local authed_url
+    authed_url="$(echo "$url" | sed "s|https://[^@]*@|https://|; s|https://|https://${mirror_token}@|")"
+    git -C "$mdir" remote set-url origin "$authed_url"
+    if git -C "$mdir" push origin HEAD 2>/dev/null; then
+      ok "Push access works now"
+      return 0
+    else
+      warn "Still can't push. Check that the token has repo scope and the repo exists."
+      return 1
+    fi
+  else
+    warn "Skipping — commits won't push to GitHub until auth is configured."
+    info "Fix later: greens --setup"
+    return 1
+  fi
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Prerequisites check
 # ─────────────────────────────────────────────────────────────────────────────
@@ -596,13 +692,53 @@ info "It can be public or private. If private, enable 'Private contributions'"
 info "in GitHub Settings > Profile so the green squares show on your profile."
 echo ""
 if [[ ! -d "$mirror_dir/.git" ]]; then
-  # Offer to create via gh if available
-  if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+  mirror_repo_name="$(prompt "Repo name" "work-contributions-mirror")"
+
+  # Try to auto-detect personal SSH identity for the mirror
+  personal_host=""
+  personal_user=""
+  if [[ "$auth_method" == "ssh" ]]; then
+    info "Detecting your personal GitHub account from SSH config..."
+    if detect_personal_ssh "${github_username:-}" "${detected_ssh_host:-}"; then
+      personal_host="$PERSONAL_SSH_HOST"
+      personal_user="$PERSONAL_GH_USER"
+      ok "Found personal account: $personal_user (SSH host: $personal_host)"
+    fi
+  fi
+
+  if [[ -n "$personal_user" && -n "$personal_host" ]]; then
+    # SSH multi-account: auto-construct mirror URL using personal identity
+    mirror_url="git@${personal_host}:${personal_user}/${mirror_repo_name}.git"
+    info "Mirror URL: $mirror_url"
+    echo ""
+
+    # Try to create the repo on GitHub
+    repo_created=0
+    if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+      gh_user="$(gh api user -q .login 2>/dev/null || echo "")"
+      if [[ "$gh_user" == "$personal_user" ]]; then
+        # gh is on the personal account, create directly
+        if gh repo create "$mirror_repo_name" --public --description "Mirror of private work contributions" 2>/dev/null; then
+          ok "Created github.com/$personal_user/$mirror_repo_name"
+          repo_created=1
+        fi
+      fi
+    fi
+
+    if [[ "$repo_created" -eq 0 ]]; then
+      echo ""
+      info "Create this repo on your personal GitHub before continuing:"
+      info "  https://github.com/new?name=$mirror_repo_name"
+      echo ""
+      info "Press Enter when done..."
+      read -r
+    fi
+  elif command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+    # Fallback: use gh CLI (single account or HTTPS)
     if confirm "Create a new public mirror repo on GitHub?"; then
-      mirror_repo_name="$(prompt "Repo name" "work-contributions-mirror")"
       gh_user="$(gh api user -q .login 2>/dev/null || echo "")"
       if [[ -n "$gh_user" ]]; then
-        # Check if gh is authenticated as work account (matches org or work username)
+        # Check if gh is authenticated as work account
         is_work_account=0
         if [[ -n "${org_name:-}" && "$gh_user" == "$org_name" ]]; then
           is_work_account=1
@@ -621,7 +757,6 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
             skip_gh_create=1
           fi
         else
-          # Always confirm the target account before creating
           echo ""
           info "gh is authenticated as '$gh_user'."
           if ! confirm "Create repo under $gh_user?"; then
@@ -637,7 +772,6 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
       if [[ -z "${mirror_url:-}" && -z "${skip_gh_create:-}" ]]; then
         if gh repo create "$mirror_repo_name" --public --description "Mirror of private work contributions" 2>/dev/null; then
           ok "Created repo on GitHub"
-          # Get clone URL matching auth method
           if [[ "$auth_method" == "ssh" ]]; then
             mirror_url="$(gh repo view "$mirror_repo_name" --json sshUrl -q .sshUrl 2>/dev/null)"
           else
@@ -664,8 +798,11 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
       mkdir -p "$mirror_dir"
       git -C "$mirror_dir" init --quiet
       git -C "$mirror_dir" remote add origin "$mirror_url"
-      git -C "$mirror_dir" commit --allow-empty -m "init" --quiet
     }
+    # Ensure at least one commit exists (empty repos have no HEAD)
+    if ! git -C "$mirror_dir" rev-parse --verify HEAD &>/dev/null; then
+      git -C "$mirror_dir" commit --allow-empty -m "init" --quiet
+    fi
     ok "Mirror repo ready at $mirror_dir"
 
     # Test push access
@@ -677,51 +814,7 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
       warn "Can't push to mirror repo. Commits will be created locally but won't appear on GitHub."
       echo ""
       if [[ "$mirror_url" == https://* ]]; then
-        info "HTTPS repos need authentication to push. Options:"
-        echo ""
-        info "  Option 1: Embed a Personal Access Token in the URL"
-        info "  ─────────────────────────────────────────────────"
-        info "  Create a PAT on your PERSONAL GitHub account (not work):"
-        info "    https://github.com/settings/tokens/new"
-        info "    Scope: [x] repo"
-        echo ""
-        if confirm "Do you have a personal GitHub token for push access?"; then
-          printf "  Paste token (hidden): " >&2
-          read -rs mirror_token
-          echo "" >&2
-        else
-          echo ""
-          info "No worries — here's how to create one:"
-          echo ""
-          info "  1. Go to: https://github.com/settings/tokens/new"
-          info "     (Make sure you're logged into your PERSONAL GitHub, not work)"
-          info "  2. Note: greens-push"
-          info "  3. Expiration: 90 days (or custom)"
-          info "  4. Select scopes:"
-          info "     [x] repo"
-          info "  5. Click 'Generate token' and copy it"
-          echo ""
-          if confirm "Ready to paste the token?"; then
-            printf "  Paste token (hidden): " >&2
-            read -rs mirror_token
-            echo "" >&2
-          else
-            mirror_token=""
-          fi
-        fi
-        if [[ -n "${mirror_token:-}" ]]; then
-          # Embed token in remote URL: https://TOKEN@github.com/user/repo.git
-          authed_url="$(echo "$mirror_url" | sed "s|https://|https://${mirror_token}@|")"
-          git -C "$mirror_dir" remote set-url origin "$authed_url"
-          if git -C "$mirror_dir" push origin HEAD 2>/dev/null; then
-            ok "Push access works now"
-          else
-            warn "Still can't push. Check that the token has repo scope and the repo exists on GitHub."
-          fi
-        else
-          warn "Skipping — your sync will run but commits won't push to GitHub."
-          info "Fix later: greens --setup"
-        fi
+        fix_https_auth "$mirror_dir" "$mirror_url"
       else
         info "Check that your SSH key has access to push to this repo."
       fi
@@ -729,6 +822,76 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
   fi
 else
   ok "Mirror repo already exists at $mirror_dir"
+  current_remote="$(git -C "$mirror_dir" remote get-url origin 2>/dev/null || echo "")"
+  if [[ -n "$current_remote" ]]; then
+    info "Current remote: $(mask_url "$current_remote")"
+    echo ""
+
+    # Test push access
+    info "Testing push access..."
+    if git -C "$mirror_dir" push origin HEAD 2>/dev/null; then
+      ok "Push access works"
+    else
+      warn "Can't push to mirror repo."
+      echo ""
+      echo "  What would you like to do?" >&2
+      echo "  1) Change the remote URL (wrong repo or deleted repo)" >&2
+      echo "  2) Fix push authentication (HTTPS token)" >&2
+      echo "  3) Skip (fix later)" >&2
+      printf "  Choice [1]: " >&2
+      read -r push_fix_choice
+      push_fix_choice="${push_fix_choice:-1}"
+
+      case "$push_fix_choice" in
+        1)
+          new_mirror_url="$(prompt "New mirror repo URL" "")"
+          if [[ -n "$new_mirror_url" ]]; then
+            git -C "$mirror_dir" remote set-url origin "$new_mirror_url"
+            ok "Remote updated to $(mask_url "$new_mirror_url")"
+            # Test push with new URL
+            info "Testing push access..."
+            if git -C "$mirror_dir" push origin HEAD 2>/dev/null; then
+              ok "Push access works"
+            elif [[ "$new_mirror_url" == https://* ]]; then
+              warn "Can't push with new URL."
+              fix_https_auth "$mirror_dir" "$new_mirror_url"
+            else
+              warn "Still can't push. Check SSH access to this repo."
+            fi
+          fi
+          ;;
+        2)
+          if [[ "$current_remote" == https://* ]]; then
+            fix_https_auth "$mirror_dir" "$current_remote"
+          else
+            info "Current remote uses SSH. Check that your SSH key has push access."
+            info "Test: ssh -T git@github.com"
+          fi
+          ;;
+        *)
+          info "Skipping. Fix later: greens --setup"
+          ;;
+      esac
+    fi
+  else
+    warn "No remote URL configured for mirror repo."
+    new_mirror_url="$(prompt "Mirror repo URL" "")"
+    if [[ -n "$new_mirror_url" ]]; then
+      git -C "$mirror_dir" remote add origin "$new_mirror_url" 2>/dev/null || \
+        git -C "$mirror_dir" remote set-url origin "$new_mirror_url"
+      ok "Remote set to $(mask_url "$new_mirror_url")"
+      # Test push access right away
+      info "Testing push access..."
+      if git -C "$mirror_dir" push origin HEAD 2>/dev/null; then
+        ok "Push access works"
+      elif [[ "$new_mirror_url" == https://* ]]; then
+        warn "Can't push."
+        fix_https_auth "$mirror_dir" "$new_mirror_url"
+      else
+        warn "Can't push. Check SSH access to this repo."
+      fi
+    fi
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
