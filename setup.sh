@@ -40,6 +40,97 @@ mask_url() {
   echo "$1" | sed 's|https://[^@]*@|https://****@|'
 }
 
+# Prompt for a mirror repo URL. Trims whitespace, rejects empty, loops until valid.
+prompt_mirror_url() {
+  local msg="${1:-Mirror repo URL}"
+  local url=""
+  while true; do
+    url="$(prompt "$msg" "")"
+    # Trim whitespace
+    url="$(echo "$url" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    if [[ -n "$url" ]]; then
+      echo "$url"
+      return 0
+    fi
+    warn "URL cannot be empty. Create the repo first, then paste the URL."
+  done
+}
+
+# Parse the GitHub owner from a remote URL.
+# Handles: git@host:owner/repo.git, https://github.com/owner/repo.git, https://token@github.com/owner/repo
+parse_remote_owner() {
+  local url="$1"
+  echo "$url" | sed -n 's|.*[:/]\([^/]*\)/[^/]*$|\1|p' | head -1
+}
+
+# Verify the mirror remote is owned by the expected personal account.
+# Sets owner_verified=1 if match, prints warning if mismatch.
+verify_mirror_owner() {
+  local mdir="$1" expected_user="$2"
+  owner_verified=0
+  [[ -z "$expected_user" ]] && return 0
+
+  local remote_url
+  remote_url="$(git -C "$mdir" remote get-url origin 2>/dev/null || echo "")"
+  [[ -z "$remote_url" ]] && return 0
+
+  local actual_owner
+  actual_owner="$(parse_remote_owner "$remote_url")"
+  if [[ -n "$actual_owner" && "$actual_owner" == "$expected_user" ]]; then
+    ok "Mirror repo owner matches personal account ($actual_owner)"
+    owner_verified=1
+  elif [[ -n "$actual_owner" ]]; then
+    warn "Mirror repo is owned by '$actual_owner', but your personal account is '$expected_user'."
+    warn "Green squares will appear on '$actual_owner', not on your profile."
+    info "Fix: create the repo under '$expected_user' and update the remote."
+  fi
+}
+
+# Test push access and set push_verified=1 on success.
+# If HTTPS and push fails, tries fix_https_auth.
+test_push_access() {
+  local mdir="$1" url="${2:-}"
+  info "Testing push access..."
+  if git -C "$mdir" push origin HEAD 2>/dev/null; then
+    ok "Push access works"
+    push_verified=1
+    return 0
+  fi
+  # Resolve the effective URL
+  local effective_url="${url:-}"
+  if [[ -z "$effective_url" ]]; then
+    effective_url="$(git -C "$mdir" remote get-url origin 2>/dev/null || echo "")"
+  fi
+
+  if [[ "$effective_url" == https://* ]]; then
+    warn "Can't push."
+    if fix_https_auth "$mdir" "$effective_url"; then
+      push_verified=1
+      return 0
+    fi
+  elif [[ "$effective_url" == git@* ]]; then
+    warn "Can't push via SSH."
+    info "Your SSH key may not have access to this repo."
+    info "You can switch to HTTPS + a personal access token instead."
+    if confirm "Switch mirror remote to HTTPS?"; then
+      local https_url
+      https_url="$(echo "$effective_url" | sed 's|git@\([^:]*\):|https://github.com/|')"
+      git -C "$mdir" remote set-url origin "$https_url"
+      ok "Remote switched to $https_url"
+      if fix_https_auth "$mdir" "$https_url"; then
+        push_verified=1
+        return 0
+      fi
+      # Restore SSH remote if HTTPS auth failed
+      git -C "$mdir" remote set-url origin "$effective_url"
+      warn "HTTPS auth failed. Restored SSH remote."
+    fi
+  else
+    warn "Can't push. Check access to this repo."
+  fi
+  return 1
+}
+
 # Detect personal SSH host and GitHub username.
 # Parses ~/.ssh/config for GitHub hosts, runs ssh -T on each,
 # returns the one that ISN'T the work account.
@@ -632,6 +723,17 @@ if [[ -z "$mirror_email" ]]; then
   info "Fix later: greens --setup"
 fi
 
+# Personal GitHub username — the mirror repo MUST be under this account
+echo ""
+info "Your PERSONAL GitHub username. The mirror repo will be owned by"
+info "this account, which is how green squares appear on YOUR profile."
+default_personal_user="${PERSONAL_GH_USER:-}"
+personal_github_user="$(prompt "Personal GitHub username" "$default_personal_user")"
+if [[ -z "$personal_github_user" ]]; then
+  warn "No personal username provided. Can't verify mirror repo ownership."
+  info "Fix later: greens --setup"
+fi
+
 since="$(prompt "Mirror commits since" "$default_since")"
 
 if [[ -n "$github_username" ]] && confirm "Track PRs, reviews, and issues too?"; then
@@ -668,6 +770,8 @@ fi
 # ── Step 4: Mirror repo ────────────────────────────────────────────────────
 
 mirror_dir="${MIRROR_DIR:-$CONFIG_DIR/mirror}"
+push_verified=0
+owner_verified=0
 
 # Validate mirror isn't inside work directory
 resolved_mirror="$mirror_dir"
@@ -707,60 +811,89 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
   fi
 
   if [[ -n "$personal_user" && -n "$personal_host" ]]; then
-    # SSH multi-account: auto-construct mirror URL using personal identity
-    mirror_url="git@${personal_host}:${personal_user}/${mirror_repo_name}.git"
-    info "Mirror URL: $mirror_url"
-    echo ""
-
-    # Try to create the repo on GitHub
-    repo_created=0
-    if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
-      gh_user="$(gh api user -q .login 2>/dev/null || echo "")"
-      if [[ "$gh_user" == "$personal_user" ]]; then
-        # gh is on the personal account, create directly
-        if gh repo create "$mirror_repo_name" --public --description "Mirror of private work contributions" 2>/dev/null; then
-          ok "Created github.com/$personal_user/$mirror_repo_name"
-          repo_created=1
-        fi
+    # If user left personal username blank, confirm SSH-detected account
+    if [[ -z "${personal_github_user:-}" ]]; then
+      if confirm "SSH detected personal account '$personal_user'. Is this correct?"; then
+        personal_github_user="$personal_user"
+      else
+        warn "Skipping SSH auto-detection. Provide the mirror URL manually."
+        mirror_url="$(prompt_mirror_url "Mirror repo URL (create an empty public repo on your personal GitHub first)")"
+        personal_user=""
+        personal_host=""
       fi
     fi
 
-    if [[ "$repo_created" -eq 0 ]]; then
-      echo ""
-      info "Create this repo on your personal GitHub before continuing:"
-      info "  https://github.com/new?name=$mirror_repo_name"
-      echo ""
-      info "Press Enter when done..."
-      read -r
+    # Only proceed with SSH auto-construction if we still have valid SSH info
+    # (may have been cleared if user declined SSH detection above)
+    if [[ -n "$personal_user" && -n "$personal_host" ]]; then
+      if [[ "$personal_user" != "$personal_github_user" ]]; then
+        warn "SSH config detected '$personal_user', but your personal account is '$personal_github_user'."
+        warn "SSH host '$personal_host' may use the wrong key for '$personal_github_user'."
+        warn "Skipping auto-constructed URL. Provide the mirror URL manually."
+        mirror_url="$(prompt_mirror_url "Mirror repo URL (create it on your personal account, then paste URL here)")"
+      else
+        # SSH multi-account: auto-construct mirror URL using personal identity
+        mirror_url="git@${personal_host}:${personal_user}/${mirror_repo_name}.git"
+        info "Mirror URL: $mirror_url"
+        echo ""
+
+        # Try to create the repo on GitHub
+        repo_created=0
+        if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+          gh_user="$(gh api user -q .login 2>/dev/null || echo "")"
+          if [[ "$gh_user" == "$personal_user" ]]; then
+            # gh is on the personal account, create directly
+            if gh repo create "$mirror_repo_name" --public --description "Mirror of private work contributions" 2>/dev/null; then
+              ok "Created github.com/$personal_user/$mirror_repo_name"
+              repo_created=1
+            fi
+          fi
+        fi
+
+        if [[ "$repo_created" -eq 0 ]]; then
+          echo ""
+          info "Create this repo on your personal GitHub before continuing:"
+          info "  https://github.com/new?name=$mirror_repo_name"
+          echo ""
+          info "Press Enter when done..."
+          read -r
+        fi
+      fi
     fi
+  elif [[ -z "${personal_github_user:-}" ]]; then
+    # No personal username provided, can't verify ownership. Force manual URL.
+    warn "Without a personal username, can't auto-create or verify repo ownership."
+    mirror_url="$(prompt_mirror_url "Mirror repo URL (create an empty public repo on your personal GitHub first)")"
   elif command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
     # Fallback: use gh CLI (single account or HTTPS)
     if confirm "Create a new public mirror repo on GitHub?"; then
       gh_user="$(gh api user -q .login 2>/dev/null || echo "")"
       if [[ -n "$gh_user" ]]; then
-        # Check if gh is authenticated as work account
-        is_work_account=0
-        if [[ -n "${org_name:-}" && "$gh_user" == "$org_name" ]]; then
-          is_work_account=1
+        # Verify gh is on the personal account, not work
+        is_wrong_account=0
+        if [[ -n "${personal_github_user:-}" && "$gh_user" != "$personal_github_user" ]]; then
+          is_wrong_account=1
+        elif [[ -n "${org_name:-}" && "$gh_user" == "$org_name" ]]; then
+          is_wrong_account=1
         elif [[ -n "${github_username:-}" && "$gh_user" == "$github_username" ]]; then
-          is_work_account=1
+          is_wrong_account=1
         fi
 
-        if [[ "$is_work_account" -eq 1 ]]; then
+        if [[ "$is_wrong_account" -eq 1 ]]; then
           echo ""
-          warn "gh is authenticated as '$gh_user', which matches your work account."
-          warn "The mirror repo should be on your PERSONAL GitHub account."
-          info "Switch accounts: gh auth login"
+          warn "gh is authenticated as '$gh_user', but your personal account is '${personal_github_user:-unknown}'."
+          warn "The mirror repo MUST be on your personal account for green squares to work."
           echo ""
-          if ! confirm "Create repo under $gh_user anyway?"; then
-            mirror_url="$(prompt "Mirror repo URL (create it manually on your personal account)" "")"
-            skip_gh_create=1
-          fi
+          info "To fix: gh auth login  (log in as $personal_github_user)"
+          info "Or create the repo manually: https://github.com/new?name=$mirror_repo_name"
+          echo ""
+          mirror_url="$(prompt_mirror_url "Mirror repo URL (create it on your personal account, then paste URL here)")"
+          skip_gh_create=1
         else
           echo ""
           info "gh is authenticated as '$gh_user'."
           if ! confirm "Create repo under $gh_user?"; then
-            mirror_url="$(prompt "Mirror repo URL (create it manually)" "")"
+            mirror_url="$(prompt_mirror_url "Mirror repo URL (create it manually)")"
             skip_gh_create=1
           fi
         fi
@@ -779,16 +912,16 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
           fi
         else
           warn "Couldn't create repo. Create it manually on GitHub."
-          mirror_url="$(prompt "Mirror repo URL" "")"
+          mirror_url="$(prompt_mirror_url "Mirror repo URL")"
         fi
       elif [[ -z "${mirror_url:-}" ]]; then
-        mirror_url="$(prompt "Mirror repo URL (create it manually on your personal account)" "")"
+        mirror_url="$(prompt_mirror_url "Mirror repo URL (create it manually on your personal account)")"
       fi
     else
-      mirror_url="$(prompt "Mirror repo URL (create an empty public repo on GitHub first)" "")"
+      mirror_url="$(prompt_mirror_url "Mirror repo URL (create an empty public repo on GitHub first)")"
     fi
   else
-    mirror_url="$(prompt "Mirror repo URL (create an empty public repo on GitHub first)" "")"
+    mirror_url="$(prompt_mirror_url "Mirror repo URL (create an empty public repo on GitHub first)")"
   fi
 
   if [[ -n "${mirror_url:-}" ]]; then
@@ -800,25 +933,22 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
       git -C "$mirror_dir" remote add origin "$mirror_url"
     }
     # Ensure at least one commit exists (empty repos have no HEAD)
+    # Use mirror email so this commit is attributed to the personal account
     if ! git -C "$mirror_dir" rev-parse --verify HEAD &>/dev/null; then
-      git -C "$mirror_dir" commit --allow-empty -m "init" --quiet
+      init_args=()
+      if [[ -n "${mirror_email:-}" ]]; then
+        init_args+=(-c "user.email=$mirror_email")
+      fi
+      if [[ -n "${personal_github_user:-}" ]]; then
+        init_args+=(-c "user.name=$personal_github_user")
+      fi
+      git -C "$mirror_dir" "${init_args[@]}" commit --allow-empty -m "init" --quiet
     fi
     ok "Mirror repo ready at $mirror_dir"
 
     # Test push access
     echo ""
-    info "Testing push access to mirror repo..."
-    if git -C "$mirror_dir" push origin HEAD 2>/dev/null; then
-      ok "Push access works"
-    else
-      warn "Can't push to mirror repo. Commits will be created locally but won't appear on GitHub."
-      echo ""
-      if [[ "$mirror_url" == https://* ]]; then
-        fix_https_auth "$mirror_dir" "$mirror_url"
-      else
-        info "Check that your SSH key has access to push to this repo."
-      fi
-    fi
+    test_push_access "$mirror_dir" "$mirror_url"
   fi
 else
   ok "Mirror repo already exists at $mirror_dir"
@@ -828,11 +958,7 @@ else
     echo ""
 
     # Test push access
-    info "Testing push access..."
-    if git -C "$mirror_dir" push origin HEAD 2>/dev/null; then
-      ok "Push access works"
-    else
-      warn "Can't push to mirror repo."
+    if ! test_push_access "$mirror_dir"; then
       echo ""
       echo "  What would you like to do?" >&2
       echo "  1) Change the remote URL (wrong repo or deleted repo)" >&2
@@ -844,29 +970,13 @@ else
 
       case "$push_fix_choice" in
         1)
-          new_mirror_url="$(prompt "New mirror repo URL" "")"
-          if [[ -n "$new_mirror_url" ]]; then
-            git -C "$mirror_dir" remote set-url origin "$new_mirror_url"
-            ok "Remote updated to $(mask_url "$new_mirror_url")"
-            # Test push with new URL
-            info "Testing push access..."
-            if git -C "$mirror_dir" push origin HEAD 2>/dev/null; then
-              ok "Push access works"
-            elif [[ "$new_mirror_url" == https://* ]]; then
-              warn "Can't push with new URL."
-              fix_https_auth "$mirror_dir" "$new_mirror_url"
-            else
-              warn "Still can't push. Check SSH access to this repo."
-            fi
-          fi
+          new_mirror_url="$(prompt_mirror_url "New mirror repo URL")"
+          git -C "$mirror_dir" remote set-url origin "$new_mirror_url"
+          ok "Remote updated to $(mask_url "$new_mirror_url")"
+          test_push_access "$mirror_dir" "$new_mirror_url"
           ;;
         2)
-          if [[ "$current_remote" == https://* ]]; then
-            fix_https_auth "$mirror_dir" "$current_remote"
-          else
-            info "Current remote uses SSH. Check that your SSH key has push access."
-            info "Test: ssh -T git@github.com"
-          fi
+          test_push_access "$mirror_dir" "$current_remote"
           ;;
         *)
           info "Skipping. Fix later: greens --setup"
@@ -875,22 +985,11 @@ else
     fi
   else
     warn "No remote URL configured for mirror repo."
-    new_mirror_url="$(prompt "Mirror repo URL" "")"
-    if [[ -n "$new_mirror_url" ]]; then
-      git -C "$mirror_dir" remote add origin "$new_mirror_url" 2>/dev/null || \
-        git -C "$mirror_dir" remote set-url origin "$new_mirror_url"
-      ok "Remote set to $(mask_url "$new_mirror_url")"
-      # Test push access right away
-      info "Testing push access..."
-      if git -C "$mirror_dir" push origin HEAD 2>/dev/null; then
-        ok "Push access works"
-      elif [[ "$new_mirror_url" == https://* ]]; then
-        warn "Can't push."
-        fix_https_auth "$mirror_dir" "$new_mirror_url"
-      else
-        warn "Can't push. Check SSH access to this repo."
-      fi
-    fi
+    new_mirror_url="$(prompt_mirror_url "Mirror repo URL")"
+    git -C "$mirror_dir" remote add origin "$new_mirror_url" 2>/dev/null || \
+      git -C "$mirror_dir" remote set-url origin "$new_mirror_url"
+    ok "Remote set to $(mask_url "$new_mirror_url")"
+    test_push_access "$mirror_dir" "$new_mirror_url"
   fi
 fi
 
@@ -996,6 +1095,7 @@ EMAILS="\${EMAILS:-$emails}"
 REMOTE_PREFIX="\${REMOTE_PREFIX:-$remote_prefix}"
 MIRROR_DIR="\${MIRROR_DIR:-$mirror_dir}"
 GITHUB_USERNAME="\${GITHUB_USERNAME:-$github_username}"
+PERSONAL_GH_USER="\${PERSONAL_GH_USER:-${personal_github_user:-}}"
 MIRROR_EMAIL="\${MIRROR_EMAIL:-$mirror_email}"
 ACTIVITY_TYPES="\${ACTIVITY_TYPES:-$activity_types}"
 COPY_MESSAGES="\${COPY_MESSAGES:-$copy_messages}"
@@ -1013,16 +1113,49 @@ fi
 echo ""
 ok "Config saved to $CONFIG_FILE"
 
+# Verify mirror repo owner matches personal account
+if [[ -d "$mirror_dir/.git" ]]; then
+  echo ""
+  verify_mirror_owner "$mirror_dir" "${personal_github_user:-}"
+fi
+
+# Post-setup verification: run a test sync to confirm the full pipeline works
+if [[ "$push_verified" -eq 1 && -d "$mirror_dir/.git" ]]; then
+  echo ""
+  info "Running test sync to verify the full pipeline..."
+  if bash "$SCRIPT_DIR/sync.sh" 2>/dev/null; then
+    ok "Test sync completed successfully"
+  else
+    warn "Test sync had issues. Run 'greens' manually to debug."
+    push_verified=0
+  fi
+fi
+
+# Final status
 echo ""
-ok "Setup complete!"
-echo ""
-echo "  ┌─────────────────────────────────────────────────────────────┐"
-echo "  │  IMPORTANT: Enable private contributions on GitHub          │"
-echo "  │                                                             │"
-echo "  │  Go to: https://github.com/settings/profile                │"
-echo "  │  Scroll to 'Contributions' and check:                      │"
-echo "  │    [x] Include private contributions on my profile          │"
-echo "  │                                                             │"
-echo "  │  Without this, your green squares won't show to visitors.   │"
-echo "  └─────────────────────────────────────────────────────────────┘"
+if [[ "$push_verified" -eq 1 && "$owner_verified" -eq 1 && -n "${mirror_email:-}" ]]; then
+  ok "Setup complete!"
+  echo ""
+  echo "  ┌─────────────────────────────────────────────────────────────┐"
+  echo "  │  IMPORTANT: Enable private contributions on GitHub          │"
+  echo "  │                                                             │"
+  echo "  │  Go to: https://github.com/settings/profile                │"
+  echo "  │  Scroll to 'Contributions' and check:                      │"
+  echo "  │    [x] Include private contributions on my profile          │"
+  echo "  │                                                             │"
+  echo "  │  Without this, your green squares won't show to visitors.   │"
+  echo "  └─────────────────────────────────────────────────────────────┘"
+elif [[ "$push_verified" -eq 1 && "$owner_verified" -eq 0 ]]; then
+  warn "Setup saved. Push works, but mirror repo owner couldn't be verified."
+  warn "Make sure the repo is under your personal account for green squares."
+  info "Re-run: greens --setup"
+elif [[ "$push_verified" -eq 1 && -z "${mirror_email:-}" ]]; then
+  warn "Setup saved. Push works, but no personal email set."
+  warn "Green squares won't show without a personal email."
+  info "Re-run: greens --setup"
+else
+  warn "Setup saved but push to GitHub isn't working yet."
+  warn "Green squares won't appear until push access is fixed."
+  info "Re-run: greens --setup"
+fi
 echo ""
