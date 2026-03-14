@@ -47,19 +47,29 @@ jobs:
           git commit --allow-empty -m "init"
           cd -
 
+          # Add a remote to the mirror repo so the "already exists" path works
+          cd /tmp/test-mirror
+          git remote add origin https://github.com/testuser/test-mirror.git
+          cd -
+
           # Pipe inputs to setup wizard:
+          # Auth is auto-detected as HTTPS from fake-repo, so no auth_choice prompt.
           # 1. work dir
-          # 2. auth choice (2=HTTPS)
-          # 3. no token ready (n)
-          # 4. skip token (n)
-          # 5. emails
-          # 6. org name
-          # 7. github username (empty)
-          # 8. mirror email (personal github email)
-          # 9. copy messages (n)
-          # 10. mirror repo URL (empty — skip, we'll set dir manually)
-          # 11. scheduler (3=skip)
-          printf '/tmp/test-work\n2\nn\nn\ntest@test.com\ntest-org\n\npersonal@test.com\nn\n\n3\n' | bash setup.sh || true
+          # 2. PAT ready? (n)
+          # 3. enter token now? (n)
+          # 4. emails
+          # 5. org name
+          # 6. github username (empty)
+          # 7. mirror email
+          # 8. personal github username
+          # 9. since (empty)
+          # 10. copy messages (n)
+          # 11-15. extra inputs for mirror/push prompts and scheduler
+          #
+          # timeout prevents infinite loop if inputs run out (prompt_mirror_url
+          # spins on EOF). The || true keeps the step green regardless.
+          printf '/tmp/test-work\nn\nn\ntest@test.com\ntest-org\n\npersonal@test.com\ntestuser\n\nn\n3\n3\nn\nn\n3\n' \
+            | MIRROR_DIR=/tmp/test-mirror timeout 60 bash setup.sh || true
 
           # Verify config was created
           if [ -f "$HOME/.contrib-mirror/config" ]; then
