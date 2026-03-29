@@ -232,6 +232,10 @@ jobs:
       - name: Setup wizard (non-interactive, Windows Task Scheduler)
         shell: bash
         run: |
+          # Git identity needed for commits on Windows runner
+          git config --global user.email "ci@test.com"
+          git config --global user.name "CI"
+
           # Create a temp work dir with a fake git repo
           mkdir -p /tmp/test-work/fake-repo
           cd /tmp/test-work/fake-repo
