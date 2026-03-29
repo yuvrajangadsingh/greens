@@ -115,6 +115,8 @@ case "${1:-}" in
       echo "  Scheduler:    launchd (active)"
     elif crontab -l 2>/dev/null | grep -q "sync.sh"; then
       echo "  Scheduler:    cron"
+    elif schtasks.exe /Query /TN "greens-daily-sync" 2>/dev/null | grep -qi "greens"; then
+      echo "  Scheduler:    Windows Task Scheduler (active)"
     else
       echo "  Scheduler:    none (manual)"
     fi

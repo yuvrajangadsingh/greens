@@ -999,14 +999,36 @@ fi
 
 echo ""
 echo "Set up automatic daily sync?"
-echo "  1) launchd (macOS) - recommended"
-echo "     Runs missed syncs when your Mac wakes up. Survives reboots."
-echo "  2) cron"
-echo "     Skips if your Mac was asleep/off at the scheduled time."
-echo "  3) Skip — run manually with: greens"
-printf "  Choice [1]: " >&2
-read -r sched_choice
-sched_choice="${sched_choice:-1}"
+
+# Detect OS for scheduler options
+IS_WINDOWS=false
+if [[ "$(uname -s)" == MINGW* ]] || [[ "$(uname -s)" == MSYS* ]] || [[ -n "${WINDIR:-}" ]]; then
+  IS_WINDOWS=true
+fi
+
+if [[ "$IS_WINDOWS" == true ]]; then
+  echo "  1) Windows Task Scheduler - recommended"
+  echo "     Runs daily, survives reboots."
+  echo "  2) Skip — run manually with: greens"
+  printf "  Choice [1]: " >&2
+  read -r sched_choice
+  sched_choice="${sched_choice:-1}"
+  # Map Windows choices to internal codes
+  if [[ "$sched_choice" == "1" ]]; then
+    sched_choice="win"
+  else
+    sched_choice="3"
+  fi
+else
+  echo "  1) launchd (macOS) - recommended"
+  echo "     Runs missed syncs when your Mac wakes up. Survives reboots."
+  echo "  2) cron"
+  echo "     Skips if your Mac was asleep/off at the scheduled time."
+  echo "  3) Skip — run manually with: greens"
+  printf "  Choice [1]: " >&2
+  read -r sched_choice
+  sched_choice="${sched_choice:-1}"
+fi
 
 sync_hour="0"
 if [[ "$sched_choice" == "1" || "$sched_choice" == "2" ]]; then
@@ -1021,7 +1043,44 @@ fi
 
 sync_path="$SCRIPT_DIR/sync.sh"
 
+# Find Git Bash for Windows Task Scheduler
+GITBASH_PATH=""
+if [[ "$IS_WINDOWS" == true ]]; then
+  for p in "/c/Program Files/Git/bin/bash.exe" "/c/Program Files (x86)/Git/bin/bash.exe"; do
+    if [[ -f "$p" ]]; then
+      GITBASH_PATH="$p"
+      break
+    fi
+  done
+fi
+
 case "$sched_choice" in
+  win)
+    if [[ -z "$GITBASH_PATH" ]]; then
+      warn "Git Bash not found. Cannot create scheduled task."
+    else
+      # Convert paths to Windows format
+      win_bash="$(cygpath -w "$GITBASH_PATH" 2>/dev/null || echo "$GITBASH_PATH")"
+      win_sync="$(cygpath -w "$sync_path" 2>/dev/null || echo "$sync_path")"
+      task_name="greens-daily-sync"
+      task_time="$(printf '%02d:00' "$sync_hour")"
+
+      # Disable MSYS path conversion for schtasks
+      export MSYS_NO_PATHCONV=1
+      # Delete existing task if present
+      schtasks.exe //Delete //TN "$task_name" //F 2>/dev/null || true
+      # Create daily task
+      if schtasks.exe //Create //TN "$task_name" \
+        //TR "\"$win_bash\" --login -c \"bash '$win_sync'\"" \
+        //SC DAILY //ST "$task_time" \
+        //F 2>/dev/null; then
+        ok "Daily sync scheduled via Windows Task Scheduler (${sync_hour}:00)"
+      else
+        warn "Failed to create scheduled task. Run manually: greens.cmd"
+      fi
+      unset MSYS_NO_PATHCONV
+    fi
+    ;;
   1)
     label="com.greens"
     plist="$HOME/Library/LaunchAgents/$label.plist"

@@ -10,14 +10,26 @@ If you commit to private/org repos all day but your GitHub profile looks empty, 
 
 ## Install
 
+### macOS
+
 ```bash
 brew install yuvrajangadsingh/greens/greens
 ```
 
-Then just run `greens`. Setup wizard runs on first use.
+### Windows (10/11)
+
+Requires [Git for Windows](https://git-scm.com/download/win) (includes Git Bash).
+
+```
+git clone https://github.com/yuvrajangadsingh/greens.git
+cd greens
+greens.cmd
+```
+
+The setup wizard runs on first use and offers Windows Task Scheduler for daily automation.
 
 <details>
-<summary>Manual install (without Homebrew)</summary>
+<summary>Manual install (any OS)</summary>
 
 ```bash
 git clone https://github.com/yuvrajangadsingh/greens.git
@@ -26,6 +38,8 @@ bash setup.sh
 ```
 
 </details>
+
+Then just run `greens` (macOS/Linux) or `greens.cmd` (Windows). Setup wizard runs on first use.
 
 ## What it does
 
