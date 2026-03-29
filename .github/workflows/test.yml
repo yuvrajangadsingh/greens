@@ -251,10 +251,10 @@ jobs:
           git remote add origin https://github.com/testuser/test-mirror.git
           cd -
 
-          # Pipe inputs to setup wizard:
-          # On Windows, setup.sh detects IS_WINDOWS=true and shows:
-          #   1) Windows Task Scheduler  2) Skip
-          # Inputs:
+          # Pipe inputs to setup wizard. On Windows, IS_WINDOWS=true changes the
+          # scheduler menu (Windows Task Scheduler instead of launchd/cron).
+          #
+          # Prompt order (traced from previous CI log):
           #   1. work dir
           #   2. PAT ready? (n)
           #   3. enter token now? (n)
@@ -265,13 +265,15 @@ jobs:
           #   8. personal github username
           #   9. since (empty)
           #   10. copy messages (n)
-          #   11. scheduler choice (1 = Windows Task Scheduler)
-          #   12. sync hour (9)
-          #   13-16. extra inputs for mirror/push prompts
+          #   11. push token ready? (n)
+          #   12. paste token now? (n)
+          #   13. fix-push choice (3 = skip)
+          #   14. scheduler choice (1 = Windows Task Scheduler)
+          #   15. sync hour (9)
           #
           # schtasks may fail due to runner permissions — that's fine,
           # we just need setup.sh to reach the scheduler code path without crashing.
-          printf '/tmp/test-work\nn\nn\ntest@test.com\ntest-org\n\npersonal@test.com\ntestuser\n\nn\n1\n9\nn\nn\n3\n' \
+          printf '/tmp/test-work\nn\nn\ntest@test.com\ntest-org\n\npersonal@test.com\ntestuser\n\nn\nn\nn\n3\n1\n9\n' \
             | MIRROR_DIR=/tmp/test-mirror timeout 60 bash setup.sh 2>&1 || true
 
           # Verify config was created
