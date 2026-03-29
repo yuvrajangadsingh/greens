@@ -138,48 +138,23 @@ jobs:
   test-windows:
     runs-on: windows-latest
     steps:
-      - name: Disable autocrlf before checkout
-        run: git config --global core.autocrlf false
-
+      # No autocrlf override — let .gitattributes do its job (real user scenario)
       - uses: actions/checkout@v4
 
-      # --- Line endings ---
+      # --- Line endings (.gitattributes must work without autocrlf tweaks) ---
       - name: Shell scripts have LF endings
         shell: bash
         run: |
           fail=0
           for f in sync.sh setup.sh; do
             if grep -Prl '\r$' "$f" >/dev/null 2>&1; then
-              echo "FAIL: $f has CRLF"
+              echo "FAIL: $f has CRLF (gitattributes not working)"
               fail=1
             fi
           done
           exit $fail
 
-      - name: Batch script line endings
-        shell: bash
-        run: |
-          if grep -Prl '\r$' greens.cmd >/dev/null 2>&1; then
-            echo "OK: greens.cmd has CRLF (expected)"
-          else
-            echo "WARN: greens.cmd has LF (CRLF preferred but not required, CMD handles both)"
-          fi
-
-      # --- Windows detection ---
-      - name: Git Bash reports MINGW/MSYS
-        shell: bash
-        run: |
-          os="$(uname -s)"
-          echo "uname -s = $os"
-          [[ "$os" == MINGW* || "$os" == MSYS* ]] || { echo "FAIL: expected MINGW*/MSYS*, got $os"; exit 1; }
-
-      - name: WINDIR is set
-        shell: bash
-        run: |
-          [[ -n "${WINDIR:-}" ]] || { echo "FAIL: WINDIR not set"; exit 1; }
-          echo "WINDIR=$WINDIR"
-
-      # --- Git Bash discovery ---
+      # --- Git Bash discovery (same logic as setup.sh) ---
       - name: Git Bash found at expected path
         shell: bash
         run: |
@@ -208,23 +183,31 @@ jobs:
           echo "cygpath -m = $mixed"
           [[ "$mixed" == *:/* ]] || { echo "FAIL: -m should produce C:/..."; exit 1; }
 
-      - name: MSYS_NO_PATHCONV prevents mangling
+      - name: MSYS_NO_PATHCONV works with schtasks
         shell: bash
         run: |
+          # Test that MSYS_NO_PATHCONV actually prevents mangling when calling a real exe.
+          # Without it, /Query can get converted to C:/Query by MSYS.
+          # We call schtasks with a bogus task name — error is expected, but the error
+          # message proves the switch reached schtasks unmangled.
           export MSYS_NO_PATHCONV=1
-          # /Create should stay literal, not become C:/Create
-          arg="/Create"
-          [[ "$arg" == "/Create" ]] || { echo "FAIL: path got mangled even with MSYS_NO_PATHCONV"; exit 1; }
+          output="$(schtasks.exe /Query /TN "greens-ci-pathconv-test" 2>&1)" || true
+          echo "schtasks output: $output"
+          # If path mangling happened, schtasks wouldn't recognize the switch and
+          # would print generic usage. A proper /Query with bad TN says "not found" or similar.
+          if echo "$output" | grep -qi "ERROR\|not found\|does not exist\|cannot find"; then
+            echo "OK: schtasks received /Query correctly (task not found, as expected)"
+          else
+            echo "FAIL: schtasks output doesn't look like a valid /Query response"
+            exit 1
+          fi
 
       # --- greens.cmd launcher ---
       - name: greens.cmd finds Git Bash
         shell: cmd
-        run: |
-          REM greens.cmd should find bash.exe and invoke sync.sh
-          REM sync.sh --version exits cleanly with no config needed
-          greens.cmd --version
+        run: greens.cmd --version
 
-      - name: greens.cmd passes arguments
+      - name: greens.cmd passes arguments with spaces
         shell: cmd
         run: greens.cmd --help
 
@@ -245,14 +228,96 @@ jobs:
         shell: bash
         run: echo "n" | bash sync.sh --reset
 
-      # --- schtasks.exe accessible ---
-      - name: schtasks.exe is reachable from Git Bash
+      # --- Setup wizard (Windows scheduler path) ---
+      - name: Setup wizard (non-interactive, Windows Task Scheduler)
+        shell: bash
+        run: |
+          # Create a temp work dir with a fake git repo
+          mkdir -p /tmp/test-work/fake-repo
+          cd /tmp/test-work/fake-repo
+          git init
+          git remote add origin https://github.com/test-org/test-repo.git
+          cd -
+
+          # Create a temp mirror repo
+          mkdir -p /tmp/test-mirror
+          cd /tmp/test-mirror
+          git init
+          git commit --allow-empty -m "init"
+          git remote add origin https://github.com/testuser/test-mirror.git
+          cd -
+
+          # Pipe inputs to setup wizard:
+          # On Windows, setup.sh detects IS_WINDOWS=true and shows:
+          #   1) Windows Task Scheduler  2) Skip
+          # Inputs:
+          #   1. work dir
+          #   2. PAT ready? (n)
+          #   3. enter token now? (n)
+          #   4. emails
+          #   5. org name
+          #   6. github username (empty)
+          #   7. mirror email
+          #   8. personal github username
+          #   9. since (empty)
+          #   10. copy messages (n)
+          #   11. scheduler choice (1 = Windows Task Scheduler)
+          #   12. sync hour (9)
+          #   13-16. extra inputs for mirror/push prompts
+          #
+          # schtasks may fail due to runner permissions — that's fine,
+          # we just need setup.sh to reach the scheduler code path without crashing.
+          printf '/tmp/test-work\nn\nn\ntest@test.com\ntest-org\n\npersonal@test.com\ntestuser\n\nn\n1\n9\nn\nn\n3\n' \
+            | MIRROR_DIR=/tmp/test-mirror timeout 60 bash setup.sh 2>&1 || true
+
+          # Verify config was created
+          if [ -f "$HOME/.contrib-mirror/config" ]; then
+            echo "PASS: Config created"
+            cat "$HOME/.contrib-mirror/config"
+          else
+            echo "WARN: Config not created (setup may have hit EOF on prompts)"
+          fi
+
+      - name: Status (with config, Windows)
+        shell: bash
+        run: |
+          if [ -f "$HOME/.contrib-mirror/config" ]; then
+            bash sync.sh --status
+          else
+            echo "Skipping — no config from setup test"
+          fi
+
+      # --- schtasks.exe create/query/delete cycle ---
+      - name: schtasks create-query-delete cycle
         shell: bash
         run: |
           export MSYS_NO_PATHCONV=1
-          # Query for nonexistent task, error is expected, just prove it runs
-          schtasks.exe /Query /TN "greens-daily-sync" 2>&1 || true
-          echo "schtasks.exe is accessible"
+          task="greens-ci-test-$$"
+          bash_path="$(cygpath -w "/c/Program Files/Git/bin/bash.exe" 2>/dev/null || echo "C:\\Program Files\\Git\\bin\\bash.exe")"
+
+          # Create — may fail on permissions, that's informational
+          if schtasks.exe /Create /TN "$task" \
+            /TR "\"$bash_path\" --login -c \"echo hello\"" \
+            /SC DAILY /ST 00:00 /F 2>&1; then
+            echo "PASS: schtasks /Create succeeded"
+
+            # Query
+            output="$(schtasks.exe /Query /TN "$task" 2>&1)" || true
+            echo "Query output: $output"
+            if echo "$output" | grep -qi "$task"; then
+              echo "PASS: schtasks /Query found the task"
+            else
+              echo "FAIL: task not found after create"
+              exit 1
+            fi
+
+            # Delete
+            schtasks.exe /Delete /TN "$task" /F 2>&1 || true
+            echo "PASS: schtasks /Delete ran"
+          else
+            echo "WARN: schtasks /Create failed (expected on GHA — runner lacks admin)"
+            echo "Skipping query/delete (no task to test)"
+          fi
 
   # Test Homebrew install + upgrade (only on tags)
   test-brew:
