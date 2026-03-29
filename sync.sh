@@ -115,6 +115,8 @@ case "${1:-}" in
       echo "  Scheduler:    launchd (active)"
     elif crontab -l 2>/dev/null | grep -q "sync.sh"; then
       echo "  Scheduler:    cron"
+    elif schtasks.exe /Query /TN "greens-daily-sync" 2>/dev/null | grep -qi "greens"; then
+      echo "  Scheduler:    Windows Task Scheduler (active)"
     else
       echo "  Scheduler:    none (manual)"
     fi
@@ -139,6 +141,12 @@ case "${1:-}" in
       if confirm_reset "Remove cron entry?"; then
         crontab -l 2>/dev/null | grep -v "sync.sh" | crontab -
         echo "  [ok] cron entry removed"
+      fi
+    fi
+    if schtasks.exe /Query /TN "greens-daily-sync" 2>/dev/null | grep -qi "greens"; then
+      if confirm_reset "Remove Windows Task Scheduler entry?"; then
+        MSYS_NO_PATHCONV=1 schtasks.exe /Delete /TN "greens-daily-sync" /F 2>/dev/null || true
+        echo "  [ok] Windows scheduled task removed"
       fi
     fi
     # 2. Cache
