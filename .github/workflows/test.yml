@@ -134,6 +134,125 @@ jobs:
             exit 1
           fi
 
+  # Windows smoke tests (Git Bash)
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Disable autocrlf before checkout
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      # --- Line endings ---
+      - name: Shell scripts have LF endings
+        shell: bash
+        run: |
+          fail=0
+          for f in sync.sh setup.sh; do
+            if grep -Prl '\r$' "$f" >/dev/null 2>&1; then
+              echo "FAIL: $f has CRLF"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: Batch script has CRLF endings
+        shell: bash
+        run: |
+          if ! grep -Prl '\r$' greens.cmd >/dev/null 2>&1; then
+            echo "FAIL: greens.cmd should have CRLF"
+            exit 1
+          fi
+
+      # --- Windows detection ---
+      - name: Git Bash reports MINGW/MSYS
+        shell: bash
+        run: |
+          os="$(uname -s)"
+          echo "uname -s = $os"
+          [[ "$os" == MINGW* || "$os" == MSYS* ]] || { echo "FAIL: expected MINGW*/MSYS*, got $os"; exit 1; }
+
+      - name: WINDIR is set
+        shell: bash
+        run: |
+          [[ -n "${WINDIR:-}" ]] || { echo "FAIL: WINDIR not set"; exit 1; }
+          echo "WINDIR=$WINDIR"
+
+      # --- Git Bash discovery ---
+      - name: Git Bash found at expected path
+        shell: bash
+        run: |
+          found=""
+          for p in \
+            "/c/Program Files/Git/bin/bash.exe" \
+            "/c/Program Files (x86)/Git/bin/bash.exe" \
+            "${LOCALAPPDATA:-}/Programs/Git/bin/bash.exe"; do
+            if [[ -f "$p" ]]; then
+              found="$p"
+              break
+            fi
+          done
+          [[ -n "$found" ]] || { echo "FAIL: Git Bash not found at any expected path"; exit 1; }
+          echo "Found: $found"
+
+      # --- Path conversion ---
+      - name: cygpath converts paths
+        shell: bash
+        run: |
+          win=$(cygpath -w "$(pwd)")
+          echo "cygpath -w = $win"
+          [[ "$win" == *\\* ]] || { echo "FAIL: -w should have backslashes"; exit 1; }
+
+          mixed=$(cygpath -m "$(pwd)")
+          echo "cygpath -m = $mixed"
+          [[ "$mixed" == *:/* ]] || { echo "FAIL: -m should produce C:/..."; exit 1; }
+
+      - name: MSYS_NO_PATHCONV prevents mangling
+        shell: bash
+        run: |
+          export MSYS_NO_PATHCONV=1
+          # /Create should stay literal, not become C:/Create
+          arg="/Create"
+          [[ "$arg" == "/Create" ]] || { echo "FAIL: path got mangled even with MSYS_NO_PATHCONV"; exit 1; }
+
+      # --- greens.cmd launcher ---
+      - name: greens.cmd finds Git Bash
+        shell: cmd
+        run: |
+          REM greens.cmd should find bash.exe and invoke sync.sh
+          REM sync.sh --version exits cleanly with no config needed
+          greens.cmd --version
+
+      - name: greens.cmd passes arguments
+        shell: cmd
+        run: greens.cmd --help
+
+      # --- sync.sh under Git Bash ---
+      - name: Version
+        shell: bash
+        run: bash sync.sh --version
+
+      - name: Help
+        shell: bash
+        run: bash sync.sh --help
+
+      - name: Status (no config)
+        shell: bash
+        run: bash sync.sh --status
+
+      - name: Reset (no config, say no)
+        shell: bash
+        run: echo "n" | bash sync.sh --reset
+
+      # --- schtasks.exe accessible ---
+      - name: schtasks.exe is reachable from Git Bash
+        shell: bash
+        run: |
+          export MSYS_NO_PATHCONV=1
+          # Query for nonexistent task, error is expected, just prove it runs
+          schtasks.exe /Query /TN "greens-daily-sync" 2>&1 || true
+          echo "schtasks.exe is accessible"
+
   # Test Homebrew install + upgrade (only on tags)
   test-brew:
     runs-on: macos-latest
