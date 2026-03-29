@@ -23,11 +23,11 @@ if "!GITBASH!"=="" (
     exit /b 1
 )
 
-REM Get the directory where this script lives
+REM Get the directory where this script lives, convert to forward slashes for bash
 set "SCRIPT_DIR=%~dp0"
-REM Remove trailing backslash
 if "!SCRIPT_DIR:~-1!"=="\" set "SCRIPT_DIR=!SCRIPT_DIR:~0,-1!"
+set "SCRIPT_DIR=!SCRIPT_DIR:\=/!"
 
-REM Run sync.sh with all arguments, disable MSYS path conversion
+REM Run sync.sh with all arguments
 set "MSYS_NO_PATHCONV=1"
-"!GITBASH!" --login -c "cd '$(cygpath '%SCRIPT_DIR%')' 2>/dev/null || cd '%SCRIPT_DIR%' && bash sync.sh %*"
+"!GITBASH!" --login -c "cd '!SCRIPT_DIR!' && bash sync.sh %*"

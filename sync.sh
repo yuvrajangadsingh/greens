@@ -143,6 +143,12 @@ case "${1:-}" in
         echo "  [ok] cron entry removed"
       fi
     fi
+    if schtasks.exe /Query /TN "greens-daily-sync" 2>/dev/null | grep -qi "greens"; then
+      if confirm_reset "Remove Windows Task Scheduler entry?"; then
+        MSYS_NO_PATHCONV=1 schtasks.exe /Delete /TN "greens-daily-sync" /F 2>/dev/null || true
+        echo "  [ok] Windows scheduled task removed"
+      fi
+    fi
     # 2. Cache
     config_dir="$HOME/.contrib-mirror"
     cache_dir="$SCRIPT_DIR/.cache"
