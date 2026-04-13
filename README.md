@@ -28,6 +28,12 @@ greens.cmd
 
 The setup wizard runs on first use and offers Windows Task Scheduler for daily automation.
 
+> **Note:** Unlike launchd on macOS, Windows Task Scheduler does not catch up on missed runs. If your machine was off or sleeping at the scheduled time, the sync is skipped until the next day. Logs are written to `~/.contrib-mirror/logs/sync.log`.
+
+> **WSL users:** Use the macOS/Linux instructions inside WSL. Don't run both WSL and Windows setups, they'll create duplicate commits.
+
+> **SSH keys:** If your SSH key has a passphrase, the scheduled task may fail silently. Use a passphrase-less key or configure ssh-agent to start at Windows login.
+
 <details>
 <summary>Manual install (any OS)</summary>
 

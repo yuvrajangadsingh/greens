@@ -1051,6 +1051,10 @@ if [[ "$IS_WINDOWS" == true ]]; then
       break
     fi
   done
+  # Fallback: check PATH (covers Scoop, Chocolatey, custom installs)
+  if [[ -z "$GITBASH_PATH" ]]; then
+    GITBASH_PATH="$(command -v bash 2>/dev/null || true)"
+  fi
 fi
 
 case "$sched_choice" in
@@ -1064,20 +1068,38 @@ case "$sched_choice" in
       task_name="greens-daily-sync"
       task_time="$(printf '%02d:00' "$sync_hour")"
 
+      # Log directory for scheduled task output
+      log_dir="$CONFIG_DIR/logs"
+      mkdir -p "$log_dir"
+      mixed_log="$(cygpath -m "$log_dir/sync.log" 2>/dev/null || echo "$log_dir/sync.log")"
+
       # Disable MSYS path conversion for schtasks
       export MSYS_NO_PATHCONV=1
       # Delete existing task if present
       schtasks.exe /Delete /TN "$task_name" /F 2>/dev/null || true
-      # Create daily task (bash -c uses forward-slash path)
+      # Create daily task with log output and explicit user context
+      win_user="$(cmd.exe /C "echo %USERNAME%" 2>/dev/null | tr -d '\r')"
       if schtasks.exe /Create /TN "$task_name" \
-        /TR "\"$win_bash\" --login -c \"bash '$mixed_sync'\"" \
+        /TR "\"$win_bash\" --login -c \"bash '$mixed_sync' >> '$mixed_log' 2>&1\"" \
         /SC DAILY /ST "$task_time" \
+        /RU "$win_user" \
+        /RL LIMITED \
         /F 2>/dev/null; then
         ok "Daily sync scheduled via Windows Task Scheduler (${sync_hour}:00)"
+        info "  Logs: $log_dir/sync.log"
       else
-        warn "Failed to create scheduled task. Run manually: greens.cmd"
+        warn "Failed to create scheduled task. Try running as administrator, or run manually: greens.cmd"
       fi
       unset MSYS_NO_PATHCONV
+
+      # SSH warning for scheduled tasks
+      if [[ "$auth_method" == "ssh" ]]; then
+        info ""
+        info "  Note: if your SSH key has a passphrase, the scheduled task will fail silently"
+        info "  because ssh-agent isn't running in non-interactive sessions on Windows."
+        info "  Options: use a passphrase-less key, configure ssh-agent to start at login,"
+        info "  or switch to HTTPS authentication."
+      fi
     fi
     ;;
   1)

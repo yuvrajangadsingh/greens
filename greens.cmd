@@ -16,6 +16,11 @@ for %%p in (
     if exist %%p set "GITBASH=%%~p"
 )
 
+REM Fallback: check PATH (covers Scoop, Chocolatey, custom installs)
+if "!GITBASH!"=="" (
+    for /f "delims=" %%g in ('where bash.exe 2^>NUL') do set "GITBASH=%%g"
+)
+
 if "!GITBASH!"=="" (
     echo ERROR: Git Bash not found.
     echo Install Git for Windows: https://git-scm.com/download/win
@@ -29,5 +34,4 @@ if "!SCRIPT_DIR:~-1!"=="\" set "SCRIPT_DIR=!SCRIPT_DIR:~0,-1!"
 set "SCRIPT_DIR=!SCRIPT_DIR:\=/!"
 
 REM Run sync.sh with all arguments
-set "MSYS_NO_PATHCONV=1"
 "!GITBASH!" --login -c "cd '!SCRIPT_DIR!' && bash sync.sh %*"
