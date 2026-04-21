@@ -224,6 +224,70 @@ jobs:
           fi
           echo "PASS: end-to-end mock sync mirrored 2 matching commits with rewritten author"
 
+      - name: Discovery accepts SSH, HTTPS, git:// clone forms for configured org
+        run: |
+          # Regression test: a repo cloned via HTTPS from the same org must be
+          # discovered and normalized to REMOTE_PREFIX, not silently skipped.
+          tmp="$(mktemp -d)"
+          work="$tmp/work" mirror="$tmp/mirror" cache="$tmp/cache" cfg="$tmp/config"
+          mkdir -p "$work" "$mirror" "$cache"
+
+          # Fake repos with different origin forms
+          init_repo() {
+            local dir="$1" url="$2"
+            mkdir -p "$dir" && git -C "$dir" init -q
+            [ -n "$url" ] && git -C "$dir" remote add origin "$url"
+            GIT_AUTHOR_EMAIL=test@test.com GIT_COMMITTER_EMAIL=test@test.com \
+              git -C "$dir" commit --allow-empty -m init -q
+          }
+          init_repo "$work/repo-ssh"       'git@github-work:TestOrg/repo-ssh.git'
+          init_repo "$work/repo-https"     'https://github.com/TestOrg/repo-https.git'
+          init_repo "$work/repo-other"     'git@github.com:OtherOrg/repo-other.git'
+          init_repo "$work/repo-similar"   'https://github.com/TestOrg-Labs/repo-similar.git'
+          init_repo "$work/repo-no-remote" ''
+
+          # Seed mirror repo
+          git -C "$mirror" init -q
+          GIT_AUTHOR_EMAIL=test@test.com GIT_COMMITTER_EMAIL=test@test.com \
+            git -C "$mirror" commit --allow-empty -m init -q
+
+          # Test config (script sources this as the final override)
+          cat > "$cfg" <<EOF
+          WORK_DIR=$work
+          MIRROR_DIR=$mirror
+          CACHE_DIR=$cache
+          REMOTE_PREFIX="git@github-work:TestOrg/"
+          EMAILS="test@test.com"
+          MIRROR_EMAIL="test@test.com"
+          GITHUB_USERNAME="testuser"
+          ACTIVITY_TYPES="commits"
+          SINCE="2024-01-01 00:00:00"
+          EOF
+
+          # Run sync. Fetches will fail (remotes are fake) — we only assert on
+          # the discovery log lines, which run before any network call.
+          out="$(CONTRIB_MIRROR_CONFIG="$cfg" FORCE=1 bash sync.sh 2>&1 || true)"
+          echo "--- sync output ---"
+          echo "$out"
+          echo "--- end output ---"
+
+          assert() {
+            if [ "$1" = "pass" ]; then echo "PASS: $2"
+            else echo "FAIL: $2"; exit 1; fi
+          }
+
+          # Both valid forms must reach the caching step
+          echo "$out" | grep -q 'repo-ssh.git'      && assert pass 'SSH repo discovered'      || assert fail 'SSH repo discovered'
+          echo "$out" | grep -q 'repo-https.git'    && assert pass 'HTTPS repo discovered'    || assert fail 'HTTPS repo discovered'
+          echo "$out" | grep -q 'normalizing.*repo-https' && assert pass 'HTTPS form logged a normalization WARN' || assert fail 'HTTPS form logged a normalization WARN'
+
+          # Non-matching org and missing remote must be skipped
+          echo "$out" | grep -q 'repo-other'        && assert fail 'unrelated org was skipped'    || assert pass 'unrelated org was skipped'
+          echo "$out" | grep -q 'repo-no-remote'    && assert fail 'no-remote repo was skipped'   || assert pass 'no-remote repo was skipped'
+
+          # Substring-collision safety: TestOrg-Labs must not match TestOrg
+          echo "$out" | grep -q 'repo-similar'      && assert fail 'substring-org rejected'       || assert pass 'substring-org rejected'
+
   # Windows smoke tests (Git Bash)
   test-windows:
     runs-on: windows-latest
