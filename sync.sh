@@ -484,11 +484,39 @@ find "$WORK_DIR" -maxdepth 2 -name .git -print 2>/dev/null | while read -r gitpa
     continue
   fi
 
-  # Only process repos matching the prefix
+  # Only process repos matching the org. Accept any clone form (SSH/HTTPS/git://)
+  # and normalize to REMOTE_PREFIX so downstream cache/filter logic stays consistent.
+  prefix_trimmed="${REMOTE_PREFIX%/}"
+  if [[ "$prefix_trimmed" == *"://"* ]]; then
+    org_from_prefix="${prefix_trimmed##*/}"   # https://host/Org -> Org
+  else
+    org_from_prefix="${prefix_trimmed##*:}"   # git@host:Org -> Org
+  fi
+  if [[ -z "$org_from_prefix" ]]; then
+    case "$url" in
+      "$REMOTE_PREFIX"*) ;;
+      *) continue ;;
+    esac
+    remote_repo="$(basename "$url")"
+    printf "%s %s\n" "$remote_repo" "$url" >> "$tmp_pairs"
+    continue
+  fi
+  normalized=""
   case "$url" in
-    "$REMOTE_PREFIX"*) ;;
-    *) continue ;;
+    "$REMOTE_PREFIX"*)
+      normalized="$url"
+      ;;
+    *"/$org_from_prefix/"*|*":$org_from_prefix/"*)
+      repo_path="${url##*$org_from_prefix/}"
+      repo_path="${repo_path%.git}"
+      if [[ -n "$repo_path" ]]; then
+        normalized="${REMOTE_PREFIX}${repo_path}.git"
+        [[ "$url" != "$normalized" ]] && log "  WARN: $repodir uses $url; normalizing to $normalized"
+      fi
+      ;;
   esac
+  [[ -z "$normalized" ]] && continue
+  url="$normalized"
 
   remote_repo="$(basename "$url")"
   printf "%s %s\n" "$remote_repo" "$url" >> "$tmp_pairs"
