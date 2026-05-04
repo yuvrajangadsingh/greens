@@ -415,36 +415,36 @@ jobs:
             echo "Skipping query/delete (no task to test)"
           fi
 
-      # /Create returning ok only proves the task was registered, not that the
-      # action actually runs. /Run + marker file is the real proof.
+      # /Create returning ok only proves the task was registered. /Run + the
+      # task's "Last Result" exit code is the deterministic signal that the
+      # action actually executed. Avoids file-marker path semantics between
+      # bash, schtasks, and the scheduled-task user context.
       - name: schtasks /Run executes the task action
         shell: bash
         run: |
           export MSYS_NO_PATHCONV=1
           task="greens-ci-run-$$"
-          marker="$RUNNER_TEMP/schtasks-marker-$$.txt"
-          win_marker=$(cygpath -w "$marker")
-          rm -f "$marker"
-
           bash_path="$(cygpath -w "/c/Program Files/Git/bin/bash.exe" 2>/dev/null || echo "C:\\Program Files\\Git\\bin\\bash.exe")"
 
           if schtasks.exe /Create /TN "$task" \
-              /TR "\"$bash_path\" --login -c \"echo schtasks-fired > '$win_marker'\"" \
+              /TR "\"$bash_path\" --login -c \"exit 0\"" \
               /SC DAILY /ST 23:59 /F 2>&1; then
             echo "PASS: schtasks /Create"
 
             if schtasks.exe /Run /TN "$task" 2>&1; then
-              echo "schtasks /Run dispatched, waiting for marker (up to 20s)"
+              # Wait for task to finish so Last Result reflects this run
               for i in $(seq 1 20); do
-                if [ -f "$marker" ]; then
-                  echo "PASS: task fired and wrote marker (waited ${i}s)"
-                  cat "$marker"
-                  break
-                fi
+                status=$(schtasks.exe /Query /TN "$task" /FO LIST 2>&1 | grep -i "^Status:" | awk -F: '{print $2}' | tr -d ' \r')
+                [ "$status" = "Ready" ] && break
                 sleep 1
               done
-              if [ ! -f "$marker" ]; then
-                echo "FAIL: schtasks /Run returned success but task action did not write marker"
+
+              last_result=$(schtasks.exe /Query /TN "$task" /V /FO LIST 2>&1 | grep -i "^Last Result:" | awk -F: '{print $2}' | tr -d ' \r')
+              echo "Last Result: $last_result"
+              if [ "$last_result" = "0" ]; then
+                echo "PASS: task action executed and exited 0"
+              else
+                echo "FAIL: task action exited with $last_result (expected 0)"
                 schtasks.exe /Query /TN "$task" /V /FO LIST 2>&1 | head -30 || true
                 schtasks.exe /Delete /TN "$task" /F 2>&1 || true
                 exit 1
