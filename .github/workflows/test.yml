@@ -134,6 +134,96 @@ jobs:
             exit 1
           fi
 
+      - name: End-to-end mock sync
+        run: |
+          set -e
+          base=/tmp/e2e-macos
+          src="$base/source.git"
+          work="$base/work"
+          mirror="$base/mirror"
+          mirror_bare="$base/mirror-bare"
+          cache="$base/cache"
+          cfg="$base/config"
+          rm -rf "$base"
+          mkdir -p "$base" "$work" "$mirror" "$cache"
+
+          git init --bare --quiet "$src"
+
+          tmp="$base/tmp-clone"
+          git clone --quiet "$src" "$tmp"
+          cd "$tmp"
+          git config user.email "ci@test.com"
+          git config user.name "CI"
+          GIT_AUTHOR_DATE="2026-04-01T10:00:00" GIT_COMMITTER_DATE="2026-04-01T10:00:00" \
+            git commit --allow-empty -m "matching commit 1" --quiet
+          GIT_AUTHOR_DATE="2026-04-02T11:00:00" GIT_COMMITTER_DATE="2026-04-02T11:00:00" \
+            git commit --allow-empty -m "matching commit 2" --quiet
+          GIT_AUTHOR_EMAIL="other@test.com" GIT_COMMITTER_EMAIL="other@test.com" \
+            GIT_AUTHOR_DATE="2026-04-03T12:00:00" GIT_COMMITTER_DATE="2026-04-03T12:00:00" \
+            git commit --allow-empty -m "non-matching commit" --quiet
+          git push -u origin HEAD --quiet
+          cd - >/dev/null
+
+          git clone --quiet "$src" "$work/source-repo"
+
+          # macOS canonicalizes /tmp -> /private/tmp on first git access; never
+          # hard-code the prefix or sync.sh's case-glob match silently fails
+          origin_url="$(git -C "$work/source-repo" remote get-url origin)"
+          remote_prefix="${origin_url%source.git}"
+          echo "Origin URL: $origin_url"
+          echo "REMOTE_PREFIX: $remote_prefix"
+
+          git init --bare --quiet "$mirror_bare"
+          cd "$mirror"
+          git init --quiet
+          git config user.email "init@test.com"
+          git config user.name "Init"
+          git remote add origin "$mirror_bare"
+          git commit --allow-empty -m "init" --quiet
+          git branch -M main
+          git push origin main --quiet
+          cd - >/dev/null
+
+          # GITHUB_USERNAME omitted on purpose: setting it activates sync.sh's
+          # gh-API branch (gh search prs / gh auth switch), which needs auth
+          # the runner doesn't have. PERSONAL_GH_USER is read only by setup.sh.
+          cat > "$cfg" <<EOF
+          WORK_DIR="$work"
+          EMAILS="ci@test.com"
+          REMOTE_PREFIX="$remote_prefix"
+          MIRROR_DIR="$mirror"
+          MIRROR_EMAIL="mirror@test.com"
+          SINCE="2026-01-01 00:00:00"
+          COPY_MESSAGES="0"
+          EOF
+
+          CONTRIB_MIRROR_CONFIG="$cfg" CACHE_DIR="$cache" \
+            timeout 60 bash sync.sh 2>&1 | tail -50
+
+          count=$(git -C "$mirror" rev-list --count HEAD)
+          echo "Mirror commits: $count"
+          if [ "$count" -lt 3 ]; then
+            echo "FAIL: expected >=3 (init + 2 mirrored), got $count"
+            git -C "$mirror" log --oneline
+            exit 1
+          fi
+          authors=$(git -C "$mirror" log --format='%ae' | sort -u | tr '\n' ' ')
+          echo "Authors: $authors"
+          if ! echo "$authors" | grep -q "mirror@test.com"; then
+            echo "FAIL: no commits authored by mirror@test.com"
+            git -C "$mirror" log --pretty='%h %ae %s'
+            exit 1
+          fi
+          if echo "$authors" | grep -q "ci@test.com"; then
+            echo "FAIL: original work email leaked into mirror"
+            exit 1
+          fi
+          if echo "$authors" | grep -q "other@test.com"; then
+            echo "FAIL: non-matching email leaked into mirror"
+            exit 1
+          fi
+          echo "PASS: end-to-end mock sync mirrored 2 matching commits with rewritten author"
+
   # Windows smoke tests (Git Bash)
   test-windows:
     runs-on: windows-latest
@@ -324,6 +414,145 @@ jobs:
             echo "WARN: schtasks /Create failed (expected on GHA — runner lacks admin)"
             echo "Skipping query/delete (no task to test)"
           fi
+
+      # /Create returning ok only proves the task was registered, not that the
+      # action actually runs. /Run + marker file is the real proof.
+      - name: schtasks /Run executes the task action
+        shell: bash
+        run: |
+          export MSYS_NO_PATHCONV=1
+          task="greens-ci-run-$$"
+          marker="$RUNNER_TEMP/schtasks-marker-$$.txt"
+          win_marker=$(cygpath -w "$marker")
+          rm -f "$marker"
+
+          bash_path="$(cygpath -w "/c/Program Files/Git/bin/bash.exe" 2>/dev/null || echo "C:\\Program Files\\Git\\bin\\bash.exe")"
+
+          if schtasks.exe /Create /TN "$task" \
+              /TR "\"$bash_path\" --login -c \"echo schtasks-fired > '$win_marker'\"" \
+              /SC DAILY /ST 23:59 /F 2>&1; then
+            echo "PASS: schtasks /Create"
+
+            if schtasks.exe /Run /TN "$task" 2>&1; then
+              echo "schtasks /Run dispatched, waiting for marker (up to 20s)"
+              for i in $(seq 1 20); do
+                if [ -f "$marker" ]; then
+                  echo "PASS: task fired and wrote marker (waited ${i}s)"
+                  cat "$marker"
+                  break
+                fi
+                sleep 1
+              done
+              if [ ! -f "$marker" ]; then
+                echo "FAIL: schtasks /Run returned success but task action did not write marker"
+                schtasks.exe /Query /TN "$task" /V /FO LIST 2>&1 | head -30 || true
+                schtasks.exe /Delete /TN "$task" /F 2>&1 || true
+                exit 1
+              fi
+            else
+              echo "WARN: schtasks /Run returned non-zero (likely runner lacks privilege)"
+            fi
+
+            schtasks.exe /Delete /TN "$task" /F 2>&1 || true
+          else
+            echo "WARN: schtasks /Create failed (no admin), skipping /Run test"
+          fi
+
+      - name: End-to-end mock sync (Windows)
+        shell: bash
+        run: |
+          set -e
+          # Earlier setup-wizard step already configures git identity, but this
+          # step also runs standalone on rerun, so set it idempotently
+          git config --global user.email "ci@test.com" || true
+          git config --global user.name "CI" || true
+
+          base=/tmp/e2e-windows
+          src="$base/source.git"
+          work="$base/work"
+          mirror="$base/mirror"
+          mirror_bare="$base/mirror-bare"
+          cache="$base/cache"
+          cfg="$base/config"
+          rm -rf "$base"
+          mkdir -p "$base" "$work" "$mirror" "$cache"
+
+          git init --bare --quiet "$src"
+
+          tmp="$base/tmp-clone"
+          git clone --quiet "$src" "$tmp"
+          cd "$tmp"
+          git config user.email "ci@test.com"
+          git config user.name "CI"
+          GIT_AUTHOR_DATE="2026-04-01T10:00:00" GIT_COMMITTER_DATE="2026-04-01T10:00:00" \
+            git commit --allow-empty -m "matching commit 1" --quiet
+          GIT_AUTHOR_DATE="2026-04-02T11:00:00" GIT_COMMITTER_DATE="2026-04-02T11:00:00" \
+            git commit --allow-empty -m "matching commit 2" --quiet
+          GIT_AUTHOR_EMAIL="other@test.com" GIT_COMMITTER_EMAIL="other@test.com" \
+            GIT_AUTHOR_DATE="2026-04-03T12:00:00" GIT_COMMITTER_DATE="2026-04-03T12:00:00" \
+            git commit --allow-empty -m "non-matching commit" --quiet
+          git push -u origin HEAD --quiet
+          cd - >/dev/null
+
+          git clone --quiet "$src" "$work/source-repo"
+
+          # Git Bash may store local paths in mixed C:/... form; reading the
+          # actual origin URL avoids a prefix-spelling mismatch in sync.sh
+          origin_url="$(git -C "$work/source-repo" remote get-url origin)"
+          remote_prefix="${origin_url%source.git}"
+          echo "Origin URL: $origin_url"
+          echo "REMOTE_PREFIX: $remote_prefix"
+
+          git init --bare --quiet "$mirror_bare"
+          cd "$mirror"
+          git init --quiet
+          git config user.email "init@test.com"
+          git config user.name "Init"
+          git remote add origin "$mirror_bare"
+          git commit --allow-empty -m "init" --quiet
+          git branch -M main
+          git push origin main --quiet
+          cd - >/dev/null
+
+          # GITHUB_USERNAME omitted on purpose: setting it activates sync.sh's
+          # gh-API branch (gh search prs / gh auth switch), which needs auth
+          # the runner doesn't have. PERSONAL_GH_USER is read only by setup.sh.
+          cat > "$cfg" <<EOF
+          WORK_DIR="$work"
+          EMAILS="ci@test.com"
+          REMOTE_PREFIX="$remote_prefix"
+          MIRROR_DIR="$mirror"
+          MIRROR_EMAIL="mirror@test.com"
+          SINCE="2026-01-01 00:00:00"
+          COPY_MESSAGES="0"
+          EOF
+
+          CONTRIB_MIRROR_CONFIG="$cfg" CACHE_DIR="$cache" \
+            timeout 60 bash sync.sh 2>&1 | tail -50
+
+          count=$(git -C "$mirror" rev-list --count HEAD)
+          echo "Mirror commits: $count"
+          if [ "$count" -lt 3 ]; then
+            echo "FAIL: expected >=3 (init + 2 mirrored), got $count"
+            git -C "$mirror" log --oneline
+            exit 1
+          fi
+          authors=$(git -C "$mirror" log --format='%ae' | sort -u | tr '\n' ' ')
+          echo "Authors: $authors"
+          if ! echo "$authors" | grep -q "mirror@test.com"; then
+            echo "FAIL: no commits authored by mirror@test.com"
+            git -C "$mirror" log --pretty='%h %ae %s'
+            exit 1
+          fi
+          if echo "$authors" | grep -q "ci@test.com"; then
+            echo "FAIL: original work email leaked into mirror"
+            exit 1
+          fi
+          if echo "$authors" | grep -q "other@test.com"; then
+            echo "FAIL: non-matching email leaked into mirror"
+            exit 1
+          fi
+          echo "PASS: Windows end-to-end sync mirrored 2 matching commits with rewritten author"
 
   # Test Homebrew install + upgrade (only on tags)
   test-brew:
