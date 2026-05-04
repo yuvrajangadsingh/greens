@@ -198,7 +198,7 @@ jobs:
           EOF
 
           CONTRIB_MIRROR_CONFIG="$cfg" CACHE_DIR="$cache" \
-            timeout 60 bash sync.sh 2>&1 | tail -50
+            bash sync.sh 2>&1 | tail -50
 
           count=$(git -C "$mirror" rev-list --count HEAD)
           echo "Mirror commits: $count"
@@ -528,7 +528,7 @@ jobs:
           EOF
 
           CONTRIB_MIRROR_CONFIG="$cfg" CACHE_DIR="$cache" \
-            timeout 60 bash sync.sh 2>&1 | tail -50
+            bash sync.sh 2>&1 | tail -50
 
           count=$(git -C "$mirror" rev-list --count HEAD)
           echo "Mirror commits: $count"
