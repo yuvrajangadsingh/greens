@@ -8,6 +8,8 @@ If you commit to private/org repos all day but your GitHub profile looks empty, 
   <img src="assets/demo.svg" alt="greens demo" width="600">
 </p>
 
+> Windows 10/11 support is in beta in v1.8.0. If you try it on a real machine, please share results in [Discussions](https://github.com/yuvrajangadsingh/greens/discussions) for reports and [Issues](https://github.com/yuvrajangadsingh/greens/issues) for bugs.
+
 ## Install
 
 ### macOS
