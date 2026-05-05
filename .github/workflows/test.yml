@@ -288,6 +288,122 @@ jobs:
           # Substring-collision safety: TestOrg-Labs must not match TestOrg
           echo "$out" | grep -q 'repo-similar'      && assert fail 'substring-org rejected'       || assert pass 'substring-org rejected'
 
+      - name: Fetch timeout kills a stuck SSH transport
+        run: |
+          # Regression test: when ssh hangs mid-transfer (no data, no close),
+          # sync.sh must kill the fetch within GREENS_FETCH_TIMEOUT + grace
+          # instead of wedging the whole sync for hours.
+          tmp="$(mktemp -d)"
+          work="$tmp/work" mirror="$tmp/mirror" cache="$tmp/cache" cfg="$tmp/config"
+          mkdir -p "$work" "$mirror" "$cache"
+
+          # Fake SSH wrapper that never returns — simulates the midnight stall
+          # we actually observed in production (ssh alive, no bytes flowing).
+          cat > "$tmp/slow-ssh" <<'SSHEOF'
+          #!/bin/bash
+          sleep 600
+          SSHEOF
+          chmod +x "$tmp/slow-ssh"
+
+          mkdir -p "$work/slow-repo"
+          git -C "$work/slow-repo" init -q
+          git -C "$work/slow-repo" remote add origin git@github.com:TestOrg/slow-repo.git
+          GIT_AUTHOR_EMAIL=test@test.com GIT_COMMITTER_EMAIL=test@test.com \
+            git -C "$work/slow-repo" commit --allow-empty -m init -q
+
+          git -C "$mirror" init -q
+          GIT_AUTHOR_EMAIL=test@test.com GIT_COMMITTER_EMAIL=test@test.com \
+            git -C "$mirror" commit --allow-empty -m init -q
+
+          cat > "$cfg" <<EOF
+          WORK_DIR=$work
+          MIRROR_DIR=$mirror
+          CACHE_DIR=$cache
+          REMOTE_PREFIX="git@github.com:TestOrg/"
+          EMAILS="test@test.com"
+          MIRROR_EMAIL="test@test.com"
+          GITHUB_USERNAME="testuser"
+          ACTIVITY_TYPES="commits"
+          SINCE="2024-01-01 00:00:00"
+          EOF
+
+          # Full stdout to a file; no head/tee pipeline that can short-circuit
+          # the child via SIGPIPE and make the timer reading unreliable.
+          start="$(date +%s)"
+          CONTRIB_MIRROR_CONFIG="$cfg" FORCE=1 GREENS_FETCH_TIMEOUT=5 \
+            GIT_SSH_COMMAND="$tmp/slow-ssh" \
+            bash sync.sh >"$tmp/out.log" 2>&1 || true
+          elapsed="$(( $(date +%s) - start ))"
+
+          echo "--- sync output (first 20 lines) ---"
+          sed -n '1,20p' "$tmp/out.log" || true
+          echo "--- end output ---"
+          echo "elapsed=${elapsed}s"
+
+          # Budget: timeout (5) + grace (10) + overhead (~15) = 30s realistic.
+          # If it takes 60+ seconds the wrapper didn't actually kill ssh.
+          if [ "$elapsed" -lt 60 ]; then
+            echo "PASS: fetch timeout kicked in (${elapsed}s)"
+          else
+            echo "FAIL: sync took ${elapsed}s, timeout wrapper didn't kill ssh"
+            exit 1
+          fi
+
+          # Sync should log the warn for the failed repo before aborting.
+          if grep -q 'WARN.*slow-repo' "$tmp/out.log"; then
+            echo "PASS: failed fetch logged with WARN"
+          else
+            echo "FAIL: expected WARN for slow-repo in output"
+            cat "$tmp/out.log"
+            exit 1
+          fi
+
+      - name: Perl timeout fallback kills process group
+        run: |
+          # Exercise the perl fallback directly, without relying on a fragile
+          # PATH shim for sync.sh. This validates the bit of logic that kicks
+          # in when gtimeout/timeout are missing.
+          run_with_timeout() {
+            local seconds="$1"; shift
+            perl -e 'setpgrp 0,0; exec @ARGV or die "exec failed: $!"' "$@" &
+            local pid=$!
+            (
+              sleep "$seconds"
+              kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+              sleep 10
+              kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+            ) &
+            local watcher=$!
+            wait "$pid" 2>/dev/null
+            local rc=$?
+            kill "$watcher" 2>/dev/null
+            wait "$watcher" 2>/dev/null
+            return "$rc"
+          }
+
+          # Unique sentinel so the orphan check can't collide with unrelated
+          # `sleep` processes on the runner.
+          marker="greens-timeout-test-$RANDOM-$$"
+          start="$(date +%s)"
+          run_with_timeout 2 bash -c "exec -a $marker sleep 600" || true
+          elapsed="$(( $(date +%s) - start ))"
+          echo "elapsed=${elapsed}s"
+          if [ "$elapsed" -lt 30 ]; then
+            echo "PASS: perl fallback killed child (${elapsed}s)"
+          else
+            echo "FAIL: perl fallback didn't kill child within budget (${elapsed}s)"
+            exit 1
+          fi
+
+          # Confirm the sentinel-named child didn't leak out of the wrapper.
+          if pgrep -f "$marker" >/dev/null 2>&1; then
+            echo "FAIL: orphan child still running after wrapper returned"
+            pkill -9 -f "$marker" 2>/dev/null || true
+            exit 1
+          else
+            echo "PASS: no orphan child after wrapper returned"
+          fi
+
   # Windows smoke tests (Git Bash)
   test-windows:
     runs-on: windows-latest
