@@ -533,6 +533,50 @@ LC_ALL=C sort -u "$tmp_pairs" > "$tmp_sorted"
 # Fetch into bare caches (safe for local WIP)
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Never block on auth/host-key prompts and drop stalled SSH connections fast.
+# Without ServerAliveInterval a midnight launchd/cron run can hang for hours
+# when WiFi drops mid-transfer — ssh stays alive with no progress.
+# Honor pre-set values so users can tune via their environment.
+: "${GIT_TERMINAL_PROMPT:=0}"
+: "${GIT_SSH_COMMAND:=ssh -o BatchMode=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o ConnectTimeout=30}"
+export GIT_TERMINAL_PROMPT GIT_SSH_COMMAND
+
+# Per-fetch hard timeout so one stuck repo can't wedge the whole sync.
+# Prefer GNU coreutils, then macOS-native timeout, else a Bash-native fallback
+# that kills the whole process group.
+GREENS_FETCH_TIMEOUT="${GREENS_FETCH_TIMEOUT:-120}"
+if command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT_CMD=(gtimeout --kill-after=10 "$GREENS_FETCH_TIMEOUT")
+elif command -v timeout >/dev/null 2>&1; then
+  TIMEOUT_CMD=(timeout --kill-after=10 "$GREENS_FETCH_TIMEOUT")
+elif command -v perl >/dev/null 2>&1; then
+  # perl setpgrp makes the exec'd command a process group leader, so
+  # kill -TERM -$pid terminates git AND its ssh child. If setpgrp is a
+  # no-op on this platform, the negative-pid kill falls back to the
+  # positive-pid form so at least git itself gets terminated.
+  run_with_timeout() {
+    local seconds="$1"; shift
+    perl -e 'setpgrp 0,0; exec @ARGV or die "exec failed: $!"' "$@" &
+    local pid=$!
+    (
+      sleep "$seconds"
+      kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+      sleep 10
+      kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+    ) &
+    local watcher=$!
+    wait "$pid" 2>/dev/null
+    local rc=$?
+    kill "$watcher" 2>/dev/null
+    wait "$watcher" 2>/dev/null
+    return "$rc"
+  }
+  TIMEOUT_CMD=(run_with_timeout "$GREENS_FETCH_TIMEOUT")
+else
+  log "WARN: no timeout or perl available; fetches won't be bounded."
+  TIMEOUT_CMD=()
+fi
+
 repo_total="$(wc -l < "$tmp_sorted" | tr -d " ")"
 log ""
 log "Step 2/5: Caching $repo_total repos (read-only copies — your code stays untouched)"
@@ -545,7 +589,7 @@ while read -r remote_repo url; do
 
   if [[ ! -d "$bare" ]]; then
     log "Cloning $remote_repo"
-    if ! err="$(git clone --bare --filter=blob:none --no-tags "$url" "$bare" 2>&1)"; then
+    if ! err="$("${TIMEOUT_CMD[@]}" git clone --bare --filter=blob:none --no-tags "$url" "$bare" 2>&1)"; then
       log "WARN: clone failed for $remote_repo: $(echo "$err" | tail -n 3 | tr '\n' ' ')"
       failures=$((failures + 1))
       rm -rf "$bare" >/dev/null 2>&1 || true
@@ -560,7 +604,7 @@ while read -r remote_repo url; do
   fi
 
   log "Fetching $remote_repo"
-  if ! err="$(git --git-dir="$bare" fetch --prune --no-tags --filter=blob:none origin "+refs/heads/*:refs/heads/*" 2>&1)"; then
+  if ! err="$("${TIMEOUT_CMD[@]}" git --git-dir="$bare" fetch --prune --no-tags --filter=blob:none origin "+refs/heads/*:refs/heads/*" 2>&1)"; then
     log "WARN: fetch failed for $remote_repo: $(echo "$err" | tail -n 3 | tr '\n' ' ')"
     failures=$((failures + 1))
     continue
