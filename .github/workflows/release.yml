@@ -23,21 +23,26 @@ jobs:
           echo "sha256=$sha" >> "$GITHUB_OUTPUT"
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
-      - name: Update homebrew formula
+      - name: Update homebrew formulas (legacy + unified taps)
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_PAT }}
         run: |
-          # Fetch current formula
-          formula=$(gh api repos/yuvrajangadsingh/homebrew-greens/contents/Formula/greens.rb --jq '.content' | base64 -d)
-          file_sha=$(gh api repos/yuvrajangadsingh/homebrew-greens/contents/Formula/greens.rb --jq '.sha')
+          # Both taps must stay current. The legacy per-package tap
+          # (homebrew-greens) is referenced by the viral 888-commits post and
+          # any user who tapped before April 2026; removing it breaks their
+          # `brew upgrade greens`. The unified tap (homebrew-tap) is the
+          # canonical destination for new packages and future post copy.
+          for repo in yuvrajangadsingh/homebrew-greens yuvrajangadsingh/homebrew-tap; do
+            formula=$(gh api repos/${repo}/contents/Formula/greens.rb --jq '.content' | base64 -d)
+            file_sha=$(gh api repos/${repo}/contents/Formula/greens.rb --jq '.sha')
 
-          # Update url and sha256
-          updated=$(echo "$formula" | sed "s|url \".*\"|url \"${{ steps.sha.outputs.url }}\"|" | sed "s|sha256 \".*\"|sha256 \"${{ steps.sha.outputs.sha256 }}\"|")
+            updated=$(echo "$formula" | sed "s|url \".*\"|url \"${{ steps.sha.outputs.url }}\"|" | sed "s|sha256 \".*\"|sha256 \"${{ steps.sha.outputs.sha256 }}\"|")
 
-          # Push update
-          content=$(echo "$updated" | base64 -w 0)
-          gh api repos/yuvrajangadsingh/homebrew-greens/contents/Formula/greens.rb \
-            -X PUT \
-            -f message="greens ${{ steps.tag.outputs.version }}" \
-            -f content="$content" \
-            -f sha="$file_sha"
+            content=$(echo "$updated" | base64 -w 0)
+            gh api repos/${repo}/contents/Formula/greens.rb \
+              -X PUT \
+              -f message="greens ${{ steps.tag.outputs.version }}" \
+              -f content="$content" \
+              -f sha="$file_sha"
+            echo "Updated greens.rb in ${repo}"
+          done
