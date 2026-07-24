@@ -4,7 +4,22 @@
 #
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Everything setup writes (config with a possible PAT, mirror repo, logs) is
+# owner-only. chmod after the fact is not enough — create files tight.
+umask 077
+
+# Resolve symlink chains (relative targets included) without readlink -f,
+# which old macOS lacks. Keeps setup working when invoked via the installed
+# `greens` symlink.
+SCRIPT_SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_SOURCE" ]]; do
+  _link_target="$(readlink "$SCRIPT_SOURCE")"
+  case "$_link_target" in
+    /*) SCRIPT_SOURCE="$_link_target" ;;
+    *)  SCRIPT_SOURCE="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd)/$_link_target" ;;
+  esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd)"
 CONFIG_DIR="$HOME/.contrib-mirror"
 CONFIG_FILE="$CONFIG_DIR/config"
 
@@ -86,13 +101,36 @@ verify_mirror_owner() {
   fi
 }
 
+# The mirror's .git/config can hold a PAT (fix_https_auth embeds it in the
+# remote URL). Keep it owner-only after every remote write.
+secure_repo_config() {
+  chmod 600 "$1/.git/config" 2>/dev/null || true
+}
+
+# Push probe that also works on empty repos. v1.8.2 mirrors start with NO
+# commits (no init commit — the first mirrored activity commit is the root),
+# so with an unborn HEAD we verify the remote is reachable with the current
+# credentials instead; the post-setup test sync exercises the real push.
+probe_push() {
+  local mdir="$1"
+  if git -C "$mdir" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+    git -C "$mdir" push origin HEAD >/dev/null 2>&1
+  else
+    git -C "$mdir" ls-remote origin >/dev/null 2>&1
+  fi
+}
+
 # Test push access and set push_verified=1 on success.
 # If HTTPS and push fails, tries fix_https_auth.
 test_push_access() {
   local mdir="$1" url="${2:-}"
   info "Testing push access..."
-  if git -C "$mdir" push origin HEAD 2>/dev/null; then
-    ok "Push access works"
+  if probe_push "$mdir"; then
+    if git -C "$mdir" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+      ok "Push access works"
+    else
+      ok "Mirror remote reachable (push is fully verified on the first sync)"
+    fi
     push_verified=1
     return 0
   fi
@@ -116,6 +154,7 @@ test_push_access() {
       local https_url
       https_url="$(echo "$effective_url" | sed 's|git@\([^:]*\):|https://github.com/|')"
       git -C "$mdir" remote set-url origin "$https_url"
+      secure_repo_config "$mdir"
       ok "Remote switched to $https_url"
       if fix_https_auth "$mdir" "$https_url"; then
         push_verified=1
@@ -123,6 +162,7 @@ test_push_access() {
       fi
       # Restore SSH remote if HTTPS auth failed
       git -C "$mdir" remote set-url origin "$effective_url"
+      secure_repo_config "$mdir"
       warn "HTTPS auth failed. Restored SSH remote."
     fi
   else
@@ -208,7 +248,8 @@ fix_https_auth() {
     local authed_url
     authed_url="$(echo "$url" | sed "s|https://[^@]*@|https://|; s|https://|https://${mirror_token}@|")"
     git -C "$mdir" remote set-url origin "$authed_url"
-    if git -C "$mdir" push origin HEAD 2>/dev/null; then
+    secure_repo_config "$mdir"
+    if probe_push "$mdir"; then
       ok "Push access works now"
       return 0
     else
@@ -693,6 +734,8 @@ fi
 # ── Step 3: User inputs ────────────────────────────────────────────────────
 
 emails="$(prompt "Git author email(s) for work commits (comma-separated)" "$default_emails")"
+# Strip stray whitespace ("a@x.com, b@y.com" must not break matching)
+emails="$(printf '%s' "$emails" | tr -d '[:space:]')"
 
 # Ask for org name, construct remote prefix automatically
 echo ""
@@ -711,17 +754,23 @@ fi
 
 github_username="$(prompt "Work GitHub username (for PR/review/issue tracking)" "$default_username")"
 
-# Personal email for mirror commits — GitHub uses this to attribute green squares
-# Preserve existing config on rerun, but do NOT auto-detect from git (it's likely the work email)
+# Personal email for mirror commits — GitHub uses this to attribute green squares.
+# REQUIRED: without it mirror commits are never counted, and sync deliberately
+# refuses to fall back to the (likely work) global git identity.
+# Preserve existing config on rerun, but do NOT auto-detect from git.
 default_mirror_email="${MIRROR_EMAIL:-}"
 echo ""
 info "Your PERSONAL GitHub email (not work). This is how GitHub"
-info "knows to light up green squares on YOUR profile."
-mirror_email="$(prompt "Personal GitHub email" "$default_mirror_email")"
-if [[ -z "$mirror_email" ]]; then
-  warn "No email provided. Green squares won't appear until you set this."
-  info "Fix later: greens --setup"
-fi
+info "knows to light up green squares on YOUR profile. It must be a"
+info "verified email on your personal account. Required."
+mirror_email=""
+while [[ -z "$mirror_email" ]]; do
+  mirror_email="$(prompt "Personal GitHub email" "$default_mirror_email")"
+  mirror_email="$(printf '%s' "$mirror_email" | tr -d '[:space:]')"
+  if [[ -z "$mirror_email" ]]; then
+    warn "Required — mirror commits without it never show as green squares."
+  fi
+done
 
 # Personal GitHub username — the mirror repo MUST be under this account
 echo ""
@@ -736,8 +785,10 @@ fi
 
 since="$(prompt "Mirror commits since" "$default_since")"
 
-if [[ -n "$github_username" ]] && confirm "Track PRs, reviews, and issues too?"; then
-  activity_types="commits,prs,reviews,issues"
+# "reviews" is no longer offered by default: GitHub only exposes the PR's
+# updatedAt (not the review time), which shifts days and mints phantom squares.
+if [[ -n "$github_username" ]] && confirm "Track PRs and issues too?"; then
+  activity_types="commits,prs,issues"
 else
   activity_types="commits"
 fi
@@ -759,11 +810,31 @@ echo ""
 info "By default, mirror commits contain only timestamps (no code or messages)."
 printf "  Also copy commit messages to mirror? [y/N]: " >&2
 read -r copy_msgs_reply
+copy_messages="0"
+copy_messages_ack="0"
 if [[ "$copy_msgs_reply" =~ ^[Yy] ]]; then
-  copy_messages="1"
-  warn "Commit messages from private repos will be visible in the public mirror."
+  echo ""
+  warn "DANGER — read this before enabling:"
+  info "- Raw commit subjects from your work repos are published to ANYONE who"
+  info "  can read the mirror repo."
+  info "- Merge subjects routinely expose org and branch names, e.g."
+  info "  \"Merge pull request #42 from your-org/feature/secret-roadmap\"."
+  info "- Git history is durable: once pushed, treat every subject as public"
+  info "  even if you turn this off later (greens --privacy-migrate can rewrite)."
+  info "- Scope (since v1.8.2): only git commit subjects are copied. PR/review/"
+  info "  issue activity always gets a generic label — earlier versions also"
+  info "  copied org-wide PR/review/issue titles; that is gone."
+  echo ""
+  printf "  Type YES to copy commit subjects to the mirror: " >&2
+  read -r copy_msgs_confirm
+  if [[ "$copy_msgs_confirm" == "YES" ]]; then
+    copy_messages="1"
+    copy_messages_ack="1"
+    warn "Commit subjects from private repos will be copied to the mirror."
+  else
+    ok "Keeping timestamps only (no message content exposed)"
+  fi
 else
-  copy_messages="0"
   ok "Timestamps only (no message content exposed)"
 fi
 
@@ -791,12 +862,43 @@ if [[ -n "$resolved_work" ]] && [[ "$resolved_mirror" == "$resolved_work" || "$r
 fi
 
 echo ""
-info "The mirror repo is where your contribution dots appear on GitHub."
-info "It can be public or private. If private, enable 'Private contributions'"
-info "in GitHub Settings > Profile so the green squares show on your profile."
+info "The mirror repo is where your contribution squares come from."
 echo ""
+mirror_visibility="private"
 if [[ ! -d "$mirror_dir/.git" ]]; then
   mirror_repo_name="$(prompt "Repo name" "work-contributions-mirror")"
+
+  # Visibility is a deliberate choice. Private is the only default that keeps
+  # the promise "your work stays private": even empty commits expose exact
+  # timestamps — your cadence, timezone, overtime, and leave — to anyone who
+  # can read a public repo.
+  echo ""
+  info "Mirror repo visibility:"
+  info "  1) Private (recommended) — nothing is visible to anyone. Your green"
+  info "     squares still appear via GitHub's 'Include private contributions'"
+  info "     toggle (Settings > Profile)."
+  info "  2) Public — anyone can read the mirror. Empty commits still expose"
+  info "     your exact work timing: timezone, late nights, weekends, leave,"
+  info "     release crunches."
+  printf "  Choice [1]: " >&2
+  read -r visibility_choice
+  if [[ "${visibility_choice:-1}" == "2" ]]; then
+    echo ""
+    warn "A public mirror publishes your full work cadence (exact commit"
+    warn "timestamps, timezone, volume) to anyone, indefinitely. greens also"
+    warn "won't write the repo-names dashboard README on a public mirror."
+    printf "  Type PUBLIC to confirm; anything else keeps it private: " >&2
+    read -r public_confirm
+    if [[ "$public_confirm" == "PUBLIC" ]]; then
+      mirror_visibility="public"
+      warn "Mirror will be created PUBLIC."
+    else
+      ok "Keeping the mirror private."
+    fi
+  else
+    ok "Private mirror. Remember to enable 'Include private contributions'"
+    info "  at https://github.com/settings/profile so the squares show."
+  fi
 
   # Try to auto-detect personal SSH identity for the mirror
   personal_host=""
@@ -817,7 +919,7 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
         personal_github_user="$personal_user"
       else
         warn "Skipping SSH auto-detection. Provide the mirror URL manually."
-        mirror_url="$(prompt_mirror_url "Mirror repo URL (create an empty public repo on your personal GitHub first)")"
+        mirror_url="$(prompt_mirror_url "Mirror repo URL (create an empty PRIVATE repo on your personal GitHub first)")"
         personal_user=""
         personal_host=""
       fi
@@ -843,8 +945,8 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
           gh_user="$(gh api user -q .login 2>/dev/null || echo "")"
           if [[ "$gh_user" == "$personal_user" ]]; then
             # gh is on the personal account, create directly
-            if gh repo create "$mirror_repo_name" --public --description "Mirror of private work contributions" 2>/dev/null; then
-              ok "Created github.com/$personal_user/$mirror_repo_name"
+            if gh repo create "$mirror_repo_name" "--$mirror_visibility" --description "Mirror of private work contributions" 2>/dev/null; then
+              ok "Created github.com/$personal_user/$mirror_repo_name ($mirror_visibility)"
               repo_created=1
             fi
           fi
@@ -852,8 +954,9 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
 
         if [[ "$repo_created" -eq 0 ]]; then
           echo ""
-          info "Create this repo on your personal GitHub before continuing:"
-          info "  https://github.com/new?name=$mirror_repo_name"
+          info "Create this repo on your personal GitHub before continuing"
+          info "(empty, no README, visibility: $mirror_visibility):"
+          info "  https://github.com/new?name=$mirror_repo_name&visibility=$mirror_visibility"
           echo ""
           info "Press Enter when done..."
           read -r
@@ -863,10 +966,10 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
   elif [[ -z "${personal_github_user:-}" ]]; then
     # No personal username provided, can't verify ownership. Force manual URL.
     warn "Without a personal username, can't auto-create or verify repo ownership."
-    mirror_url="$(prompt_mirror_url "Mirror repo URL (create an empty public repo on your personal GitHub first)")"
+    mirror_url="$(prompt_mirror_url "Mirror repo URL (create an empty PRIVATE repo on your personal GitHub first)")"
   elif command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
     # Fallback: use gh CLI (single account or HTTPS)
-    if confirm "Create a new public mirror repo on GitHub?"; then
+    if confirm "Create a new $mirror_visibility mirror repo on GitHub?"; then
       gh_user="$(gh api user -q .login 2>/dev/null || echo "")"
       if [[ -n "$gh_user" ]]; then
         # Verify gh is on the personal account, not work
@@ -903,8 +1006,8 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
         fi
       fi
       if [[ -z "${mirror_url:-}" && -z "${skip_gh_create:-}" ]]; then
-        if gh repo create "$mirror_repo_name" --public --description "Mirror of private work contributions" 2>/dev/null; then
-          ok "Created repo on GitHub"
+        if gh repo create "$mirror_repo_name" "--$mirror_visibility" --description "Mirror of private work contributions" 2>/dev/null; then
+          ok "Created $mirror_visibility repo on GitHub"
           if [[ "$auth_method" == "ssh" ]]; then
             mirror_url="$(gh repo view "$mirror_repo_name" --json sshUrl -q .sshUrl 2>/dev/null)"
           else
@@ -918,10 +1021,10 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
         mirror_url="$(prompt_mirror_url "Mirror repo URL (create it manually on your personal account)")"
       fi
     else
-      mirror_url="$(prompt_mirror_url "Mirror repo URL (create an empty public repo on GitHub first)")"
+      mirror_url="$(prompt_mirror_url "Mirror repo URL (create an empty PRIVATE repo on GitHub first)")"
     fi
   else
-    mirror_url="$(prompt_mirror_url "Mirror repo URL (create an empty public repo on GitHub first)")"
+    mirror_url="$(prompt_mirror_url "Mirror repo URL (create an empty PRIVATE repo on GitHub first)")"
   fi
 
   if [[ -n "${mirror_url:-}" ]]; then
@@ -932,18 +1035,10 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
       git -C "$mirror_dir" init --quiet
       git -C "$mirror_dir" remote add origin "$mirror_url"
     }
-    # Ensure at least one commit exists (empty repos have no HEAD)
-    # Use mirror email so this commit is attributed to the personal account
-    if ! git -C "$mirror_dir" rev-parse --verify HEAD &>/dev/null; then
-      init_args=()
-      if [[ -n "${mirror_email:-}" ]]; then
-        init_args+=(-c "user.email=$mirror_email")
-      fi
-      if [[ -n "${personal_github_user:-}" ]]; then
-        init_args+=(-c "user.name=$personal_github_user")
-      fi
-      git -C "$mirror_dir" "${init_args[@]}" commit --allow-empty -m "init" --quiet
-    fi
+    secure_repo_config "$mirror_dir"
+    # No init commit — since v1.8.2 the mirror holds ONLY activity commits;
+    # the first mirrored commit becomes the root. (Init/status commits used
+    # to mint a phantom square on setup day.)
     ok "Mirror repo ready at $mirror_dir"
 
     # Test push access
@@ -972,6 +1067,7 @@ else
         1)
           new_mirror_url="$(prompt_mirror_url "New mirror repo URL")"
           git -C "$mirror_dir" remote set-url origin "$new_mirror_url"
+          secure_repo_config "$mirror_dir"
           ok "Remote updated to $(mask_url "$new_mirror_url")"
           test_push_access "$mirror_dir" "$new_mirror_url"
           ;;
@@ -988,6 +1084,7 @@ else
     new_mirror_url="$(prompt_mirror_url "Mirror repo URL")"
     git -C "$mirror_dir" remote add origin "$new_mirror_url" 2>/dev/null || \
       git -C "$mirror_dir" remote set-url origin "$new_mirror_url"
+    secure_repo_config "$mirror_dir"
     ok "Remote set to $(mask_url "$new_mirror_url")"
     test_push_access "$mirror_dir" "$new_mirror_url"
   fi
@@ -1162,12 +1259,15 @@ esac
 # Write config (after scheduler so sync_hour is set)
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Owner-only dir, atomic owner-only file — the config can hold a PAT.
 mkdir -p "$CONFIG_DIR"
-cat > "$CONFIG_FILE" << 'HEADER'
+chmod 700 "$CONFIG_DIR" 2>/dev/null || true
+config_tmp="$CONFIG_FILE.tmp.$$"
+cat > "$config_tmp" << 'HEADER'
 # Private Work Contributions Mirror - Configuration
 # Env vars override these values (e.g. WORK_DIR="/other" ./sync.sh)
 HEADER
-cat >> "$CONFIG_FILE" << EOF
+cat >> "$config_tmp" << EOF
 # Generated by setup.sh on $(date '+%Y-%m-%d %H:%M:%S')
 
 WORK_DIR="\${WORK_DIR:-$work_dir}"
@@ -1177,18 +1277,22 @@ MIRROR_DIR="\${MIRROR_DIR:-$mirror_dir}"
 GITHUB_USERNAME="\${GITHUB_USERNAME:-$github_username}"
 PERSONAL_GH_USER="\${PERSONAL_GH_USER:-${personal_github_user:-}}"
 MIRROR_EMAIL="\${MIRROR_EMAIL:-$mirror_email}"
+MIRROR_NAME="\${MIRROR_NAME:-greens}"
 ACTIVITY_TYPES="\${ACTIVITY_TYPES:-$activity_types}"
 COPY_MESSAGES="\${COPY_MESSAGES:-$copy_messages}"
+COPY_MESSAGES_ACK="\${COPY_MESSAGES_ACK:-$copy_messages_ack}"
 SINCE="\${SINCE:-$since}"
 SYNC_HOUR="\${SYNC_HOUR:-$sync_hour}"
 EOF
 
 # Add token if provided during auth setup
 if [[ -n "${DETECTED_TOKEN:-}" ]]; then
-  cat >> "$CONFIG_FILE" << EOF
+  cat >> "$config_tmp" << EOF
 GITHUB_TOKEN="\${GITHUB_TOKEN:-$DETECTED_TOKEN}"
 EOF
 fi
+chmod 600 "$config_tmp" 2>/dev/null || true
+mv "$config_tmp" "$CONFIG_FILE"
 
 echo ""
 ok "Config saved to $CONFIG_FILE"
@@ -1203,7 +1307,7 @@ fi
 if [[ "$push_verified" -eq 1 && -d "$mirror_dir/.git" ]]; then
   echo ""
   info "Running test sync to verify the full pipeline..."
-  if bash "$SCRIPT_DIR/sync.sh" 2>/dev/null; then
+  if bash "$SCRIPT_DIR/sync.sh"; then
     ok "Test sync completed successfully"
   else
     warn "Test sync had issues. Run 'greens' manually to debug."

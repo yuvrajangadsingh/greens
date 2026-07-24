@@ -50,6 +50,12 @@
       <string>/path/to/your/mirror/repo</string>
       <key>EMAILS</key>
       <string>your-work@company.com,your-personal@gmail.com</string>
+      <!-- REQUIRED: personal verified GitHub email; sync exits 2 without it -->
+      <key>MIRROR_EMAIL</key>
+      <string>your-personal@gmail.com</string>
+      <!-- Author name for mirror commits; keep it generic -->
+      <key>MIRROR_NAME</key>
+      <string>greens</string>
       <key>REMOTE_PREFIX</key>
       <string>git@github.com:your-company/</string>
       <key>SINCE</key>

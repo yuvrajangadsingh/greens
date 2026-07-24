@@ -16,3 +16,6 @@ mirror/
 
 # Launch notes
 launch-posts.md
+
+# Local planning notes (never ship)
+.notes/
