@@ -394,7 +394,7 @@ greens_sources_setup() {
   if [[ "$legacy_schema" == 1 && -d "$MIRROR_DIR/.git" ]] && git -C "$MIRROR_DIR" rev-parse --verify HEAD >/dev/null 2>&1 && ! git -C "$MIRROR_DIR" log --format=%B | grep -q '^Greens-Activity: '; then printf -v GREENS_LEGACY_TIMESTAMPS '%s' 1; fi
   save_keys=(WORK_DIRS SCAN_MODE SOURCE_COUNT PERSONAL_GH_USER MIRROR_EMAIL MIRROR_NAME MIRROR_URL MIRROR_DIR COPY_MESSAGES COPY_MESSAGES_ACK SCHEDULER SYNC_HOUR GREENS_LEGACY_TIMESTAMPS)
   for ((i=1; i<=SOURCE_COUNT; i++)); do for key in PROVIDER REMOTE_HOSTS API_HOST ORGANIZATION USERNAME EMAILS SINCE ACTIVITY_TYPES ACCESS_MODE; do save_keys+=("SOURCE_${i}_${key}"); done; done
-  greens_replace_config "$CONFIG_FILE" '^(WORK_DIRS?|SCAN_MODE|SOURCE_PROVIDER|SOURCE_COUNT|SOURCE_[0-9]+_.*|REMOTE_PREFIX|GITHUB_(ORG|USERNAME|TOKEN)|GITLAB_(HOST|REMOTE_HOST|USERNAME)|EMAILS|SINCE|ACTIVITY_TYPES)$' "${save_keys[@]}"
+  greens_replace_config "$CONFIG_FILE" '^(WORK_DIRS?|SCAN_MODE|SOURCE_PROVIDER|SOURCE_COUNT|SOURCE_[0-9]+_.*|REMOTE_PREFIX|GITHUB_(ORG|USERNAME|TOKEN)|GITLAB_(HOST|REMOTE_HOST|USERNAME)|EMAILS|SINCE|ACTIVITY_TYPES|PERSONAL_GH_USER|MIRROR_(EMAIL|NAME|URL|DIR)|COPY_MESSAGES(_ACK)?|SCHEDULER|SYNC_HOUR|GREENS_LEGACY_TIMESTAMPS)$' "${save_keys[@]}"
   ok "Saved configuration to $CONFIG_FILE"
   if confirm "Run the initial sync now?"; then FORCE=1 CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$SCRIPT_DIR/sync.sh"; fi
   if [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$(greens_scheduler_id).timer" ]]; then greens_systemd_remove; fi

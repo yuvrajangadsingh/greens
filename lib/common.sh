@@ -10,6 +10,25 @@ greens_config_path() {
   printf '%s\n' "$file"
 }
 
+# Load the latest assignment for each configuration key. Older greens versions
+# could append a new default without removing an earlier assignment, causing the
+# earlier value to win through shell default-expansion syntax.
+greens_source_config() {
+  local file="$1"
+  # shellcheck disable=SC1090
+  source <(awk '
+    function config_key(line, clean) {
+      clean=line
+      sub(/^[[:space:]]*export[[:space:]]+/, "", clean)
+      if (clean !~ /^[A-Z][A-Z0-9_]*=/) return ""
+      sub(/=.*/, "", clean)
+      return clean
+    }
+    NR==FNR { key=config_key($0); if (key != "") last[key]=FNR; next }
+    { key=config_key($0); if (key != "" && last[key] != FNR) next; print }
+  ' "$file" "$file")
+}
+
 greens_stamp_path() {
   local dir="${LOG_DIR:-$HOME/.contrib-mirror/logs}"
   if [[ "$CONFIG_FILE" == "$HOME/.contrib-mirror/config" ]]; then

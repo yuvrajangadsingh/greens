@@ -616,8 +616,7 @@ echo "  private by default, so your contribution graph reflects all your work."
 if [[ -f "$CONFIG_FILE" ]]; then
   [[ -O "$CONFIG_FILE" ]] || { fail "Config is not owned by the current user."; exit 1; }
   info "Found existing config at $CONFIG_FILE"
-  # shellcheck source=/dev/null
-  source "$CONFIG_FILE"
+  greens_source_config "$CONFIG_FILE"
   echo ""
 fi
 

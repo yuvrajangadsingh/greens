@@ -192,6 +192,12 @@ if grep -qE 'separate GitHub accounts|Work GitHub org/owner name' "$TEST_ROOT/di
   fail "GitLab-only setup displayed GitHub source prompts"
 fi
 
+# Older setup versions could leave an early default before the latest saved
+# value. Loading must use the last assignment and the next save must clean it.
+SYNC_HOUR=11 greens_save_config "$dialog_config" SYNC_HOUR
+{ printf '%s\n' 'SYNC_HOUR="${SYNC_HOUR:-0}"'; cat "$dialog_config"; } > "$dialog_config.duplicate"
+mv "$dialog_config.duplicate" "$dialog_config"
+
 # An unreachable GitLab source can be confirmed as local-only before any glab
 # authentication or activity prompt is attempted.
 mkdir -p "$TEST_ROOT/local-dialog-work/repo"
@@ -272,6 +278,9 @@ mkdir -p "$TEST_ROOT/additional-work"
     cat "$TEST_ROOT/dialog-defaults-output"; fail "setup rerun with saved defaults";
   }
 bash -c 'source "$1"; [[ "$SCAN_MODE" == in-root && "$WORK_DIRS" == "$2"$'"'"'\n'"'"'"$3" && "$SOURCE_1_USERNAME" == fixture && "$SOURCE_1_ACTIVITY_TYPES" == commits,mrs,issues && "$MIRROR_EMAIL" == mirror@example.test && "$SCHEDULER" == manual ]]' bash "$dialog_config" "$WORK_DIR" "$TEST_ROOT/additional-work" || fail "setup rerun did not retain and append work directories"
+grep -q 'Daily hour (0-23, local timezone) \[11\]' "$TEST_ROOT/dialog-defaults-output" || fail "setup did not show the saved sync hour"
+bash -c 'source "$1"; [[ "$SYNC_HOUR" == 11 ]]' bash "$dialog_config" || fail "setup did not retain the saved sync hour"
+[[ "$(grep -c '^SYNC_HOUR=' "$dialog_config")" == 1 ]] || fail "setup did not remove stale sync-hour assignments"
 {
   printf 'y\n\n'
   printf '\n\n\n\n\n\n\n\n\n\n\n\nn\n'

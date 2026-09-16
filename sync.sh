@@ -62,7 +62,7 @@ fi
 
 # Source config file if it exists
 # shellcheck disable=SC1090
-[[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
+[[ -f "$CONFIG_FILE" ]] && greens_source_config "$CONFIG_FILE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Atomic config writes. The config can hold a PAT; every write path is
@@ -248,7 +248,7 @@ privacy_migrate() {
     exit 1
   fi
   # shellcheck disable=SC1090
-  source "$CONFIG_FILE"
+  greens_source_config "$CONFIG_FILE"
   MIRROR_DIR="${MIRROR_DIR:-$HOME/.contrib-mirror/mirror}"
   MIRROR_NAME="${MIRROR_NAME:-greens}"
   MIRROR_EMAIL="${MIRROR_EMAIL:-}"
@@ -976,7 +976,7 @@ case "${1:-}" in
       exit 0
     fi
     # shellcheck source=/dev/null
-    source "$CONFIG_FILE" 2>/dev/null || { echo "  No config found. Run: greens"; exit 1; }
+    greens_source_config "$CONFIG_FILE" 2>/dev/null || { echo "  No config found. Run: greens"; exit 1; }
     MIRROR_DIR="${MIRROR_DIR:-$HOME/.contrib-mirror/mirror}"
     # Legacy history must be migrated, not resynced over. (The sync this
     # execs at the end re-checks against the refreshed remote as well.)
@@ -1038,7 +1038,7 @@ case "${1:-}" in
       exit 0
     fi
     # shellcheck source=/dev/null
-    source "$CONFIG_FILE"
+    greens_source_config "$CONFIG_FILE"
     status_scan_mode="${SCAN_MODE:-recursive}"
     greens_validate_scan_mode "$status_scan_mode" || exit 1
     echo "  Config:       $CONFIG_FILE"
@@ -1211,7 +1211,7 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
   fi
   # Reload config written by setup
   # shellcheck source=/dev/null
-  source "$CONFIG_FILE"
+  greens_source_config "$CONFIG_FILE"
   echo ""
   echo "Starting first sync..."
   echo ""
