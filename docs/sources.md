@@ -3,14 +3,28 @@
 ## Setup flow
 
 `greens --setup` accepts any number of repository roots. Paths are canonicalized,
-stored in `WORK_DIRS`, and scanned recursively for Git repositories and
-worktrees. Overlapping roots, duplicate clones, and SSH/HTTPS forms of the same
-repository are deduplicated before activity is collected.
+stored in `WORK_DIRS`, and scanned in the configured mode for Git repositories and
+worktrees. Checkouts whose normalized `origin` identifies the same repository,
+including SSH/HTTPS forms and overlapping roots, are counted and processed once.
+Setup asks for one
+root at a time and repeats the prompt until an empty answer is submitted.
+On a rerun, saved roots are retained automatically and the first directory
+prompt adds another root.
+
+The default `SCAN_MODE=recursive` searches every descendant. Running setup with
+`--in-root` persists `SCAN_MODE=in-root`: only `.git` files or directories in
+immediate child folders of each work root are inspected. The work root itself
+and deeper descendants are ignored by setup, status, and sync. Rerunning setup
+without a scan flag retains the saved mode; `--recursive` explicitly restores
+recursive discovery.
 
 Repositories are grouped by provider, API host, and organization. A GitHub
 organization is the repository owner. A GitLab organization is the top-level
 namespace, so `group/platform/service` belongs to `group`. Every group has its
 own username, commit emails, history start, and activity selection.
+Entering `-` at its author-email prompt skips the complete group before account
+or activity configuration. All repositories represented by that group are
+omitted from sync. The group is offered again on a later setup run.
 
 Known `github.com` and `gitlab.com` remotes are classified without a network
 probe. For another remote host, setup asks for the web/API domain. This matters
@@ -30,6 +44,13 @@ Before saving, setup prints the selected directories and source groups. It
 writes the complete configuration atomically only after validation. Tokens stay
 in the normal `gh` and `glab` credential stores.
 
+Each GitHub owner has its own configured account, while the destination has a
+separate personal-account setting. There is no separate-account question: the
+selected usernames already provide that information. API calls temporarily
+select the source account with `gh`, then restore the previously active account.
+The personal destination username and primary verified email are pre-filled
+from the authenticated personal `github.com` account.
+
 ## Configuration schema
 
 The configuration is an owner-only Bash environment file. Use setup to edit it;
@@ -37,6 +58,7 @@ the example below documents its shape:
 
 ```bash
 WORK_DIRS=$'/srv/work\n/home/me/projects'
+SCAN_MODE=recursive
 SOURCE_COUNT=2
 
 SOURCE_1_PROVIDER=github
@@ -108,6 +130,8 @@ Legacy configurations remain valid:
   existing behavior.
 - `REMOTE_PREFIX`, `GITHUB_*`, `GITLAB_*`, global `EMAILS`, `SINCE`, and
   `ACTIVITY_TYPES` are read exactly as before.
+- When a legacy GitHub activity list is applied to a GitLab source, `prs` is
+  converted to GitLab's corresponding `mrs` activity name.
 
 Completing setup migrates those managed values to `WORK_DIRS` and indexed
 sources, while preserving unrelated custom lines. Existing greens-generated
@@ -123,6 +147,8 @@ history is still refused.
   alias, verify its CA trust, or select the provider manually.
 - **Authentication fails:** run `gh auth login --hostname HOST` or
   `glab auth login --hostname HOST`, then rerun setup so the saved actor matches.
+- **A different GitHub account is active:** no manual switch is required during
+  sync; authenticate the saved account once and greens selects it per source.
 - **A directory is temporarily unavailable:** keep it during setup. Sync warns
   and continues scanning other configured roots.
 - **Settings changed but sync already ran today:** use `FORCE=1 greens`.

@@ -37,6 +37,11 @@ source "$TEST_ROOT/config-roundtrip"
 [[ "$(greens_remote_identity 'ssh://git@forge.example:2222/group/sub/repo.git')" == forge.example/group/sub/repo ]] || fail "SSH URL normalization"
 [[ "$(greens_remote_identity 'https://forge.example/group/sub/repo')" == forge.example/group/sub/repo ]] || fail "HTTPS normalization"
 
+mkdir -p "$TEST_ROOT/scan-root/immediate/.git" "$TEST_ROOT/scan-root/worktree" "$TEST_ROOT/scan-root/nested/deep/.git" "$TEST_ROOT/scan-root/.git"
+: > "$TEST_ROOT/scan-root/worktree/.git"
+[[ "$(greens_count_repositories "$TEST_ROOT/scan-root" in-root)" == 2 ]] || fail "in-root repository depth"
+[[ "$(greens_count_repositories "$TEST_ROOT/scan-root" recursive)" == 4 ]] || fail "recursive repository depth"
+
 mkdir -p "$TEST_ROOT/work/nested" "$TEST_ROOT/remotes"
 git init --bare --quiet "$TEST_ROOT/remotes/source.git"
 git init --bare --quiet "$TEST_ROOT/remotes/mirror.git"
@@ -141,17 +146,21 @@ cat > "$TEST_ROOT/bin/gh" <<'MOCK'
 #!/bin/bash
 case "$*" in
   'auth status --active --hostname github.example') exit 0 ;;
-  'api --hostname github.example user') echo '{"login":"fixture-gh"}' ;;
-  'api --hostname github.example user --jq .login') echo fixture-gh ;;
+  'auth switch --hostname github.example --user '*) printf '%s\n' "${*: -1}" > "$TEST_ROOT/github-example-active" ;;
+  'auth switch --hostname github.com --user '*) exit 0 ;;
+  'api --hostname github.example user') login="$(cat "$TEST_ROOT/github-example-active" 2>/dev/null || echo fixture-gh)"; printf '{"login":"%s"}\n' "$login" ;;
+  'api --hostname github.example user --jq .login') cat "$TEST_ROOT/github-example-active" 2>/dev/null || echo fixture-gh ;;
+  'api --hostname github.example / --jq .current_user_url') echo 'https://github.example/api/v3/user' ;;
   api\ --hostname\ github.example\ --paginate\ -X\ GET\ search/issues*)
+    [[ "$(cat "$TEST_ROOT/github-example-active" 2>/dev/null || echo fixture-gh)" == fixture-gh ]] || exit 1
     if [[ "$*" == *'type:issue'* ]]; then
       echo '{"items":[{"id":502,"created_at":"2021-02-03T14:00:00Z","repository_url":"https://github.example/api/v3/repos/acme/app"}]}'
     else
       echo '{"items":[{"id":501,"created_at":"2021-02-03T13:00:00Z","updated_at":"2021-02-03T13:00:00Z","repository_url":"https://github.example/api/v3/repos/acme/app"}]}'
     fi
     ;;
-  'api user --jq .login') echo fixture ;;
-  'api user/emails --jq '*) echo mirror@example.test ;;
+  'api user --jq .login'|'api --hostname github.com user --jq .login') echo fixture ;;
+  'api user/emails --jq '*|'api --hostname github.com user/emails --jq '*) echo mirror@example.test ;;
   'api repos/fixture/mirror') echo '{"private":true,"default_branch":"main"}' ;;
   'auth status'*) exit 0 ;;
   'repo view '*' --json visibility -q .visibility') echo "${FIXTURE_VISIBILITY:-PRIVATE}" ;;
@@ -162,23 +171,78 @@ chmod +x "$TEST_ROOT/bin/gh"
 git config --global url."$TEST_ROOT/remotes/mirror.git".insteadOf https://github.com/fixture/mirror
 dialog_config="$TEST_ROOT/dialog/config"
 {
-  printf '%s\n\nforge.example\nfixture\nauthor@example.test\n2021-01-01\n' "$WORK_DIR"
-  printf 'commits,mrs,issues,comments,approvals,merges,state_changes\nfixture\nmirror@example.test\ngreens\n'
+  printf '%s\n\nforge.example\nauthor@example.test\nfixture\n2021-01-01\n' "$WORK_DIR"
+  printf '\nfixture\nmirror@example.test\ngreens\n'
   printf 'https://github.com/fixture/mirror\n%s\nmanual\n0\nn\n' "$TEST_ROOT/dialog-mirror"
-} | CONTRIB_MIRROR_CONFIG="$dialog_config" bash "$ROOT/setup.sh" > "$TEST_ROOT/dialog-output" 2>&1 || {
+} | ACTIVITY_TYPES=commits,prs,issues CONTRIB_MIRROR_CONFIG="$dialog_config" bash "$ROOT/setup.sh" --in-root > "$TEST_ROOT/dialog-output" 2>&1 || {
   cat "$TEST_ROOT/dialog-output"; fail "setup dialog";
 }
 [[ -f "$dialog_config" ]] || fail "setup did not honor config location"
-bash -c 'source "$1"; [[ "$SOURCE_COUNT" == 1 && "$SOURCE_1_PROVIDER" == gitlab && "$SOURCE_1_API_HOST" == forge.example && "$MIRROR_EMAIL" == mirror@example.test && "$SCHEDULER" == manual && -z "${SOURCE_PROVIDER:-}" ]]' bash "$dialog_config" || fail "dialog did not persist choices"
+bash -c 'source "$1"; [[ "$SCAN_MODE" == in-root && "$SOURCE_COUNT" == 1 && "$SOURCE_1_PROVIDER" == gitlab && "$SOURCE_1_API_HOST" == forge.example && "$SOURCE_1_ACTIVITY_TYPES" == commits,mrs,issues && "$MIRROR_EMAIL" == mirror@example.test && "$SCHEDULER" == manual && -z "${SOURCE_PROVIDER:-}" ]]' bash "$dialog_config" || fail "dialog did not persist choices"
+grep -q 'Activity types for forge.example/team \[commits,mrs,issues\]' "$TEST_ROOT/dialog-output" || fail "GitLab setup did not migrate prs to mrs"
+CONTRIB_MIRROR_CONFIG="$dialog_config" bash "$ROOT/sync.sh" --status > "$TEST_ROOT/in-root-status"
+grep -Fq "$WORK_DIR (1 repos)" "$TEST_ROOT/in-root-status" || fail "status ignored in-root scan mode"
 dialog_hash="$(git hash-object "$dialog_config")"
 printf 'n\n' | CONTRIB_MIRROR_CONFIG="$dialog_config" bash "$ROOT/setup.sh" > "$TEST_ROOT/dialog-rerun-output" 2>&1 || fail "setup rerun summary"
 [[ "$(git hash-object "$dialog_config")" == "$dialog_hash" ]] || fail "declined setup rerun changed config"
 grep -q 'Current configuration:' "$TEST_ROOT/dialog-rerun-output" || fail "setup rerun omitted current summary"
-printf 'y\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nn\n' |
+grep -q 'Add another work directory' "$TEST_ROOT/dialog-output" || fail "setup did not offer another work directory"
+if grep -qE 'separate GitHub accounts|Work GitHub org/owner name' "$TEST_ROOT/dialog-output"; then
+  fail "GitLab-only setup displayed GitHub source prompts"
+fi
+
+# GitHub prompts are conditional, every discovered owner gets a separate source
+# record, and a dash skips a complete owner before its remaining prompts.
+mkdir -p "$TEST_ROOT/github-dialog-work/one" "$TEST_ROOT/github-dialog-work/one-copy" "$TEST_ROOT/github-dialog-work/two" "$TEST_ROOT/github-dialog-work/three" "$TEST_ROOT/github-dialog-work/nested/four"
+git init --quiet "$TEST_ROOT/github-dialog-work/one"
+git init --quiet "$TEST_ROOT/github-dialog-work/one-copy"
+git init --quiet "$TEST_ROOT/github-dialog-work/two"
+git init --quiet "$TEST_ROOT/github-dialog-work/three"
+git init --quiet "$TEST_ROOT/github-dialog-work/nested/four"
+git -C "$TEST_ROOT/github-dialog-work/one" remote add origin git@github.example:alpha/one.git
+git -C "$TEST_ROOT/github-dialog-work/one-copy" remote add origin git@github.example:alpha/one.git
+git -C "$TEST_ROOT/github-dialog-work/two" remote add origin git@github.example:beta/two.git
+git -C "$TEST_ROOT/github-dialog-work/three" remote add origin git@github.example:gamma/three.git
+git -C "$TEST_ROOT/github-dialog-work/nested/four" remote add origin git@github.example:delta/four.git
+github_dialog_config="$TEST_ROOT/github-dialog/config"
+{
+  printf '%s\n\n\n' "$TEST_ROOT/github-dialog-work"
+  printf '%s\n' '-'
+  printf 'author@example.test\n\n2021-01-01\ncommits,prs,issues\n'
+  printf 'author@example.test\n\n2021-01-01\ncommits\n'
+  printf '\nmirror@example.test\ngreens\nhttps://github.com/fixture/mirror\n%s\nmanual\n0\nn\n' "$TEST_ROOT/github-dialog-mirror"
+} | CONTRIB_MIRROR_CONFIG="$github_dialog_config" bash "$ROOT/setup.sh" --in-root > "$TEST_ROOT/github-dialog-output" 2>&1 || {
+  cat "$TEST_ROOT/github-dialog-output"; fail "multi-owner GitHub setup dialog";
+}
+if grep -qE 'separate GitHub accounts|Work GitHub org/owner name' "$TEST_ROOT/github-dialog-output"; then fail "new setup used a redundant global GitHub prompt"; fi
+bash -c 'source "$1"; [[ "$SCAN_MODE" == in-root && "$SOURCE_COUNT" == 2 && "$SOURCE_1_ORGANIZATION" == beta && "$SOURCE_2_ORGANIZATION" == gamma ]]' bash "$github_dialog_config" || fail "setup did not skip and persist GitHub owners"
+grep -q 'Skipping github github.example/alpha (1 repositories).' "$TEST_ROOT/github-dialog-output" || fail "setup did not report skipped source group"
+grep -q 'Git author emails for github.example/alpha (comma-separated, or - to skip all 1 repositories)' "$TEST_ROOT/github-dialog-output" || fail "setup counted duplicate origin checkouts"
+github_dialog_hash="$(git hash-object "$github_dialog_config")"
+if printf 'y\n\n-\n-\n-\n-\n' | CONTRIB_MIRROR_CONFIG="$github_dialog_config" bash "$ROOT/setup.sh" --recursive > "$TEST_ROOT/all-skipped-output" 2>&1; then
+  fail "setup accepted every source group being skipped"
+fi
+grep -q 'Every detected source group was skipped' "$TEST_ROOT/all-skipped-output" || fail "all-skipped setup error"
+[[ "$(git hash-object "$github_dialog_config")" == "$github_dialog_hash" ]] || fail "all-skipped setup changed config"
+mkdir -p "$TEST_ROOT/additional-work"
+{
+  printf 'y\n%s\n\n' "$TEST_ROOT/additional-work"
+  printf '\n\n\n\n\n\n\n\n\n\n\n\nn\n'
+} |
   CONTRIB_MIRROR_CONFIG="$dialog_config" bash "$ROOT/setup.sh" > "$TEST_ROOT/dialog-defaults-output" 2>&1 || {
     cat "$TEST_ROOT/dialog-defaults-output"; fail "setup rerun with saved defaults";
   }
-bash -c 'source "$1"; [[ "$WORK_DIRS" == "$2" && "$SOURCE_1_USERNAME" == fixture && "$SOURCE_1_ACTIVITY_TYPES" == commits,mrs,issues,comments,approvals,merges,state_changes && "$MIRROR_EMAIL" == mirror@example.test && "$SCHEDULER" == manual ]]' bash "$dialog_config" "$WORK_DIR" || fail "setup rerun did not retain saved defaults"
+bash -c 'source "$1"; [[ "$SCAN_MODE" == in-root && "$WORK_DIRS" == "$2"$'"'"'\n'"'"'"$3" && "$SOURCE_1_USERNAME" == fixture && "$SOURCE_1_ACTIVITY_TYPES" == commits,mrs,issues && "$MIRROR_EMAIL" == mirror@example.test && "$SCHEDULER" == manual ]]' bash "$dialog_config" "$WORK_DIR" "$TEST_ROOT/additional-work" || fail "setup rerun did not retain and append work directories"
+{
+  printf 'y\n\n'
+  printf '\n\n\n\n\n\n\n\n\n\n\n\nn\n'
+} |
+  CONTRIB_MIRROR_CONFIG="$dialog_config" bash "$ROOT/setup.sh" --recursive > "$TEST_ROOT/dialog-recursive-output" 2>&1 || {
+    cat "$TEST_ROOT/dialog-recursive-output"; fail "setup recursive mode switch";
+  }
+bash -c 'source "$1"; [[ "$SCAN_MODE" == recursive ]]' bash "$dialog_config" || fail "setup did not persist recursive mode"
+CONTRIB_MIRROR_CONFIG="$dialog_config" bash "$ROOT/sync.sh" --status > "$TEST_ROOT/recursive-status"
+grep -Fq "$WORK_DIR (1 repos)" "$TEST_ROOT/recursive-status" || fail "status did not deduplicate recursive checkouts"
 
 # The existing privacy scrub must retain activity IDs, so a subsequent provider
 # sync cannot recreate all previously mirrored contributions.
@@ -240,15 +304,22 @@ legacy_config="$CONFIG_FILE"
 CONFIG_FILE="$TEST_ROOT/mixed-config"
 # Values are consumed by name in greens_save_config.
 # shellcheck disable=SC2034
-WORK_DIRS="$TEST_ROOT/work"$'\n'"$TEST_ROOT/work-github" SOURCE_COUNT=2 \
+WORK_DIRS="$TEST_ROOT/work"$'\n'"$TEST_ROOT/work-github" SCAN_MODE=recursive SOURCE_COUNT=2 \
 SOURCE_1_PROVIDER=gitlab SOURCE_1_REMOTE_HOSTS=forge.example SOURCE_1_API_HOST=forge.example SOURCE_1_ORGANIZATION=team SOURCE_1_USERNAME=fixture \
 SOURCE_1_EMAILS=author@example.test SOURCE_1_SINCE=2021-01-01 SOURCE_1_ACTIVITY_TYPES=commits,mrs,issues,comments,approvals,merges,state_changes \
 SOURCE_2_PROVIDER=github SOURCE_2_REMOTE_HOSTS=github.example SOURCE_2_API_HOST=github.example SOURCE_2_ORGANIZATION=acme SOURCE_2_USERNAME=fixture-gh \
 SOURCE_2_EMAILS=author@example.test SOURCE_2_SINCE=2021-01-01 SOURCE_2_ACTIVITY_TYPES=commits,prs,issues
 MIRROR_DIR="$TEST_ROOT/mixed-mirror" CACHE_DIR="$TEST_ROOT/mixed-cache" LOG_DIR="$TEST_ROOT/mixed-logs"
-greens_save_config "$CONFIG_FILE" WORK_DIRS SOURCE_COUNT SOURCE_1_PROVIDER SOURCE_1_REMOTE_HOSTS SOURCE_1_API_HOST SOURCE_1_ORGANIZATION SOURCE_1_USERNAME SOURCE_1_EMAILS SOURCE_1_SINCE SOURCE_1_ACTIVITY_TYPES SOURCE_2_PROVIDER SOURCE_2_REMOTE_HOSTS SOURCE_2_API_HOST SOURCE_2_ORGANIZATION SOURCE_2_USERNAME SOURCE_2_EMAILS SOURCE_2_SINCE SOURCE_2_ACTIVITY_TYPES MIRROR_DIR CACHE_DIR LOG_DIR MIRROR_EMAIL SINCE
+greens_save_config "$CONFIG_FILE" WORK_DIRS SCAN_MODE SOURCE_COUNT SOURCE_1_PROVIDER SOURCE_1_REMOTE_HOSTS SOURCE_1_API_HOST SOURCE_1_ORGANIZATION SOURCE_1_USERNAME SOURCE_1_EMAILS SOURCE_1_SINCE SOURCE_1_ACTIVITY_TYPES SOURCE_2_PROVIDER SOURCE_2_REMOTE_HOSTS SOURCE_2_API_HOST SOURCE_2_ORGANIZATION SOURCE_2_USERNAME SOURCE_2_EMAILS SOURCE_2_SINCE SOURCE_2_ACTIVITY_TYPES MIRROR_DIR CACHE_DIR LOG_DIR MIRROR_EMAIL SINCE
+source "$ROOT/lib/gitlab.sh"
+SCAN_MODE=in-root
+[[ "$(greens_mixed_discover_sources | wc -l | tr -d ' ')" == 2 ]] || fail "mixed discovery ignored in-root mode"
+SCAN_MODE=recursive
+[[ "$(greens_mixed_discover_sources | wc -l | tr -d ' ')" == 2 ]] || fail "mixed discovery did not deduplicate recursive checkouts"
+printf 'personal-gh\n' > "$TEST_ROOT/github-example-active"
 FIXTURE_VISIBILITY=PUBLIC run_sync
 [[ "$(git -C "$MIRROR_DIR" log --format=%B | grep -c '^Greens-Activity: ')" == 13 ]] || { cat "$TEST_ROOT/output"; fail "mixed provider activity count"; }
+[[ "$(cat "$TEST_ROOT/github-example-active")" == personal-gh ]] || fail "GitHub source sync did not restore the active personal account"
 FIXTURE_VISIBILITY=PUBLIC run_sync
 [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 13 ]] || fail "mixed provider rerun duplicated activity"
 echo "PASS: mixed GitLab and GitHub Enterprise sources"

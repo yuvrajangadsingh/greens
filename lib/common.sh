@@ -32,6 +32,65 @@ greens_indexed_value() {
   printf '%s' "${!key:-}"
 }
 
+greens_validate_scan_mode() {
+  case "$1" in recursive|in-root) return 0 ;; esac
+  echo "Invalid SCAN_MODE '$1'; expected recursive or in-root." >&2
+  return 1
+}
+
+# Print NUL-delimited paths to repository .git entries. In in-root mode only
+# immediate child folders of the configured root are eligible; the root itself
+# and deeper descendants are intentionally ignored.
+greens_find_git_entries() {
+  local root="$1" mode="${2:-recursive}"
+  greens_validate_scan_mode "$mode" || return 1
+  [[ -d "$root" ]] || return 0
+  if [[ "$mode" == in-root ]]; then
+    find "$root" -mindepth 2 -maxdepth 2 -name .git -print0 2>/dev/null
+  else
+    find "$root" -name .git -print0 -prune 2>/dev/null
+  fi
+}
+
+greens_count_repositories() {
+  local root="$1" mode="${2:-recursive}" gitpath repodir url identity key existing duplicate count=0
+  local -a seen=()
+  while IFS= read -r -d '' gitpath; do
+    repodir="$(dirname "$gitpath")"
+    url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
+    if identity="$(greens_remote_identity "$url" 2>/dev/null)"; then key="origin:$identity"; else key="path:$repodir"; fi
+    duplicate=0
+    for existing in "${seen[@]}"; do [[ "$existing" == "$key" ]] && { duplicate=1; break; }; done
+    [[ "$duplicate" == 1 ]] && continue
+    seen+=("$key")
+    count="$((count + 1))"
+  done < <(greens_find_git_entries "$root" "$mode")
+  printf '%s\n' "$count"
+}
+
+# Run one GitHub API request as a configured account, then restore the account
+# that was active for that host. gh selects accounts per host rather than per
+# command, so this keeps multiple owners and a personal destination account
+# from changing each other's authentication context.
+greens_gh_api_as() {
+  local host="$1" user="$2" active switched=0 rc
+  shift 2
+  active="$(greens_run gh api --hostname "$host" user --jq .login 2>/dev/null)" || return 1
+  if [[ -n "$user" && "$user" != "$active" ]]; then
+    gh auth switch --hostname "$host" --user "$user" >/dev/null 2>&1 || {
+      echo "GitHub account '$user' is not authenticated for $host. Run: gh auth login --hostname $host" >&2
+      return 1
+    }
+    switched=1
+  fi
+  if greens_run gh api --hostname "$host" "$@"; then rc=0; else rc=$?; fi
+  if [[ "$switched" == 1 ]] && ! gh auth switch --hostname "$host" --user "$active" >/dev/null 2>&1; then
+    echo "Could not restore GitHub account '$active' for $host." >&2
+    return 1
+  fi
+  return "$rc"
+}
+
 greens_run() {
   local seconds="${GREENS_FETCH_TIMEOUT:-120}"
   if command -v timeout >/dev/null 2>&1; then

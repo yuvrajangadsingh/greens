@@ -53,7 +53,7 @@ greens_discover_sources() {
       [[ "$url" == "$REMOTE_PREFIX"* ]] || continue
     fi
     printf '%s\t%s\n' "$identity" "$url"
-  done < <(find "$WORK_DIR" -name .git -print0 -prune)
+  done < <(greens_find_git_entries "$WORK_DIR" "${SCAN_MODE:-recursive}")
 }
 
 greens_mixed_discover_sources() {
@@ -75,8 +75,8 @@ greens_mixed_discover_sources() {
         printf '%s\t%s\t%s\n' "$i" "$canonical" "$url"
         break
       done
-    done < <(find "$dir" -name .git -print0 -prune 2>/dev/null)
-  done <<< "$WORK_DIRS"
+    done < <(greens_find_git_entries "$dir" "${SCAN_MODE:-recursive}")
+  done <<< "$WORK_DIRS" | LC_ALL=C sort -t $'\t' -k2,2 -u
 }
 
 github_api_records() {
@@ -87,7 +87,7 @@ github_api_records() {
     reviews) query="type:pr reviewed-by:$SOURCE_USERNAME org:$SOURCE_ORGANIZATION updated:>=$since_date"; date_field=updated_at; label="reviews" ;;
     *) return 1 ;;
   esac
-  if ! greens_run gh api --hostname "$SOURCE_API_HOST" --paginate -X GET search/issues \
+  if ! greens_gh_api_as "$SOURCE_API_HOST" "$SOURCE_USERNAME" --paginate -X GET search/issues \
       -f q="$query" -f per_page=100 > "$output.raw"; then
     log "ERROR: GitHub request failed for $SOURCE_API_HOST/$SOURCE_ORGANIZATION"
     return 1
@@ -192,7 +192,7 @@ greens_mixed_sync() {
     if [[ "$SOURCE_PROVIDER" == github && "$ACTIVITY_TYPES" != commits && ! -f "$RUN_TMP/github-api-$source_index.done" ]]; then
       command -v gh >/dev/null || { log "ERROR: install gh"; return 1; }
       gh auth status --active --hostname "$SOURCE_API_HOST" >/dev/null 2>&1 || { log "ERROR: gh is not authenticated for $SOURCE_API_HOST"; return 1; }
-      [[ "$(gh api --hostname "$SOURCE_API_HOST" user --jq .login)" == "$SOURCE_USERNAME" ]] || { log "ERROR: gh actor mismatch for $SOURCE_API_HOST"; return 1; }
+      [[ "$(greens_gh_api_as "$SOURCE_API_HOST" "$SOURCE_USERNAME" user --jq .login)" == "$SOURCE_USERNAME" ]] || { log "ERROR: gh actor mismatch for $SOURCE_API_HOST"; return 1; }
       for kind in prs issues reviews; do case ",$ACTIVITY_TYPES," in *,$kind,*) github_api_records "$kind" "$RUN_TMP/$key-$kind" >> "$source_file" ;; esac; done
       : > "$RUN_TMP/github-api-$source_index.done"
     fi

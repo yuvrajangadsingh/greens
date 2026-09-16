@@ -64,6 +64,17 @@ greens_validate_activity_types() {
   done
 }
 
+greens_normalize_activity_types() {
+  local provider="$1" values="$2" item normalized=""
+  for item in ${values//,/ }; do
+    [[ "$provider" == gitlab && "$item" == prs ]] && item=mrs
+    case ",$normalized," in *",$item,"*) continue ;; esac
+    [[ -n "$normalized" ]] && normalized+=,
+    normalized+="$item"
+  done
+  printf '%s\n' "$normalized"
+}
+
 greens_show_existing_config() {
   local i
   info "Current configuration:"
@@ -79,14 +90,15 @@ greens_show_existing_config() {
     info "  Source: ${SOURCE_PROVIDER:-github} (legacy configuration)"
   fi
   info "  Mirror: ${MIRROR_URL:-${MIRROR_DIR:-not configured}}"
+  info "  Scan mode: ${SCAN_MODE:-recursive}"
   info "  Scheduler: ${SCHEDULER:-legacy/default}"
 }
 
 greens_sources_setup() {
-  local had_config=0 legacy_schema=0 existing_dirs dirs="" path canonical answer setup_tmp
+  local had_config=0 legacy_schema=0 existing_dirs suggested_dir="" dirs="" path canonical answer setup_tmp
   local scan hosts class groups gitpath repodir url identity host rest organization
   local record provider api domain detected choice ssh_domain existing_source_count existing_sources
-  local aliases username emails since types defaults meta i key owner branch default_email
+  local aliases username emails since types defaults meta i key owner branch default_email personal_default
   local -a save_keys
   for key in git jq gh; do command -v "$key" >/dev/null || { fail "Install $key, then rerun setup."; return 1; }; done
   existing_source_count="${SOURCE_COUNT:-0}"
@@ -101,19 +113,29 @@ greens_sources_setup() {
   fi
 
   existing_dirs="${WORK_DIRS:-${WORK_DIR:-}}"
-  [[ -n "$existing_dirs" ]] || existing_dirs="$(detect_work_dir)"
   if [[ -n "$existing_dirs" ]]; then
-    info "Repository roots:"
+    dirs="$existing_dirs"
+    info "Repository roots (kept by default):"
     while IFS= read -r path; do [[ -n "$path" ]] && info "  $path"; done <<< "$existing_dirs"
-    if confirm "Keep these roots and optionally add more?"; then dirs="$existing_dirs"; fi
+  else
+    suggested_dir="$(detect_work_dir)"
   fi
+  info "Add repository roots one at a time. Press Enter when every root is listed."
   while true; do
-    path="$(prompt 'Add work directory (blank to finish)' '')" || return 1
+    if [[ -n "$dirs" ]]; then
+      path="$(prompt 'Add another work directory (blank to finish)' '')" || return 1
+    else
+      path="$(prompt 'Work directory' "$suggested_dir")" || return 1
+    fi
     [[ -n "$path" ]] || { [[ -n "$dirs" ]] && break; warn "At least one directory is required."; continue; }
     path="${path/#\~/$HOME}"
     [[ -d "$path" ]] || { warn "Directory does not exist: $path"; continue; }
     canonical="$(cd "$path" && pwd -P)"
-    if ! printf '%s\n' "$dirs" | grep -qxF "$canonical"; then [[ -n "$dirs" ]] && dirs+=$'\n'; dirs+="$canonical"; fi
+    if ! printf '%s\n' "$dirs" | grep -qxF "$canonical"; then
+      [[ -n "$dirs" ]] && dirs+=$'\n'
+      dirs+="$canonical"
+      ok "Added $canonical"
+    fi
   done
   WORK_DIRS="$dirs"
 
@@ -127,8 +149,8 @@ greens_sources_setup() {
       repodir="$(dirname "$gitpath")"; url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
       identity="$(greens_remote_identity "$url")" || continue
       host="${identity%%/*}"; rest="${identity#*/}"; organization="${rest%%/*}"
-      printf '%s\t%s\t%s\t%s\n' "$host" "$organization" "$url" "$repodir" >> "$scan"
-    done < <(find "$path" -name .git -print0 -prune 2>/dev/null)
+      printf '%s\t%s\t%s\t%s\n' "$host" "$organization" "$identity" "$repodir" >> "$scan"
+    done < <(greens_find_git_entries "$path" "$SCAN_MODE")
   done <<< "$WORK_DIRS"
   LC_ALL=C sort -u "$scan" -o "$scan"
   [[ -s "$scan" ]] || { fail "No repositories with an origin remote were found."; return 1; }
@@ -162,7 +184,7 @@ greens_sources_setup() {
     printf '%s\t%s\t%s\n' "$host" "$provider" "$api" >> "$class"
   done 4< "$hosts"
 
-  awk -F '\t' 'NR==FNR {p[$1]=$2; a[$1]=$3; next} ($1 in p) {key=p[$1] FS a[$1] FS $2; count[key]++; if(hosts[key]=="")hosts[key]=$1; else if("," hosts[key] "," !~ "," $1 ",")hosts[key]=hosts[key] "," $1} END {for(key in count)print key FS hosts[key] FS count[key]}' "$class" "$scan" | LC_ALL=C sort > "$groups"
+  awk -F '\t' 'NR==FNR {p[$1]=$2; a[$1]=$3; next} ($1 in p) {key=p[$1] FS a[$1] FS $2; repo=a[$1] "/" substr($3,index($3,"/")+1); unique=key SUBSEP repo; if(!(unique in seen)){seen[unique]=1; count[key]++} if(hosts[key]=="")hosts[key]=$1; else if("," hosts[key] "," !~ "," $1 ",")hosts[key]=hosts[key] "," $1} END {for(key in count)print key FS hosts[key] FS count[key]}' "$class" "$scan" | LC_ALL=C sort > "$groups"
 
   # A disconnected drive or temporarily missing clone must not silently erase
   # a previously configured source during setup.
@@ -183,7 +205,6 @@ greens_sources_setup() {
   done
   SOURCE_COUNT=0
   while IFS=$'\t' read -r provider api organization aliases _count <&4; do
-    SOURCE_COUNT="$((SOURCE_COUNT + 1))"
     username=""; emails=""; since=""; types=""
     record="$(awk -F '|' -v p="$provider" -v a="$api" -v o="$organization" '$1==p && $2==a && $3==o {print; exit}' "$existing_sources")"
     if [[ -n "$record" ]]; then IFS='|' read -r _ _ _ username emails since types <<< "$record"; fi
@@ -191,10 +212,22 @@ greens_sources_setup() {
       emails="${EMAILS:-}"; since="${SINCE:-}"; types="${ACTIVITY_TYPES:-}"
       if [[ "$provider" == github ]]; then username="${GITHUB_USERNAME:-}"; elif [[ "$provider" == gitlab ]]; then username="${GITLAB_USERNAME:-}"; fi
     fi
+    while true; do
+      emails="$(prompt "Git author emails for $api/$organization (comma-separated, or - to skip all $_count repositories)" "${emails:-$(detect_emails)}")" || return 1
+      emails="$(printf '%s' "$emails" | tr -d '[:space:]')"
+      [[ -n "$emails" ]] && break
+      warn "Author emails are required; enter - to skip this source group."
+    done
+    if [[ "$emails" == - ]]; then
+      info "Skipping $provider $api/$organization ($_count repositories)."
+      continue
+    fi
+    SOURCE_COUNT="$((SOURCE_COUNT + 1))"
     if [[ "$provider" == github ]]; then
       gh auth status --active --hostname "$api" >/dev/null 2>&1 || { fail "Run gh auth login --hostname $api first."; return 1; }
-      meta="$(gh api --hostname "$api" user)" || return 1
+      meta="$(greens_gh_api_as "$api" "" user)" || return 1
       username="$(greens_required "GitHub username for $api/$organization" "${username:-$(jq -r .login <<< "$meta")}")"
+      meta="$(greens_gh_api_as "$api" "$username" user)" || return 1
       [[ "$username" == "$(jq -r .login <<< "$meta")" ]] || { fail "Authenticate gh as $username on $api first."; return 1; }
       defaults=commits,prs,issues
     elif [[ "$provider" == gitlab ]]; then
@@ -204,7 +237,7 @@ greens_sources_setup() {
       [[ "$username" == "$(jq -r .username <<< "$meta")" ]] || { fail "Authenticate glab as $username on $api first."; return 1; }
       defaults=commits,mrs,issues,comments,approvals,merges,state_changes
     else defaults=commits; fi
-    emails="$(greens_required "Git author emails for $api/$organization (comma-separated)" "${emails:-$(detect_emails)}")"; emails="$(printf '%s' "$emails" | tr -d '[:space:]')"
+    types="$(greens_normalize_activity_types "$provider" "$types")"
     since="$(greens_required "Include $api/$organization activity since" "${since:-$(date +%Y)-01-01}")"; greens_epoch "$since" >/dev/null || { fail "Invalid history start for $api/$organization."; return 1; }
     if [[ "$provider" == git ]]; then types=commits; else types="$(greens_required "Activity types for $api/$organization" "${types:-$defaults}")"; fi
     greens_validate_activity_types "$provider" "$types" || return 1
@@ -214,11 +247,15 @@ greens_sources_setup() {
     printf -v "SOURCE_${SOURCE_COUNT}_SINCE" '%s' "$since"; printf -v "SOURCE_${SOURCE_COUNT}_ACTIVITY_TYPES" '%s' "$types"
   done 4< "$groups"
 
+  [[ "$SOURCE_COUNT" -gt 0 ]] || { fail "Every detected source group was skipped; the existing configuration was not changed."; return 1; }
+
   info "Detected source configuration:"
   for ((i=1; i<=SOURCE_COUNT; i++)); do info "  $(greens_source_value "$i" PROVIDER) $(greens_source_value "$i" API_HOST)/$(greens_source_value "$i" ORGANIZATION): $(greens_source_value "$i" ACTIVITY_TYPES)"; done
-  PERSONAL_GH_USER="$(greens_required 'Personal GitHub username' "${PERSONAL_GH_USER:-$(gh api user --jq .login)}")"
-  default_email="$(gh api user/emails --jq '.[] | select(.verified and .primary) | .email' 2>/dev/null || true)"
-  MIRROR_EMAIL="$(greens_required 'Verified GitHub email for mirror commits' "${MIRROR_EMAIL:-$default_email}")"; MIRROR_NAME="$(greens_required 'Mirror author name' "${MIRROR_NAME:-greens}")"
+  personal_default="${PERSONAL_GH_USER:-$(gh api --hostname github.com user --jq .login)}"
+  PERSONAL_GH_USER="$(greens_required 'Personal GitHub username' "$personal_default")"
+  gh auth switch --hostname github.com --user "$PERSONAL_GH_USER" >/dev/null 2>&1 || { fail "Run gh auth login --hostname github.com for $PERSONAL_GH_USER first."; return 1; }
+  default_email="$(gh api --hostname github.com user/emails --jq '.[] | select(.verified and .primary) | .email' 2>/dev/null || true)"
+  MIRROR_EMAIL="$(greens_required 'Personal GitHub email' "${MIRROR_EMAIL:-$default_email}")"; MIRROR_NAME="$(greens_required 'Mirror author name' "${MIRROR_NAME:-greens}")"
   MIRROR_URL="$(greens_required 'GitHub mirror URL' "${MIRROR_URL:-https://github.com/$PERSONAL_GH_USER/work-contributions-mirror}")"
   owner="$(greens_remote_identity "$MIRROR_URL")" || { fail "Invalid mirror URL."; return 1; }; [[ "$owner" == github.com/"$PERSONAL_GH_USER"/* ]] || { fail "Choose a github.com repository owned by $PERSONAL_GH_USER."; return 1; }; owner="${owner#github.com/}"
   if ! meta="$(gh api "repos/$owner" 2>/dev/null)"; then confirm "Create private GitHub repository $owner?" || return 1; gh repo create "$owner" --private --description "Timestamp-only work contribution mirror"; meta="$(gh api "repos/$owner")"; fi
@@ -238,9 +275,9 @@ greens_sources_setup() {
   GREENS_LEGACY_TIMESTAMPS=0
   # shellcheck disable=SC2034
   if [[ "$legacy_schema" == 1 && -d "$MIRROR_DIR/.git" ]] && git -C "$MIRROR_DIR" rev-parse --verify HEAD >/dev/null 2>&1 && ! git -C "$MIRROR_DIR" log --format=%B | grep -q '^Greens-Activity: '; then printf -v GREENS_LEGACY_TIMESTAMPS '%s' 1; fi
-  save_keys=(WORK_DIRS SOURCE_COUNT PERSONAL_GH_USER MIRROR_EMAIL MIRROR_NAME MIRROR_URL MIRROR_DIR COPY_MESSAGES COPY_MESSAGES_ACK SCHEDULER SYNC_HOUR GREENS_LEGACY_TIMESTAMPS)
+  save_keys=(WORK_DIRS SCAN_MODE SOURCE_COUNT PERSONAL_GH_USER MIRROR_EMAIL MIRROR_NAME MIRROR_URL MIRROR_DIR COPY_MESSAGES COPY_MESSAGES_ACK SCHEDULER SYNC_HOUR GREENS_LEGACY_TIMESTAMPS)
   for ((i=1; i<=SOURCE_COUNT; i++)); do for key in PROVIDER REMOTE_HOSTS API_HOST ORGANIZATION USERNAME EMAILS SINCE ACTIVITY_TYPES; do save_keys+=("SOURCE_${i}_${key}"); done; done
-  greens_replace_config "$CONFIG_FILE" '^(WORK_DIRS?|SOURCE_PROVIDER|SOURCE_COUNT|SOURCE_[0-9]+_.*|REMOTE_PREFIX|GITHUB_(ORG|USERNAME|TOKEN)|GITLAB_(HOST|REMOTE_HOST|USERNAME)|EMAILS|SINCE|ACTIVITY_TYPES)$' "${save_keys[@]}"
+  greens_replace_config "$CONFIG_FILE" '^(WORK_DIRS?|SCAN_MODE|SOURCE_PROVIDER|SOURCE_COUNT|SOURCE_[0-9]+_.*|REMOTE_PREFIX|GITHUB_(ORG|USERNAME|TOKEN)|GITLAB_(HOST|REMOTE_HOST|USERNAME)|EMAILS|SINCE|ACTIVITY_TYPES)$' "${save_keys[@]}"
   ok "Saved configuration to $CONFIG_FILE"
   if confirm "Run the initial sync now?"; then FORCE=1 CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$SCRIPT_DIR/sync.sh"; fi
   if [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$(greens_scheduler_id).timer" ]]; then greens_systemd_remove; fi

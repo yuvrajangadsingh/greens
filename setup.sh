@@ -347,7 +347,7 @@ detect_auth_method() {
   [[ -d "$work_dir" ]] || { echo "unknown"; return 0; }
 
   local ssh_count=0 https_count=0
-  while IFS= read -r gitpath; do
+  while IFS= read -r -d '' gitpath; do
     local url
     url="$(git -C "$(dirname "$gitpath")" remote get-url origin 2>/dev/null || true)"
     if [[ "$url" == git@* ]] || [[ "$url" == ssh://* ]]; then
@@ -355,7 +355,7 @@ detect_auth_method() {
     elif [[ "$url" == https://* ]]; then
       ((https_count++)) || true
     fi
-  done < <(find "$work_dir" -maxdepth 3 -name .git -print 2>/dev/null)
+  done < <(greens_find_git_entries "$work_dir" "${SCAN_MODE:-recursive}")
 
   if [[ "$ssh_count" -gt "$https_count" ]]; then
     echo "ssh"
@@ -572,7 +572,7 @@ detect_remote_prefix() {
   [[ -d "$work_dir" ]] || return 0
 
   # Collect origin URLs, extract org prefix, find most common
-  find "$work_dir" -maxdepth 3 -name .git -print 2>/dev/null | while read -r gitpath; do
+  greens_find_git_entries "$work_dir" "${SCAN_MODE:-recursive}" | while IFS= read -r -d '' gitpath; do
     git -C "$(dirname "$gitpath")" remote get-url origin 2>/dev/null || true
   done | sed 's|/[^/]*\.git$||; s|/[^/]*$||; s|$|/|' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}'
 }
@@ -586,7 +586,7 @@ detect_github_username() {
 detect_org_name() {
   local work_dir="$1"
   [[ -d "$work_dir" ]] || return 0
-  find "$work_dir" -maxdepth 3 -name .git -print 2>/dev/null | while read -r gitpath; do
+  greens_find_git_entries "$work_dir" "${SCAN_MODE:-recursive}" | while IFS= read -r -d '' gitpath; do
     git -C "$(dirname "$gitpath")" remote get-url origin 2>/dev/null || true
   done | sed -n 's|.*[:/]\([^/]*\)/[^/]*$|\1|p' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}'
 }
@@ -595,7 +595,7 @@ detect_ssh_host() {
   local work_dir="$1"
   [[ -d "$work_dir" ]] || { echo "github.com"; return 0; }
   local host
-  host="$(find "$work_dir" -maxdepth 3 -name .git -print 2>/dev/null | while read -r gitpath; do
+  host="$(greens_find_git_entries "$work_dir" "${SCAN_MODE:-recursive}" | while IFS= read -r -d '' gitpath; do
     git -C "$(dirname "$gitpath")" remote get-url origin 2>/dev/null || true
   done | sed -n 's|^git@\([^:]*\):.*|\1|p' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')"
   echo "${host:-github.com}"
@@ -620,6 +620,18 @@ if [[ -f "$CONFIG_FILE" ]]; then
   source "$CONFIG_FILE"
   echo ""
 fi
+
+setup_scan_mode=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --in-root) [[ -z "$setup_scan_mode" ]] || { fail "Choose only one scan mode."; exit 1; }; setup_scan_mode=in-root ;;
+    --recursive) [[ -z "$setup_scan_mode" ]] || { fail "Choose only one scan mode."; exit 1; }; setup_scan_mode=recursive ;;
+    *) fail "Unknown setup option: $1"; exit 1 ;;
+  esac
+  shift
+done
+SCAN_MODE="${setup_scan_mode:-${SCAN_MODE:-recursive}}"
+greens_validate_scan_mode "$SCAN_MODE" || exit 1
 
 # New interactive setups discover every source automatically. The environment
 # override is retained only for the repository's legacy GitHub setup tests and
@@ -683,19 +695,19 @@ fi
 # Show found repos
 repo_count=0
 if [[ -d "$work_dir" ]]; then
-  while IFS= read -r _gitpath; do
+  while IFS= read -r -d '' _gitpath; do
     ((repo_count++)) || true
-  done < <(find "$work_dir" -maxdepth 2 -name .git -print 2>/dev/null)
+  done < <(greens_find_git_entries "$work_dir" "$SCAN_MODE")
 
   if [[ "$repo_count" -gt 0 ]]; then
     echo ""
     ok "Found $repo_count git repo(s) in $work_dir/"
     _shown=0
-    while IFS= read -r _g; do
+    while IFS= read -r -d '' _g; do
       info "  ├── $(basename "$(dirname "$_g")")"
       ((_shown++)) || true
       [[ "$_shown" -ge 5 ]] && break
-    done < <(find "$work_dir" -maxdepth 2 -name .git -print 2>/dev/null)
+    done < <(greens_find_git_entries "$work_dir" "$SCAN_MODE")
     if [[ "$repo_count" -gt 5 ]]; then
       info "  └── ... and $((repo_count - 5)) more"
     fi

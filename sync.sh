@@ -937,12 +937,14 @@ replace_mirror_with_clean_clone() {
 
 # CLI flags
 case "${1:-}" in
-  --setup|init)   exec "$SCRIPT_DIR/setup.sh" ;;
+  --setup|init)   shift; exec "$SCRIPT_DIR/setup.sh" "$@" ;;
   sync)      ;; # alias: greens sync = greens (default)
   --help|-h) echo "Usage: greens [sync|init|--setup|--status|--resync|--privacy-migrate|--reset|--help|--version]"
              echo "  sync       Run sync (default, same as bare greens)"
-             echo "  init       Run interactive setup wizard (alias for --setup)"
-             echo "  --setup    Run interactive setup wizard"
+             echo "  init [--in-root|--recursive]"
+             echo "             Run interactive setup wizard (alias for --setup)"
+             echo "  --setup [--in-root|--recursive]"
+             echo "             Configure recursive scanning or immediate child folders only"
              echo "  --status   Show current config and sync status"
              echo "  --resync   Wipe mirror history (local + remote) and sync fresh"
              echo "  --privacy-migrate [--keep-messages]"
@@ -1037,17 +1039,20 @@ case "${1:-}" in
     fi
     # shellcheck source=/dev/null
     source "$CONFIG_FILE"
+    status_scan_mode="${SCAN_MODE:-recursive}"
+    greens_validate_scan_mode "$status_scan_mode" || exit 1
     echo "  Config:       $CONFIG_FILE"
+    echo "  Scan mode:    $status_scan_mode"
     if [[ -n "${WORK_DIRS:-}" ]]; then
       echo "  Work dirs:"
       while IFS= read -r work_root; do
         [[ -n "$work_root" ]] || continue
-        repo_count="$(find "$work_root" -name .git -print -prune 2>/dev/null | wc -l | tr -d ' ')"
+        repo_count="$(greens_count_repositories "$work_root" "$status_scan_mode")"
         echo "    $work_root ($repo_count repos)"
       done <<< "$WORK_DIRS"
     else
       echo "  Work dir:     ${WORK_DIR:-not set}"
-      if [[ -d "${WORK_DIR:-}" ]]; then repo_count="$(find "$WORK_DIR" -name .git -print -prune 2>/dev/null | wc -l | tr -d ' ')"; echo "  Repos found:  $repo_count"; fi
+      if [[ -d "${WORK_DIR:-}" ]]; then repo_count="$(greens_count_repositories "$WORK_DIR" "$status_scan_mode")"; echo "  Repos found:  $repo_count"; fi
     fi
     if [[ "${SOURCE_COUNT:-0}" -eq 0 && "${SOURCE_PROVIDER:-github}" != gitlab ]]; then
       echo "  Remote prefix: ${REMOTE_PREFIX:-not set}"
@@ -1218,6 +1223,8 @@ fi
 # Directory containing your private work repos (will scan for git repos here)
 WORK_DIR="${WORK_DIR:-$HOME/work}"
 WORK_DIRS="${WORK_DIRS:-$WORK_DIR}"
+SCAN_MODE="${SCAN_MODE:-recursive}"
+greens_validate_scan_mode "$SCAN_MODE" || exit 1
 
 # Where to cache bare clones (avoids touching your working repos).
 # Default moved to ~/.contrib-mirror/cache in v1.8.2 — the old $SCRIPT_DIR
@@ -1598,7 +1605,7 @@ log "  (Looking for git repos that match your org: $REMOTE_PREFIX)"
 # Discover repos
 # ─────────────────────────────────────────────────────────────────────────────
 
-find "$WORK_DIR" -maxdepth 2 -name .git -print 2>/dev/null | while read -r gitpath; do
+greens_find_git_entries "$WORK_DIR" "$SCAN_MODE" | while IFS= read -r -d '' gitpath; do
   repodir="$(dirname "$gitpath")"
 
   # Skip cache directory

@@ -92,9 +92,10 @@ No source code, file paths, branch names, or messages ever leave your machine (m
 ```bash
 greens                    # sync (runs setup on first use)
 greens sync               # same as above
-greens init               # run setup wizard (alias for --setup)
+greens init --in-root     # setup using immediate child repositories only
 greens --status           # show config and sync status
-greens --setup            # reconfigure
+greens --setup            # reconfigure; retain saved mode (recursive initially)
+greens --setup --recursive  # explicitly restore recursive scanning
 greens --resync           # wipe and re-sync from scratch
 greens --privacy-migrate  # rewrite mirror history (upgrade from <= 1.8.1)
 greens --reset            # remove everything
@@ -192,13 +193,14 @@ matching authenticated `gh` session. Legacy configurations can still use
 | Variable | Required | Default | Description |
 |:---------|:--------:|:--------|:------------|
 | `WORK_DIRS` | Yes | prompted | Newline-separated directories containing work repositories |
+| `SCAN_MODE` | Yes | `recursive` | `recursive` or immediate child folders only with `in-root` |
 | `SOURCE_COUNT` | Yes | detected | Number of indexed host/organization source records |
 | `SOURCE_N_PROVIDER` | Yes | detected | `github`, `gitlab`, or `git` for source N |
 | `SOURCE_N_REMOTE_HOSTS` | Yes | detected | Comma-separated Git remote hosts and SSH aliases |
 | `SOURCE_N_API_HOST` | Yes | detected | GitHub/GitLab web and API hostname |
 | `SOURCE_N_ORGANIZATION` | Yes | detected | GitHub owner or top-level GitLab namespace |
 | `SOURCE_N_USERNAME` | API activity | authenticated user | Actor for API activity |
-| `SOURCE_N_EMAILS` | Commits | detected | Exact Git author emails for this source |
+| `SOURCE_N_EMAILS` | Commits | detected | Exact Git author emails; enter `-` during setup to omit the group |
 | `SOURCE_N_SINCE` | Yes | current January 1 | History start for this source |
 | `SOURCE_N_ACTIVITY_TYPES` | Yes | provider default | Provider-specific activity selection |
 | `MIRROR_DIR` | Yes | `~/.contrib-mirror/mirror` | Local clone of your GitHub mirror |
@@ -221,8 +223,8 @@ If your work GitHub account differs from your personal one:
 | Method | Best for | Setup |
 |:-------|:---------|:------|
 | **Personal Access Token** | HTTPS users, simplest | Create PAT with `repo` scope, set `GITHUB_TOKEN` |
-| **Multi-account gh CLI** | SSH users with multiple accounts | `gh auth login` both accounts, set `GITHUB_USERNAME` |
-| **Single account** | Default `gh` account has org access | Just set `GITHUB_USERNAME` |
+| **Multi-account gh CLI** | SSH users with multiple accounts | `gh auth login` each account; setup saves one account per source |
+| **Single account** | One account has source access | Authenticate it with `gh auth login` |
 
 Works with both SSH and HTTPS repo access.
 
@@ -240,8 +242,29 @@ actor, author emails, history start, and activity types. See the
 Known public hosts are recognized immediately. For an unfamiliar host, setup
 asks for its web/API domain and performs bounded, TLS-verified GitHub and GitLab
 checks. It asks for manual classification only when those checks are inconclusive.
-SSH aliases and duplicate clones are retained for matching but deduplicated by
-canonical host and repository path.
+SSH aliases and duplicate clones are recognized but counted and processed once
+by canonical host and repository path.
+
+Enter one work directory at a time; setup keeps asking for another until you
+press Enter. Every detected GitHub owner becomes its own source record, so no
+global organization or separate-account prompt is needed.
+
+Use `greens --setup --in-root` when each work directory directly contains its
+repositories. This persists `SCAN_MODE=in-root`, so setup, status, and sync only
+inspect `.git` files or directories in immediate child folders. The root itself
+and deeper descendants are ignored. `greens --setup --recursive` restores the
+default recursive behavior.
+
+At each host/organization email prompt, enter `-` to skip that entire source
+group. This can exclude multiple repositories when they share a host and
+top-level organization. Skipped groups are omitted from the saved source list
+and will be offered again the next time setup scans those directories.
+
+For multiple GitHub accounts, authenticate each account with `gh auth login`.
+Sync temporarily selects the account saved for each host/owner and restores the
+previous active account after every API request. Setup selects the configured
+personal account for the destination and pre-fills its username and primary
+verified email from `gh`.
 
 `SOURCE_PROVIDER` is intentionally absent from new configurations: provider is
 part of every indexed source record, and a global value would conflict with

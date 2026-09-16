@@ -56,7 +56,7 @@ independently. GitHub's `prs` and `reviews` names are not GitLab option names.
 
 Only projects discovered under the configured directories and matching a saved
 host/namespace record are queried.
-Discovery recognizes .git files and directories recursively and deduplicates
+Discovery recognizes .git files and directories at the configured scan depth and deduplicates
 SSH/HTTPS clones and worktrees by host/project. Separate bare caches fetch
 branches, tags, and available merge-request head refs; working clones are never
 fetched, checked out, or modified. Unpushed local commits are not included.
