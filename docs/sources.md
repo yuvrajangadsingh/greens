@@ -69,6 +69,7 @@ SOURCE_1_USERNAME=developer
 SOURCE_1_EMAILS=developer@example.com
 SOURCE_1_SINCE=2026-01-01
 SOURCE_1_ACTIVITY_TYPES=commits,prs,issues
+SOURCE_1_ACCESS_MODE=remote
 
 SOURCE_2_PROVIDER=gitlab
 SOURCE_2_REMOTE_HOSTS=gitlab.internal,company-git
@@ -78,11 +79,17 @@ SOURCE_2_USERNAME=developer
 SOURCE_2_EMAILS=developer@example.com,developer@users.noreply.example.com
 SOURCE_2_SINCE='2025-07-01 00:00:00'
 SOURCE_2_ACTIVITY_TYPES=commits,mrs,issues,comments,approvals,merges,state_changes
+SOURCE_2_ACCESS_MODE=local
 ```
 
 `SOURCE_N_REMOTE_HOSTS` contains the hostnames that may appear in Git remote
 URLs. `SOURCE_N_API_HOST` is the canonical web/API domain passed explicitly to
 `gh` or `glab`. Environment variables can override any saved value.
+
+`SOURCE_N_ACCESS_MODE` defaults to `remote`. A `local` source is restricted to
+`commits`, reads `git log --all` from every matching checkout, combines duplicate
+clones, and makes no Git or provider request to the source host. This includes
+unpushed commits and is limited to objects and refs retained locally.
 
 Provider activity names are deliberately separate:
 
@@ -111,6 +118,12 @@ checkpoint publication fails, the run fails and unpublished checkpoints remain
 unchanged. A retry reuses stable identifiers and cannot duplicate successful
 activity.
 
+Remote groups are checked before collection starts. In an interactive terminal,
+a failed Git or required provider API check offers to atomically save the whole
+host/organization group as local-only and continue. Declining aborts without
+changing checkpoints. Systemd and cron runs cannot confirm the change, so they
+fail and instruct the user to run `greens` interactively.
+
 Changing a source's activity types, emails, or history start gives it an
 isolated state namespace. Normal sync remains append-only: narrowing settings
 does not remove commits already published to the mirror.
@@ -121,6 +134,13 @@ When setup finds a configuration, it first prints a redacted summary and asks
 whether to rerun. The default is to leave it unchanged. If continued, existing
 roots and matching source records become prompt defaults. Missing roots and
 sources are shown but are not silently deleted.
+
+Saved roots are numbered during a rerun and can be removed before adding new
+ones. The equivalent repeatable flag is `--remove-work-dir PATH` after `--setup`
+or `init`, or when invoking `setup.sh` directly. Explicit CLI removal implies
+rerunning setup. Source groups found only below removed roots are dropped; setup
+aborts without saving if a retained root is unavailable or no replacement is
+provided for the last root.
 
 Legacy configurations remain valid:
 

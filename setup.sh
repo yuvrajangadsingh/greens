@@ -622,10 +622,16 @@ if [[ -f "$CONFIG_FILE" ]]; then
 fi
 
 setup_scan_mode=""
+setup_remove_dirs=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --in-root) [[ -z "$setup_scan_mode" ]] || { fail "Choose only one scan mode."; exit 1; }; setup_scan_mode=in-root ;;
     --recursive) [[ -z "$setup_scan_mode" ]] || { fail "Choose only one scan mode."; exit 1; }; setup_scan_mode=recursive ;;
+    --remove-work-dir)
+      shift
+      [[ $# -gt 0 ]] || { fail "--remove-work-dir requires a path."; exit 1; }
+      setup_remove_dirs+=("$1")
+      ;;
     *) fail "Unknown setup option: $1"; exit 1 ;;
   esac
   shift

@@ -70,6 +70,7 @@ git -C "$TEST_ROOT/mirror" remote add origin "$TEST_ROOT/remotes/mirror.git"
 cat > "$TEST_ROOT/bin/glab" <<'MOCK'
 #!/bin/bash
 set -eu
+if [[ -f "$TEST_ROOT/forbid-glab" ]]; then touch "$TEST_ROOT/glab-called"; exit 99; fi
 if [[ "$*" == "auth status --hostname forge.example" ]]; then exit 0; fi
 [[ ! -f "$TEST_ROOT/api-fails" ]] || exit 1
 if [[ -f "$TEST_ROOT/worker-fails" && "$4" == projects/7/issues/4/discussions* ]]; then exit 1; fi
@@ -191,6 +192,40 @@ if grep -qE 'separate GitHub accounts|Work GitHub org/owner name' "$TEST_ROOT/di
   fail "GitLab-only setup displayed GitHub source prompts"
 fi
 
+# An unreachable GitLab source can be confirmed as local-only before any glab
+# authentication or activity prompt is attempted.
+mkdir -p "$TEST_ROOT/local-dialog-work/repo"
+git init --quiet "$TEST_ROOT/local-dialog-work/repo"
+git -C "$TEST_ROOT/local-dialog-work/repo" remote add origin git@gitlab.com:offline/repo.git
+git config --global --add url."$TEST_ROOT/missing/offline.git".insteadOf git@gitlab.com:offline/repo.git
+local_dialog_config="$TEST_ROOT/local-dialog/config"
+touch "$TEST_ROOT/forbid-glab"
+{
+  printf '%s\n\nauthor@example.test\ny\n2021-01-01\n' "$TEST_ROOT/local-dialog-work"
+  printf '\n\n\nhttps://github.com/fixture/mirror\n%s\nmanual\n0\nn\n' "$TEST_ROOT/local-dialog-mirror"
+} | CONTRIB_MIRROR_CONFIG="$local_dialog_config" bash "$ROOT/setup.sh" --in-root > "$TEST_ROOT/local-dialog-output" 2>&1 || {
+  rm -f "$TEST_ROOT/forbid-glab"; cat "$TEST_ROOT/local-dialog-output"; fail "local-only setup dialog";
+}
+rm "$TEST_ROOT/forbid-glab"
+[[ ! -e "$TEST_ROOT/glab-called" ]] || fail "local-only setup invoked glab"
+bash -c 'source "$1"; [[ "$SOURCE_COUNT" == 1 && "$SOURCE_1_ACCESS_MODE" == local && "$SOURCE_1_ACTIVITY_TYPES" == commits && -z "$SOURCE_1_USERNAME" ]]' bash "$local_dialog_config" || fail "setup did not persist local-only source"
+if grep -qE 'GitLab username|Activity types for gitlab.com/offline' "$TEST_ROOT/local-dialog-output"; then fail "local-only setup showed provider prompts"; fi
+
+# A saved local source stays offline unless the user explicitly requests a
+# remote retry during a later setup run.
+rm -f "$TEST_ROOT/glab-called"; touch "$TEST_ROOT/forbid-glab"
+{
+  printf 'y\n'
+  printf '\n%.0s' {1..12}
+  printf 'n\n'
+} | CONTRIB_MIRROR_CONFIG="$local_dialog_config" bash "$ROOT/setup.sh" > "$TEST_ROOT/local-dialog-rerun-output" 2>&1 || {
+  rm -f "$TEST_ROOT/forbid-glab"; cat "$TEST_ROOT/local-dialog-rerun-output"; fail "saved local-only setup rerun";
+}
+rm "$TEST_ROOT/forbid-glab"
+[[ ! -e "$TEST_ROOT/glab-called" ]] || fail "saved local-only setup invoked glab"
+grep -q 'Retry remote access for gitlab.com/offline' "$TEST_ROOT/local-dialog-rerun-output" || fail "saved local source did not offer remote retry"
+bash -c 'source "$1"; [[ "$SOURCE_1_ACCESS_MODE" == local && "$SOURCE_1_ACTIVITY_TYPES" == commits ]]' bash "$local_dialog_config" || fail "saved local source did not remain local"
+
 # GitHub prompts are conditional, every discovered owner gets a separate source
 # record, and a dash skips a complete owner before its remaining prompts.
 mkdir -p "$TEST_ROOT/github-dialog-work/one" "$TEST_ROOT/github-dialog-work/one-copy" "$TEST_ROOT/github-dialog-work/two" "$TEST_ROOT/github-dialog-work/three" "$TEST_ROOT/github-dialog-work/nested/four"
@@ -204,6 +239,10 @@ git -C "$TEST_ROOT/github-dialog-work/one-copy" remote add origin git@github.exa
 git -C "$TEST_ROOT/github-dialog-work/two" remote add origin git@github.example:beta/two.git
 git -C "$TEST_ROOT/github-dialog-work/three" remote add origin git@github.example:gamma/three.git
 git -C "$TEST_ROOT/github-dialog-work/nested/four" remote add origin git@github.example:delta/four.git
+git config --global --add url."$TEST_ROOT/remotes/source.git".insteadOf git@github.example:alpha/one.git
+git config --global --add url."$TEST_ROOT/remotes/source.git".insteadOf git@github.example:beta/two.git
+git config --global --add url."$TEST_ROOT/remotes/source.git".insteadOf git@github.example:gamma/three.git
+git config --global --add url."$TEST_ROOT/remotes/source.git".insteadOf git@github.example:delta/four.git
 github_dialog_config="$TEST_ROOT/github-dialog/config"
 {
   printf '%s\n\n\n' "$TEST_ROOT/github-dialog-work"
@@ -219,14 +258,14 @@ bash -c 'source "$1"; [[ "$SCAN_MODE" == in-root && "$SOURCE_COUNT" == 2 && "$SO
 grep -q 'Skipping github github.example/alpha (1 repositories).' "$TEST_ROOT/github-dialog-output" || fail "setup did not report skipped source group"
 grep -q 'Git author emails for github.example/alpha (comma-separated, or - to skip all 1 repositories)' "$TEST_ROOT/github-dialog-output" || fail "setup counted duplicate origin checkouts"
 github_dialog_hash="$(git hash-object "$github_dialog_config")"
-if printf 'y\n\n-\n-\n-\n-\n' | CONTRIB_MIRROR_CONFIG="$github_dialog_config" bash "$ROOT/setup.sh" --recursive > "$TEST_ROOT/all-skipped-output" 2>&1; then
+if printf 'y\n\n\n-\n-\n-\n-\n' | CONTRIB_MIRROR_CONFIG="$github_dialog_config" bash "$ROOT/setup.sh" --recursive > "$TEST_ROOT/all-skipped-output" 2>&1; then
   fail "setup accepted every source group being skipped"
 fi
 grep -q 'Every detected source group was skipped' "$TEST_ROOT/all-skipped-output" || fail "all-skipped setup error"
 [[ "$(git hash-object "$github_dialog_config")" == "$github_dialog_hash" ]] || fail "all-skipped setup changed config"
 mkdir -p "$TEST_ROOT/additional-work"
 {
-  printf 'y\n%s\n\n' "$TEST_ROOT/additional-work"
+  printf 'y\n\n%s\n\n' "$TEST_ROOT/additional-work"
   printf '\n\n\n\n\n\n\n\n\n\n\n\nn\n'
 } |
   CONTRIB_MIRROR_CONFIG="$dialog_config" bash "$ROOT/setup.sh" > "$TEST_ROOT/dialog-defaults-output" 2>&1 || {
@@ -243,6 +282,59 @@ bash -c 'source "$1"; [[ "$SCAN_MODE" == in-root && "$WORK_DIRS" == "$2"$'"'"'\n
 bash -c 'source "$1"; [[ "$SCAN_MODE" == recursive ]]' bash "$dialog_config" || fail "setup did not persist recursive mode"
 CONTRIB_MIRROR_CONFIG="$dialog_config" bash "$ROOT/sync.sh" --status > "$TEST_ROOT/recursive-status"
 grep -Fq "$WORK_DIR (1 repos)" "$TEST_ROOT/recursive-status" || fail "status did not deduplicate recursive checkouts"
+
+# Work roots can be removed by repeatable CLI flags or the numbered rerun
+# dialog; failed removals leave the original configuration untouched.
+removal_config="$TEST_ROOT/removal-config"
+cp "$dialog_config" "$removal_config"
+mkdir -p "$TEST_ROOT/third-work"
+WORK_DIRS="$WORK_DIR"$'\n'"$TEST_ROOT/additional-work"$'\n'"$TEST_ROOT/third-work"
+greens_save_config "$removal_config" WORK_DIRS
+{
+  printf '\n\n\n\n\n\n\n\n\n\n\n\n'
+  printf 'n\n'
+} | CONTRIB_MIRROR_CONFIG="$removal_config" bash "$ROOT/setup.sh" \
+    --remove-work-dir "$TEST_ROOT/additional-work" --remove-work-dir "$TEST_ROOT/third-work" > "$TEST_ROOT/removal-output" 2>&1 || {
+  cat "$TEST_ROOT/removal-output"; fail "CLI work-directory removal";
+}
+bash -c 'source "$1"; [[ "$WORK_DIRS" == "$2" ]]' bash "$removal_config" "$WORK_DIR" || fail "CLI removal was not persisted"
+removal_hash="$(git hash-object "$removal_config")"
+if CONTRIB_MIRROR_CONFIG="$removal_config" bash "$ROOT/setup.sh" --remove-work-dir "$TEST_ROOT/not-configured" > "$TEST_ROOT/removal-invalid-output" 2>&1; then
+  fail "unknown work-directory removal was accepted"
+fi
+[[ "$(git hash-object "$removal_config")" == "$removal_hash" ]] || fail "failed removal changed config"
+
+unavailable_removal_config="$TEST_ROOT/unavailable-removal-config"
+cp "$dialog_config" "$unavailable_removal_config"
+WORK_DIRS="$WORK_DIR"$'\n'"$TEST_ROOT/additional-work"$'\n'"$TEST_ROOT/unavailable-work"
+greens_save_config "$unavailable_removal_config" WORK_DIRS
+unavailable_hash="$(git hash-object "$unavailable_removal_config")"
+if printf '\n' | CONTRIB_MIRROR_CONFIG="$unavailable_removal_config" bash "$ROOT/setup.sh" \
+    --remove-work-dir "$TEST_ROOT/additional-work" > "$TEST_ROOT/unavailable-removal-output" 2>&1; then
+  fail "removal accepted an unavailable retained root"
+fi
+grep -q 'Retained work directory is unavailable during removal' "$TEST_ROOT/unavailable-removal-output" || fail "unavailable retained-root error"
+[[ "$(git hash-object "$unavailable_removal_config")" == "$unavailable_hash" ]] || fail "unavailable retained root changed config"
+
+last_root_config="$TEST_ROOT/last-root-config"
+cp "$removal_config" "$last_root_config"
+last_root_hash="$(git hash-object "$last_root_config")"
+if printf '' | CONTRIB_MIRROR_CONFIG="$last_root_config" bash "$ROOT/setup.sh" \
+    --remove-work-dir "$WORK_DIR" > "$TEST_ROOT/last-root-output" 2>&1; then
+  fail "last work directory was removed without a replacement"
+fi
+[[ "$(git hash-object "$last_root_config")" == "$last_root_hash" ]] || fail "last-root failure changed config"
+
+dialog_removal_config="$TEST_ROOT/dialog-removal-config"
+cp "$dialog_config" "$dialog_removal_config"
+{
+  printf 'y\n2\n\n\n'
+  printf '\n\n\n\n\n\n\n\n\n\n\n\n'
+  printf 'n\n'
+} | CONTRIB_MIRROR_CONFIG="$dialog_removal_config" bash "$ROOT/setup.sh" > "$TEST_ROOT/dialog-removal-output" 2>&1 || {
+  cat "$TEST_ROOT/dialog-removal-output"; fail "numbered work-directory removal";
+}
+bash -c 'source "$1"; [[ "$WORK_DIRS" == "$2" ]]' bash "$dialog_removal_config" "$WORK_DIR" || fail "numbered removal was not persisted"
 
 # The existing privacy scrub must retain activity IDs, so a subsequent provider
 # sync cannot recreate all previously mirrored contributions.
@@ -323,6 +415,74 @@ FIXTURE_VISIBILITY=PUBLIC run_sync
 FIXTURE_VISIBILITY=PUBLIC run_sync
 [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 13 ]] || fail "mixed provider rerun duplicated activity"
 echo "PASS: mixed GitLab and GitHub Enterprise sources"
+
+# Local-only groups scan every local ref across duplicate checkouts without
+# contacting Git or provider APIs, and deduplicate shared commits.
+mkdir -p "$TEST_ROOT/local-work/one"
+git init --quiet "$TEST_ROOT/local-work/one"
+git -C "$TEST_ROOT/local-work/one" remote add origin git@gitlab.invalid:offline/repo.git
+GIT_AUTHOR_DATE='2021-04-01T10:00:00Z' GIT_COMMITTER_DATE='2021-04-01T10:00:00Z' git -C "$TEST_ROOT/local-work/one" commit --quiet --allow-empty -m local-main
+git -C "$TEST_ROOT/local-work/one" checkout --quiet -b feature
+GIT_AUTHOR_DATE='2021-04-02T10:00:00Z' GIT_COMMITTER_DATE='2021-04-02T10:00:00Z' git -C "$TEST_ROOT/local-work/one" commit --quiet --allow-empty -m local-feature
+git -C "$TEST_ROOT/local-work/one" checkout --quiet master
+cp -a "$TEST_ROOT/local-work/one" "$TEST_ROOT/local-work/two"
+git -C "$TEST_ROOT/local-work/two" checkout --quiet -b second-copy
+GIT_AUTHOR_DATE='2021-04-03T10:00:00Z' GIT_COMMITTER_DATE='2021-04-03T10:00:00Z' git -C "$TEST_ROOT/local-work/two" commit --quiet --allow-empty -m local-copy-only
+git init --bare --quiet "$TEST_ROOT/remotes/local-mirror.git"
+git --git-dir="$TEST_ROOT/remotes/local-mirror.git" symbolic-ref HEAD refs/heads/main
+git init --quiet "$TEST_ROOT/local-mirror"
+git -C "$TEST_ROOT/local-mirror" symbolic-ref HEAD refs/heads/main
+git -C "$TEST_ROOT/local-mirror" remote add origin "$TEST_ROOT/remotes/local-mirror.git"
+# Values are consumed by name in greens_save_config.
+# shellcheck disable=SC2034
+CONFIG_FILE="$TEST_ROOT/local-config" WORK_DIRS="$TEST_ROOT/local-work" SCAN_MODE=in-root SOURCE_COUNT=1 \
+SOURCE_1_PROVIDER=gitlab SOURCE_1_REMOTE_HOSTS=gitlab.invalid SOURCE_1_API_HOST=gitlab.invalid SOURCE_1_ORGANIZATION=offline SOURCE_1_USERNAME="" \
+SOURCE_1_EMAILS=author@example.test SOURCE_1_SINCE=2021-01-01 SOURCE_1_ACTIVITY_TYPES=commits SOURCE_1_ACCESS_MODE=local \
+MIRROR_DIR="$TEST_ROOT/local-mirror" CACHE_DIR="$TEST_ROOT/local-cache" LOG_DIR="$TEST_ROOT/local-logs"
+greens_save_config "$CONFIG_FILE" WORK_DIRS SCAN_MODE SOURCE_COUNT SOURCE_1_PROVIDER SOURCE_1_REMOTE_HOSTS SOURCE_1_API_HOST SOURCE_1_ORGANIZATION SOURCE_1_USERNAME SOURCE_1_EMAILS SOURCE_1_SINCE SOURCE_1_ACTIVITY_TYPES SOURCE_1_ACCESS_MODE MIRROR_DIR CACHE_DIR LOG_DIR MIRROR_EMAIL
+touch "$TEST_ROOT/forbid-glab"
+FIXTURE_VISIBILITY=PUBLIC run_sync
+rm "$TEST_ROOT/forbid-glab"
+[[ ! -e "$TEST_ROOT/glab-called" ]] || fail "local-only sync invoked glab"
+[[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 3 ]] || { cat "$TEST_ROOT/output"; fail "local-only all-ref or duplicate-checkout collection"; }
+[[ -z "$(find "$CACHE_DIR" -maxdepth 1 -name '*.git' -print -quit 2>/dev/null)" ]] || fail "local-only sync created a bare source cache"
+[[ -z "$(git -C "$TEST_ROOT/local-work/one" status --porcelain)$(git -C "$TEST_ROOT/local-work/two" status --porcelain)" ]] || fail "local-only sync modified a checkout"
+CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$ROOT/sync.sh" --status > "$TEST_ROOT/local-status"
+grep -q 'access=local' "$TEST_ROOT/local-status" || fail "status omitted local access mode"
+
+# Invalid local activity is rejected before any provider call, and a local
+# group with no remaining checkout reports a clear discovery failure.
+SOURCE_1_ACTIVITY_TYPES=commits,mrs
+greens_save_config "$CONFIG_FILE" SOURCE_1_ACTIVITY_TYPES
+rm -f "$TEST_ROOT/glab-called"; touch "$TEST_ROOT/forbid-glab"
+if run_sync; then fail "local-only source accepted provider activity"; fi
+[[ ! -e "$TEST_ROOT/glab-called" ]] || fail "invalid local activity invoked glab"
+grep -q 'local source 1 only supports ACTIVITY_TYPES=commits' "$TEST_ROOT/output" || fail "invalid local activity error"
+SOURCE_1_ACTIVITY_TYPES=commits WORK_DIRS="$TEST_ROOT/missing-local-work"
+greens_save_config "$CONFIG_FILE" SOURCE_1_ACTIVITY_TYPES WORK_DIRS
+if run_sync; then fail "local-only source without a checkout was accepted"; fi
+grep -q 'no matching checkout remains for local source gitlab.invalid/offline' "$TEST_ROOT/output" || fail "missing local checkout error"
+rm "$TEST_ROOT/forbid-glab"
+echo "PASS: local-only all-ref collection and duplicate checkout deduplication"
+
+# Runtime fallback is never automatic outside a terminal and atomically saves
+# both the access mode and commit-only activity selection after confirmation.
+# Values are consumed by name in greens_save_config.
+# shellcheck disable=SC2034
+CONFIG_FILE="$TEST_ROOT/runtime-fallback-config" SOURCE_COUNT=1 \
+SOURCE_1_PROVIDER=gitlab SOURCE_1_API_HOST=gitlab.invalid SOURCE_1_ORGANIZATION=offline \
+SOURCE_1_ACCESS_MODE=remote SOURCE_1_ACTIVITY_TYPES=commits,mrs
+greens_save_config "$CONFIG_FILE" SOURCE_COUNT SOURCE_1_PROVIDER SOURCE_1_API_HOST SOURCE_1_ORGANIZATION SOURCE_1_ACCESS_MODE SOURCE_1_ACTIVITY_TYPES
+fallback_hash="$(git hash-object "$CONFIG_FILE")"
+log() { :; }
+greens_is_interactive() { return 1; }
+if greens_offer_local_fallback 1 test; then fail "noninteractive fallback changed source mode"; fi
+[[ "$(git hash-object "$CONFIG_FILE")" == "$fallback_hash" ]] || fail "noninteractive fallback changed config"
+greens_is_interactive() { return 0; }
+printf 'y\n' | greens_offer_local_fallback 1 test
+bash -c 'source "$1"; [[ "$SOURCE_1_ACCESS_MODE" == local && "$SOURCE_1_ACTIVITY_TYPES" == commits ]]' bash "$CONFIG_FILE" || fail "interactive fallback was not persisted"
+echo "PASS: interactive and noninteractive local fallback behavior"
+
 CONFIG_FILE="$legacy_config"
 MIRROR_DIR="$TEST_ROOT/mirror" CACHE_DIR="$TEST_ROOT/cache" LOG_DIR="$TEST_ROOT/logs"
 

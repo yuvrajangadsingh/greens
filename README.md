@@ -93,6 +93,7 @@ No source code, file paths, branch names, or messages ever leave your machine (m
 greens                    # sync (runs setup on first use)
 greens sync               # same as above
 greens init --in-root     # setup using immediate child repositories only
+greens --setup --remove-work-dir ~/old-work  # remove a saved repository root
 greens --status           # show config and sync status
 greens --setup            # reconfigure; retain saved mode (recursive initially)
 greens --setup --recursive  # explicitly restore recursive scanning
@@ -203,6 +204,7 @@ matching authenticated `gh` session. Legacy configurations can still use
 | `SOURCE_N_EMAILS` | Commits | detected | Exact Git author emails; enter `-` during setup to omit the group |
 | `SOURCE_N_SINCE` | Yes | current January 1 | History start for this source |
 | `SOURCE_N_ACTIVITY_TYPES` | Yes | provider default | Provider-specific activity selection |
+| `SOURCE_N_ACCESS_MODE` | No | `remote` | `remote` fetch/API collection or local commit-only history |
 | `MIRROR_DIR` | Yes | `~/.contrib-mirror/mirror` | Local clone of your GitHub mirror |
 | `MIRROR_EMAIL` | Yes | - | Personal GitHub email for mirror commits (sync exits with code 2 if unset) |
 | `MIRROR_NAME` | No | `greens` | Author name for mirror commits (keep it generic) |
@@ -259,6 +261,20 @@ At each host/organization email prompt, enter `-` to skip that entire source
 group. This can exclude multiple repositories when they share a host and
 top-level organization. Skipped groups are omitted from the saved source list
 and will be offered again the next time setup scans those directories.
+
+Setup verifies source Git and required provider API access. If a complete
+host/organization group is unavailable, you can confirm local-only mode. That
+mode scans all refs already present in matching checkouts, including unpushed
+commits, and never fetches or calls the source provider API. Provider-only
+activity such as pull/merge requests, reviews, issues, and comments is therefore
+unavailable. An interactive sync offers the same persistent fallback when a
+remote group becomes unreachable; scheduled runs fail with instructions instead
+of changing configuration without confirmation.
+
+On a setup rerun, remove saved work directories by their displayed number or
+use repeatable `--remove-work-dir PATH` flags with `greens --setup`, `greens
+init`, or `bash setup.sh`. Setup does not replace the configuration until the
+remaining roots and regenerated source groups validate successfully.
 
 For multiple GitHub accounts, authenticate each account with `gh auth login`.
 Sync temporarily selects the account saved for each host/owner and restores the

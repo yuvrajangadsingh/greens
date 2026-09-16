@@ -33,6 +33,13 @@ For commit-only operation without a GitLab API session, classify a host as
 **generic Git**. See the [mixed-provider guide](sources.md) for the indexed
 configuration format, automatic detection, rerun behavior, and migration.
 
+If Git or GitLab API access is unavailable, setup can save the complete
+host/namespace group as local-only. No `glab` call or Git fetch is made for a
+saved local group. Greens scans every ref already present in matching working
+copies, including unpushed commits, and deduplicates duplicate clones. Merge
+requests, issues, comments, approvals, merges, and state changes cannot be
+reconstructed from local Git history.
+
 The GitLab actor must match the authenticated glab account. Use a token with
 access to the selected projects and the API endpoints below (the api scope
 supports all required calls). Source Git access uses your existing SSH/HTTPS
@@ -59,7 +66,8 @@ host/namespace record are queried.
 Discovery recognizes .git files and directories at the configured scan depth and deduplicates
 SSH/HTTPS clones and worktrees by host/project. Separate bare caches fetch
 branches, tags, and available merge-request head refs; working clones are never
-fetched, checked out, or modified. Unpushed local commits are not included.
+fetched, checked out, or modified. In remote mode, unpushed local commits are
+not included.
 Push events are not counted again on top of individual commits.
 
 Pagination is exhaustive. Issue/MR resources and discussions provide activity
@@ -144,7 +152,8 @@ prompts; use your session's SSH agent or existing noninteractive credentials.
 ## Failures and recovery
 
 - **Authentication failure:** authenticate gh/glab for the configured accounts;
-  verify SSH/HTTPS source access. CLI tokens are never printed by greens.
+  verify SSH/HTTPS source access, or run greens interactively and confirm the
+  offered local-only fallback. CLI tokens are never printed by greens.
 - **Partial collection or rejected push:** the run fails without advancing
   checkpoints. Retry with FORCE=1 if a previous successful run occurred today.
   Pending local commits and their IDs prevent duplicate contributions.

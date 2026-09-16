@@ -56,10 +56,10 @@ greens_discover_sources() {
   done < <(greens_find_git_entries "$WORK_DIR" "${SCAN_MODE:-recursive}")
 }
 
-greens_mixed_discover_sources() {
+greens_mixed_discover_checkouts() {
   local dir gitpath repodir url identity host rest organization i aliases api canonical
   while IFS= read -r dir; do
-    [[ -d "$dir" ]] || { log "WARN: work directory is unavailable: $dir"; continue; }
+    [[ -d "$dir" ]] || { log "WARN: work directory is unavailable: $dir" >&2; continue; }
     while IFS= read -r -d '' gitpath; do
       repodir="$(dirname "$gitpath")"
       case "$repodir/" in "$CACHE_DIR/"*|"$MIRROR_DIR/"*) continue ;; esac
@@ -72,11 +72,15 @@ greens_mixed_discover_sources() {
         case ",$aliases," in *",$host,"*) ;; *) continue ;; esac
         api="$(greens_indexed_value "$i" API_HOST)"
         canonical="$api/${identity#*/}"
-        printf '%s\t%s\t%s\n' "$i" "$canonical" "$url"
+        printf '%s\t%s\t%s\t%s\n' "$i" "$canonical" "$url" "$repodir"
         break
       done
     done < <(greens_find_git_entries "$dir" "${SCAN_MODE:-recursive}")
-  done <<< "$WORK_DIRS" | LC_ALL=C sort -t $'\t' -k2,2 -u
+  done <<< "$WORK_DIRS" | LC_ALL=C sort -t $'\t' -k2,2 -k4,4 -u
+}
+
+greens_mixed_discover_sources() {
+  greens_mixed_discover_checkouts | cut -f1-3 | LC_ALL=C sort -t $'\t' -k2,2 -u
 }
 
 github_api_records() {
@@ -99,6 +103,99 @@ github_api_records() {
     select($epoch >= $since and $epoch <= $until) |
     {key:($host+"/"+$org+"/github/"+$kind+"/"+(.id|tostring)+(if $kind=="reviews" then "/"+$date else "" end)),epoch:$epoch,date:($date|sub("Z$";" +0000")|sub("T";" ")),kind:$kind,project:(.repository_url|split("/repos/")|last)}' \
     "$output.raw"
+}
+
+greens_source_access_mode() {
+  local mode
+  mode="$(greens_indexed_value "$1" ACCESS_MODE)"
+  printf '%s\n' "${mode:-remote}"
+}
+
+greens_persist_local_source() {
+  local source_index="$1" access_key="SOURCE_${1}_ACCESS_MODE" types_key="SOURCE_${1}_ACTIVITY_TYPES"
+  printf -v "$access_key" '%s' local
+  printf -v "$types_key" '%s' commits
+  greens_save_config "$CONFIG_FILE" "$access_key" "$types_key"
+}
+
+greens_is_interactive() {
+  [[ -t 0 && -t 1 ]]
+}
+
+greens_offer_local_fallback() {
+  local source_index="$1" reason="$2" answer api organization
+  api="$(greens_indexed_value "$source_index" API_HOST)"; organization="$(greens_indexed_value "$source_index" ORGANIZATION)"
+  log "ERROR: remote access failed for $api/$organization: $reason"
+  if ! greens_is_interactive; then
+    log "Run greens interactively to approve local-only commit collection for this source."
+    return 1
+  fi
+  printf "Use local commit history only for all %s/%s repositories and save this choice? (y/N): " "$api" "$organization" >&2
+  read -r answer
+  [[ "$answer" =~ ^[Yy]$ ]] || return 1
+  greens_persist_local_source "$source_index" || { log "ERROR: could not save local-only mode"; return 1; }
+  log "Saved $api/$organization as local-only (commits only)."
+}
+
+greens_validate_local_sources() {
+  local checkouts="$1" source_index mode types api organization
+  for ((source_index=1; source_index<=SOURCE_COUNT; source_index++)); do
+    mode="$(greens_source_access_mode "$source_index")"
+    [[ "$mode" == local ]] || continue
+    types="$(greens_indexed_value "$source_index" ACTIVITY_TYPES)"
+    [[ "$types" == commits ]] || { log "ERROR: local source $source_index only supports ACTIVITY_TYPES=commits"; return 1; }
+    if ! awk -F '\t' -v source="$source_index" '$1 == source { found=1; exit } END { exit !found }' "$checkouts"; then
+      api="$(greens_indexed_value "$source_index" API_HOST)"; organization="$(greens_indexed_value "$source_index" ORGANIZATION)"
+      log "ERROR: no matching checkout remains for local source $api/$organization"
+      return 1
+    fi
+  done
+}
+
+greens_preflight_mixed_sources() {
+  local sources="$1" source_index identity url mode provider api username types key encoded api_user api_done
+  while IFS=$'\t' read -r source_index identity url; do
+    mode="$(greens_source_access_mode "$source_index")"
+    types="$(greens_indexed_value "$source_index" ACTIVITY_TYPES)"
+    if [[ "$mode" == local ]]; then
+      [[ "$types" == commits ]] || { log "ERROR: local source $source_index only supports ACTIVITY_TYPES=commits"; return 1; }
+      continue
+    fi
+    [[ "$mode" == remote ]] || { log "ERROR: invalid access mode for source $source_index: $mode"; return 1; }
+    if ! GIT_TERMINAL_PROMPT=0 GREENS_FETCH_TIMEOUT=15 greens_run git ls-remote "$url" HEAD >/dev/null 2>&1; then
+      greens_offer_local_fallback "$source_index" "Git remote is unreachable" || return 1
+      continue
+    fi
+    [[ "$types" != commits ]] || continue
+    provider="$(greens_indexed_value "$source_index" PROVIDER)"; api="$(greens_indexed_value "$source_index" API_HOST)"; username="$(greens_indexed_value "$source_index" USERNAME)"
+    api_done="$RUN_TMP/preflight-api-$source_index.done"
+    if [[ "$provider" == github ]]; then
+      if [[ ! -f "$api_done" ]]; then
+        if ! gh auth status --active --hostname "$api" >/dev/null 2>&1 ||
+           [[ "$(GREENS_FETCH_TIMEOUT=15 greens_gh_api_as "$api" "$username" user --jq .login 2>/dev/null || true)" != "$username" ]]; then
+          greens_offer_local_fallback "$source_index" "GitHub API authentication is unavailable" || return 1
+          continue
+        fi
+        : > "$api_done"
+      fi
+    elif [[ "$provider" == gitlab ]]; then
+      if [[ ! -f "$api_done" ]]; then
+        api_user="$RUN_TMP/preflight-user-$source_index"
+        if ! command -v glab >/dev/null || ! GREENS_FETCH_TIMEOUT=15 greens_run glab api --hostname "$api" user > "$api_user" 2>/dev/null ||
+           [[ "$(jq -r .username "$api_user" 2>/dev/null)" != "$username" ]]; then
+          greens_offer_local_fallback "$source_index" "GitLab API authentication is unavailable" || return 1
+          continue
+        fi
+        : > "$api_done"
+      fi
+      if [[ "$(greens_source_access_mode "$source_index")" == remote ]]; then
+        key="$(printf '%s' "$identity" | greens_hash)"; encoded="$(jq -nr --arg path "${identity#*/}" '$path|@uri')"
+        if ! GREENS_FETCH_TIMEOUT=15 greens_run glab api --hostname "$api" "projects/$encoded" > "$RUN_TMP/preflight-project-$key" 2>/dev/null; then
+          greens_offer_local_fallback "$source_index" "GitLab project API is unavailable" || return 1
+        fi
+      fi
+    fi
+  done < "$sources"
 }
 
 greens_mirror_mixed_records() {
@@ -156,38 +253,49 @@ greens_mirror_mixed_records() {
 }
 
 greens_mixed_sync() {
-  local sources source_index identity url key bare source_file state_scope state_dir checkpoint_file
-  local SOURCE_PROVIDER SOURCE_API_HOST SOURCE_ORGANIZATION SOURCE_USERNAME EMAILS SINCE ACTIVITY_TYPES
+  local sources checkouts source_index identity url key bare source_file state_scope state_dir checkpoint_file repodir
+  local SOURCE_PROVIDER SOURCE_API_HOST SOURCE_ORGANIZATION SOURCE_USERNAME EMAILS SINCE ACTIVITY_TYPES ACCESS_MODE
   local GITLAB_HOST GITLAB_USERNAME project_path project_id project_features gitlab_user_id api_enabled
   local since_epoch since_date run_epoch lower updated old_types checkpoint kind objects iid object_file pid failed count event_file
   local -a workers
   umask 077
   command -v jq >/dev/null || { log "ERROR: install jq"; return 1; }
   [[ "${COPY_MESSAGES:-0}" == 0 ]] || { log "ERROR: indexed mixed sources support timestamp-only commits; set COPY_MESSAGES=0"; return 1; }
-  sources="$RUN_TMP/mixed-sources"; greens_mixed_discover_sources | LC_ALL=C sort -t $'\t' -k2,2 -u > "$sources"
+  checkouts="$RUN_TMP/mixed-checkouts"; greens_mixed_discover_checkouts > "$checkouts"
+  sources="$RUN_TMP/mixed-sources"; cut -f1-3 "$checkouts" | LC_ALL=C sort -t $'\t' -k2,2 -u > "$sources"
+  greens_validate_local_sources "$checkouts" || return 1
   [[ -s "$sources" ]] || { log "ERROR: no repositories match the configured sources"; return 1; }
   run_epoch="$(date +%s)"; : > "$RUN_TMP/collected"; : > "$RUN_TMP/publish"
   export GIT_TERMINAL_PROMPT=0
   export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=2}"
+  greens_preflight_mixed_sources "$sources" || return 1
   while IFS=$'\t' read -r source_index identity url; do
     SOURCE_PROVIDER="$(greens_indexed_value "$source_index" PROVIDER)"; SOURCE_API_HOST="$(greens_indexed_value "$source_index" API_HOST)"
     SOURCE_ORGANIZATION="$(greens_indexed_value "$source_index" ORGANIZATION)"; SOURCE_USERNAME="$(greens_indexed_value "$source_index" USERNAME)"
-    EMAILS="$(greens_indexed_value "$source_index" EMAILS)"; SINCE="$(greens_indexed_value "$source_index" SINCE)"; ACTIVITY_TYPES="$(greens_indexed_value "$source_index" ACTIVITY_TYPES)"
+    EMAILS="$(greens_indexed_value "$source_index" EMAILS)"; SINCE="$(greens_indexed_value "$source_index" SINCE)"; ACTIVITY_TYPES="$(greens_indexed_value "$source_index" ACTIVITY_TYPES)"; ACCESS_MODE="$(greens_source_access_mode "$source_index")"
     since_epoch="$(greens_epoch "$SINCE")" || { log "ERROR: invalid SINCE for source $source_index"; return 1; }; since_date="${SINCE%% *}"
     project_path="${identity#*/}"; key="$(printf '%s' "$identity" | greens_hash)"; bare="$CACHE_DIR/$key.git"; source_file="$RUN_TMP/$key.records"; : > "$source_file"
-    state_scope="$(printf '%s\n' "$SOURCE_PROVIDER" "$SOURCE_API_HOST" "$SOURCE_ORGANIZATION" "$SOURCE_USERNAME" "$EMAILS" "$SINCE" "$ACTIVITY_TYPES" | greens_hash)"
+    state_scope="$(printf '%s\n' "$SOURCE_PROVIDER" "$SOURCE_API_HOST" "$SOURCE_ORGANIZATION" "$SOURCE_USERNAME" "$EMAILS" "$SINCE" "$ACTIVITY_TYPES" "$ACCESS_MODE" | greens_hash)"
     state_dir="$CACHE_DIR/activity-state/$(greens_scheduler_id)-$state_scope"; checkpoint_file="$state_dir/$key.checkpoint"
     [[ ! -f "$state_dir/$key.jsonl" ]] || cat "$state_dir/$key.jsonl" >> "$source_file"
     log "Collecting $SOURCE_PROVIDER $project_path"
     if [[ ",$ACTIVITY_TYPES," == *,commits,* ]]; then
-      if [[ ! -d "$bare" ]]; then git init --bare --quiet "$bare"; git --git-dir="$bare" remote add origin "$url"; fi
-      git --git-dir="$bare" remote set-url origin "$url"
-      if [[ "$SOURCE_PROVIDER" == gitlab ]]; then
-        greens_run git --git-dir="$bare" fetch --quiet --prune --filter=blob:none origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' '+refs/merge-requests/*/head:refs/merge-requests/*/head'
-      else greens_run git --git-dir="$bare" fetch --quiet --prune --filter=blob:none origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'; fi
-      git --git-dir="$bare" log --all --format='%H%x09%at%x09%ai%x09%ae' |
-        jq -Rrc --arg identity "$identity" --arg path "$project_path" --arg emails "$EMAILS" --argjson since "$since_epoch" --argjson until "$run_epoch" '
-        split("\t")|select(length==4)|. as $r|($emails|ascii_downcase|split(",")|map(gsub("^\\s+|\\s+$";""))) as $e|select(($e|index($r[3]|ascii_downcase))!=null)|(.[1]|tonumber) as $t|select($t >= $since and $t <= $until)|{key:($identity+"/commit/"+.[0]),epoch:$t,date:.[2],kind:"commits",project:$path}' >> "$source_file"
+      if [[ "$ACCESS_MODE" == local ]]; then
+        while IFS= read -r repodir; do
+          git -C "$repodir" log --all --format='%H%x09%at%x09%ai%x09%ae'
+        done < <(awk -F '\t' -v id="$identity" '$2==id {print $4}' "$checkouts") |
+          jq -Rrc --arg identity "$identity" --arg path "$project_path" --arg emails "$EMAILS" --argjson since "$since_epoch" --argjson until "$run_epoch" '
+          split("\t")|select(length==4)|. as $r|($emails|ascii_downcase|split(",")|map(gsub("^\\s+|\\s+$";""))) as $e|select(($e|index($r[3]|ascii_downcase))!=null)|(.[1]|tonumber) as $t|select($t >= $since and $t <= $until)|{key:($identity+"/commit/"+.[0]),epoch:$t,date:.[2],kind:"commits",project:$path}' >> "$source_file"
+      else
+        if [[ ! -d "$bare" ]]; then git init --bare --quiet "$bare"; git --git-dir="$bare" remote add origin "$url"; fi
+        git --git-dir="$bare" remote set-url origin "$url"
+        if [[ "$SOURCE_PROVIDER" == gitlab ]]; then
+          greens_run git --git-dir="$bare" fetch --quiet --prune --filter=blob:none origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' '+refs/merge-requests/*/head:refs/merge-requests/*/head'
+        else greens_run git --git-dir="$bare" fetch --quiet --prune --filter=blob:none origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'; fi
+        git --git-dir="$bare" log --all --format='%H%x09%at%x09%ai%x09%ae' |
+          jq -Rrc --arg identity "$identity" --arg path "$project_path" --arg emails "$EMAILS" --argjson since "$since_epoch" --argjson until "$run_epoch" '
+          split("\t")|select(length==4)|. as $r|($emails|ascii_downcase|split(",")|map(gsub("^\\s+|\\s+$";""))) as $e|select(($e|index($r[3]|ascii_downcase))!=null)|(.[1]|tonumber) as $t|select($t >= $since and $t <= $until)|{key:($identity+"/commit/"+.[0]),epoch:$t,date:.[2],kind:"commits",project:$path}' >> "$source_file"
+      fi
     fi
     if [[ "$SOURCE_PROVIDER" == github && "$ACTIVITY_TYPES" != commits && ! -f "$RUN_TMP/github-api-$source_index.done" ]]; then
       command -v gh >/dev/null || { log "ERROR: install gh"; return 1; }
@@ -199,9 +307,10 @@ greens_mixed_sync() {
     if [[ "$SOURCE_PROVIDER" == gitlab && "$ACTIVITY_TYPES" != commits ]]; then
       command -v glab >/dev/null || { log "ERROR: install glab"; return 1; }
       GITLAB_HOST="$SOURCE_API_HOST"; GITLAB_USERNAME="$SOURCE_USERNAME"; api_enabled=1
-      gitlab_api user "$RUN_TMP/user-$source_index"; gitlab_user_id="$(jq -er .id "$RUN_TMP/user-$source_index")"
+      if [[ -f "$RUN_TMP/preflight-user-$source_index" ]]; then cp "$RUN_TMP/preflight-user-$source_index" "$RUN_TMP/user-$source_index"; else gitlab_api user "$RUN_TMP/user-$source_index"; fi
+      gitlab_user_id="$(jq -er .id "$RUN_TMP/user-$source_index")"
       [[ "$(jq -r .username "$RUN_TMP/user-$source_index")" == "$GITLAB_USERNAME" ]] || { log "ERROR: glab actor mismatch for $GITLAB_HOST"; return 1; }
-      gitlab_api "projects/$(jq -nr --arg path "$project_path" '$path|@uri')" "$RUN_TMP/project-$key"
+      if [[ -f "$RUN_TMP/preflight-project-$key" ]]; then cp "$RUN_TMP/preflight-project-$key" "$RUN_TMP/project-$key"; else gitlab_api "projects/$(jq -nr --arg path "$project_path" '$path|@uri')" "$RUN_TMP/project-$key"; fi
       project_id="$(jq -er .id "$RUN_TMP/project-$key")"; project_features="$(jq -r '[(.merge_requests_enabled != false),(.issues_enabled != false)]|join(",")' "$RUN_TMP/project-$key")"
       lower="$since_epoch"; old_types=""
       if [[ -f "$checkpoint_file" ]]; then read -r checkpoint old_types < "$checkpoint_file"; [[ "$checkpoint" =~ ^[0-9]+$ && "$old_types" == "$ACTIVITY_TYPES:$since_epoch:$project_features" ]] && lower="$((checkpoint - 86400))"; fi

@@ -941,9 +941,9 @@ case "${1:-}" in
   sync)      ;; # alias: greens sync = greens (default)
   --help|-h) echo "Usage: greens [sync|init|--setup|--status|--resync|--privacy-migrate|--reset|--help|--version]"
              echo "  sync       Run sync (default, same as bare greens)"
-             echo "  init [--in-root|--recursive]"
+             echo "  init [--in-root|--recursive] [--remove-work-dir PATH]"
              echo "             Run interactive setup wizard (alias for --setup)"
-             echo "  --setup [--in-root|--recursive]"
+             echo "  --setup [--in-root|--recursive] [--remove-work-dir PATH]"
              echo "             Configure recursive scanning or immediate child folders only"
              echo "  --status   Show current config and sync status"
              echo "  --resync   Wipe mirror history (local + remote) and sync fresh"
@@ -1078,7 +1078,8 @@ case "${1:-}" in
       echo "  Sources:"
       for ((source_i=1; source_i<=SOURCE_COUNT; source_i++)); do
         echo "    $(greens_indexed_value "$source_i" PROVIDER)://$(greens_indexed_value "$source_i" API_HOST)/$(greens_indexed_value "$source_i" ORGANIZATION)"
-        echo "      user=$(greens_indexed_value "$source_i" USERNAME), activity=$(greens_indexed_value "$source_i" ACTIVITY_TYPES), since=$(greens_indexed_value "$source_i" SINCE)"
+        source_access="$(greens_indexed_value "$source_i" ACCESS_MODE)"; source_access="${source_access:-remote}"
+        echo "      access=$source_access, user=$(greens_indexed_value "$source_i" USERNAME), activity=$(greens_indexed_value "$source_i" ACTIVITY_TYPES), since=$(greens_indexed_value "$source_i" SINCE)"
       done
     else
       echo "  Activity:     ${ACTIVITY_TYPES:-commits}"

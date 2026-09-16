@@ -1,6 +1,8 @@
 #!/bin/bash
 # Automatic multi-directory, multi-provider setup. Sourced by setup.sh.
 
+declare -p setup_remove_dirs >/dev/null 2>&1 || setup_remove_dirs=()
+
 greens_required() {
   local value
   value="$(prompt "$1" "${2:-}")" || return 1
@@ -31,11 +33,11 @@ greens_probe_provider() {
   local domain="$1" body
   case "$domain" in github.com) printf 'github\n'; return ;; gitlab.com) printf 'gitlab\n'; return ;; esac
   if command -v gh >/dev/null 2>&1 && gh auth status --active --hostname "$domain" >/dev/null 2>&1 &&
-     gh api --hostname "$domain" / --jq .current_user_url >/dev/null 2>&1; then
+     GREENS_FETCH_TIMEOUT=10 greens_run gh api --hostname "$domain" / --jq .current_user_url >/dev/null 2>&1; then
     printf 'github\n'; return
   fi
   if command -v glab >/dev/null 2>&1 && glab auth status --hostname "$domain" >/dev/null 2>&1 &&
-     glab api --hostname "$domain" metadata >/dev/null 2>&1; then
+     GREENS_FETCH_TIMEOUT=10 greens_run glab api --hostname "$domain" metadata >/dev/null 2>&1; then
     printf 'gitlab\n'; return
   fi
   command -v curl >/dev/null 2>&1 || return 1
@@ -75,8 +77,57 @@ greens_normalize_activity_types() {
   printf '%s\n' "$normalized"
 }
 
+greens_normalize_work_dir() {
+  local path="$1" parent
+  path="${path/#\~/$HOME}"; [[ "$path" == / ]] || path="${path%/}"
+  if [[ -d "$path" ]]; then (cd "$path" && pwd -P); return; fi
+  [[ "$path" == /* ]] || path="$PWD/$path"
+  if parent="$(cd "$(dirname "$path")" 2>/dev/null && pwd -P)"; then
+    printf '%s/%s\n' "$parent" "$(basename "$path")"
+  else
+    printf '%s\n' "$path"
+  fi
+}
+
+greens_remove_work_dir() {
+  local dirs="$1" remove="$2" path result="" found=0
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    if [[ "$(greens_normalize_work_dir "$path")" == "$remove" ]]; then found=1; continue; fi
+    [[ -n "$result" ]] && result+=$'\n'
+    result+="$path"
+  done <<< "$dirs"
+  [[ "$found" == 1 ]] || return 1
+  printf '%s' "$result"
+}
+
+greens_group_git_access() {
+  local scan="$1" organization="$2" aliases="$3" identity repodir url checked=0
+  while IFS=$'\t' read -r identity repodir; do
+    checked=1
+    url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
+    [[ -n "$url" ]] || return 1
+    if ! GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=10}" \
+      GREENS_FETCH_TIMEOUT=15 greens_run git ls-remote "$url" HEAD >/dev/null 2>&1; then
+      warn "Remote access failed for $identity"
+      return 1
+    fi
+  done < <(awk -F '\t' -v o="$organization" -v aliases=",$aliases," '
+    $2==o && index(aliases, "," $1 ",") && !seen[$3]++ {print $3 FS $4}' "$scan")
+  [[ "$checked" == 1 ]]
+}
+
+greens_group_gitlab_api_access() {
+  local scan="$1" organization="$2" aliases="$3" api="$4" identity encoded
+  while IFS= read -r identity; do
+    encoded="$(jq -nr --arg path "${identity#*/}" '$path|@uri')"
+    GREENS_FETCH_TIMEOUT=15 greens_run glab api --hostname "$api" "projects/$encoded" >/dev/null 2>&1 || return 1
+  done < <(awk -F '\t' -v o="$organization" -v aliases=",$aliases," '
+    $2==o && index(aliases, "," $1 ",") && !seen[$3]++ {print $3}' "$scan")
+}
+
 greens_show_existing_config() {
-  local i
+  local i access
   info "Current configuration:"
   if [[ -n "${WORK_DIRS:-}" ]]; then
     while IFS= read -r dir; do [[ -n "$dir" ]] && info "  Work directory: $dir"; done <<< "$WORK_DIRS"
@@ -84,7 +135,8 @@ greens_show_existing_config() {
   if [[ "${SOURCE_COUNT:-0}" -gt 0 ]]; then
     for ((i=1; i<=SOURCE_COUNT; i++)); do
       info "  Source $i: $(greens_source_value "$i" PROVIDER)://$(greens_source_value "$i" API_HOST)/$(greens_source_value "$i" ORGANIZATION)"
-      info "    activity=$(greens_source_value "$i" ACTIVITY_TYPES), since=$(greens_source_value "$i" SINCE)"
+      access="$(greens_source_value "$i" ACCESS_MODE)"; access="${access:-remote}"
+      info "    access=$access, activity=$(greens_source_value "$i" ACTIVITY_TYPES), since=$(greens_source_value "$i" SINCE)"
     done
   elif [[ -n "${SOURCE_PROVIDER:-}" || -n "${REMOTE_PREFIX:-}" ]]; then
     info "  Source: ${SOURCE_PROVIDER:-github} (legacy configuration)"
@@ -95,17 +147,26 @@ greens_show_existing_config() {
 }
 
 greens_sources_setup() {
-  local had_config=0 legacy_schema=0 existing_dirs suggested_dir="" dirs="" path canonical answer setup_tmp
+  local had_config=0 legacy_schema=0 roots_removed=0 existing_dirs suggested_dir="" dirs="" path canonical answer setup_tmp choice index remove
   local scan hosts class groups gitpath repodir url identity host rest organization
   local record provider api domain detected choice ssh_domain existing_source_count existing_sources
-  local aliases username emails since types defaults meta i key owner branch default_email personal_default
+  local aliases username emails since types access_mode defaults meta i key owner branch default_email personal_default retry
   local -a save_keys
   for key in git jq gh; do command -v "$key" >/dev/null || { fail "Install $key, then rerun setup."; return 1; }; done
   existing_source_count="${SOURCE_COUNT:-0}"
   if [[ -f "$CONFIG_FILE" ]]; then
     had_config=1; greens_show_existing_config; echo "" >&2
-    answer="$(prompt 'Rerun setup using these values as defaults? (y/N)' 'n')"
-    [[ "$answer" =~ ^[Yy]$ ]] || return 0
+    # setup_remove_dirs is initialized by setup.sh before this file is sourced.
+    # shellcheck disable=SC2154
+    if [[ "${#setup_remove_dirs[@]}" -eq 0 ]]; then
+      answer="$(prompt 'Rerun setup using these values as defaults? (y/N)' 'n')"
+      [[ "$answer" =~ ^[Yy]$ ]] || return 0
+    else
+      info "Work-directory removal requested; continuing setup with existing values as defaults."
+    fi
+  elif [[ "${#setup_remove_dirs[@]}" -gt 0 ]]; then
+    fail "--remove-work-dir requires an existing configuration."
+    return 1
   fi
   if [[ "$had_config" == 1 && "$existing_source_count" -eq 0 &&
         ( -n "${WORK_DIR:-}" || -n "${SOURCE_PROVIDER:-}" || -n "${REMOTE_PREFIX:-}" ) ]]; then
@@ -119,6 +180,29 @@ greens_sources_setup() {
     while IFS= read -r path; do [[ -n "$path" ]] && info "  $path"; done <<< "$existing_dirs"
   else
     suggested_dir="$(detect_work_dir)"
+  fi
+
+  for remove in ${setup_remove_dirs[@]+"${setup_remove_dirs[@]}"}; do
+    remove="$(greens_normalize_work_dir "$remove")"
+    if ! dirs="$(greens_remove_work_dir "$dirs" "$remove")"; then
+      fail "Work directory is not configured: $remove"
+      return 1
+    fi
+    roots_removed=1; ok "Removed work directory $remove"
+  done
+
+  if [[ "$had_config" == 1 && "${#setup_remove_dirs[@]}" -eq 0 ]]; then
+    while [[ -n "$dirs" ]]; do
+      info "Configured repository roots:"
+      index=0
+      while IFS= read -r path; do index="$((index + 1))"; info "  $index) $path"; done <<< "$dirs"
+      choice="$(prompt 'Remove work directory number (blank to keep the rest)' '')" || return 1
+      [[ -n "$choice" ]] || break
+      [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "$index" ]] || { warn "Choose a listed number."; continue; }
+      remove="$(sed -n "${choice}p" <<< "$dirs")"
+      dirs="$(greens_remove_work_dir "$dirs" "$(greens_normalize_work_dir "$remove")")"
+      roots_removed=1; ok "Removed work directory $remove"
+    done
   fi
   info "Add repository roots one at a time. Press Enter when every root is listed."
   while true; do
@@ -138,6 +222,12 @@ greens_sources_setup() {
     fi
   done
   WORK_DIRS="$dirs"
+
+  if [[ "$roots_removed" == 1 ]]; then
+    while IFS= read -r path; do
+      [[ -d "$path" ]] || { fail "Retained work directory is unavailable during removal: $path"; return 1; }
+    done <<< "$WORK_DIRS"
+  fi
 
   setup_tmp="$(mktemp -d)"
   GREENS_SETUP_TMP="$setup_tmp"
@@ -188,26 +278,29 @@ greens_sources_setup() {
 
   # A disconnected drive or temporarily missing clone must not silently erase
   # a previously configured source during setup.
-  for ((i=1; i<=${SOURCE_COUNT:-0}; i++)); do
-    provider="$(greens_source_value "$i" PROVIDER)"; api="$(greens_source_value "$i" API_HOST)"; organization="$(greens_source_value "$i" ORGANIZATION)"
-    if ! awk -F '\t' -v p="$provider" -v a="$api" -v o="$organization" '$1==p && $2==a && $3==o {found=1} END {exit !found}' "$groups"; then
-      warn "Configured source is not currently detected; retaining $provider $api/$organization."
-      printf '%s\t%s\t%s\t%s\t0\n' "$provider" "$api" "$organization" "$(greens_source_value "$i" REMOTE_HOSTS)" >> "$groups"
-    fi
-  done
+  if [[ "$roots_removed" == 0 ]]; then
+    for ((i=1; i<=${SOURCE_COUNT:-0}; i++)); do
+      provider="$(greens_source_value "$i" PROVIDER)"; api="$(greens_source_value "$i" API_HOST)"; organization="$(greens_source_value "$i" ORGANIZATION)"
+      if ! awk -F '\t' -v p="$provider" -v a="$api" -v o="$organization" '$1==p && $2==a && $3==o {found=1} END {exit !found}' "$groups"; then
+        warn "Configured source is not currently detected; retaining $provider $api/$organization."
+        printf '%s\t%s\t%s\t%s\t0\n' "$provider" "$api" "$organization" "$(greens_source_value "$i" REMOTE_HOSTS)" >> "$groups"
+      fi
+    done
+  fi
 
   existing_sources="$setup_tmp/existing-sources"
   : > "$existing_sources"
   for ((i=1; i<=existing_source_count; i++)); do
-    printf '%s|%s|%s|%s|%s|%s|%s\n' \
+    printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
       "$(greens_source_value "$i" PROVIDER)" "$(greens_source_value "$i" API_HOST)" "$(greens_source_value "$i" ORGANIZATION)" \
-      "$(greens_source_value "$i" USERNAME)" "$(greens_source_value "$i" EMAILS)" "$(greens_source_value "$i" SINCE)" "$(greens_source_value "$i" ACTIVITY_TYPES)" >> "$existing_sources"
+      "$(greens_source_value "$i" USERNAME)" "$(greens_source_value "$i" EMAILS)" "$(greens_source_value "$i" SINCE)" "$(greens_source_value "$i" ACTIVITY_TYPES)" \
+      "$(greens_source_value "$i" ACCESS_MODE)" >> "$existing_sources"
   done
   SOURCE_COUNT=0
   while IFS=$'\t' read -r provider api organization aliases _count <&4; do
-    username=""; emails=""; since=""; types=""
+    username=""; emails=""; since=""; types=""; access_mode=remote
     record="$(awk -F '|' -v p="$provider" -v a="$api" -v o="$organization" '$1==p && $2==a && $3==o {print; exit}' "$existing_sources")"
-    if [[ -n "$record" ]]; then IFS='|' read -r _ _ _ username emails since types <<< "$record"; fi
+    if [[ -n "$record" ]]; then IFS='|' read -r _ _ _ username emails since types access_mode <<< "$record"; access_mode="${access_mode:-remote}"; fi
     if [[ -z "$record" && "$existing_source_count" -eq 0 ]]; then
       emails="${EMAILS:-}"; since="${SINCE:-}"; types="${ACTIVITY_TYPES:-}"
       if [[ "$provider" == github ]]; then username="${GITHUB_USERNAME:-}"; elif [[ "$provider" == gitlab ]]; then username="${GITLAB_USERNAME:-}"; fi
@@ -222,35 +315,59 @@ greens_sources_setup() {
       info "Skipping $provider $api/$organization ($_count repositories)."
       continue
     fi
-    SOURCE_COUNT="$((SOURCE_COUNT + 1))"
-    if [[ "$provider" == github ]]; then
-      gh auth status --active --hostname "$api" >/dev/null 2>&1 || { fail "Run gh auth login --hostname $api first."; return 1; }
-      meta="$(greens_gh_api_as "$api" "" user)" || return 1
-      username="$(greens_required "GitHub username for $api/$organization" "${username:-$(jq -r .login <<< "$meta")}")"
-      meta="$(greens_gh_api_as "$api" "$username" user)" || return 1
-      [[ "$username" == "$(jq -r .login <<< "$meta")" ]] || { fail "Authenticate gh as $username on $api first."; return 1; }
-      defaults=commits,prs,issues
-    elif [[ "$provider" == gitlab ]]; then
-      command -v glab >/dev/null || { fail "Install glab and authenticate $api."; return 1; }
-      meta="$(glab api --hostname "$api" user)" || { fail "Run glab auth login --hostname $api first."; return 1; }
-      username="$(greens_required "GitLab username for $api/$organization" "${username:-$(jq -r .username <<< "$meta")}")"
-      [[ "$username" == "$(jq -r .username <<< "$meta")" ]] || { fail "Authenticate glab as $username on $api first."; return 1; }
-      defaults=commits,mrs,issues,comments,approvals,merges,state_changes
-    else defaults=commits; fi
+    case "$provider" in github) defaults=commits,prs,issues ;; gitlab) defaults=commits,mrs,issues,comments,approvals,merges,state_changes ;; *) defaults=commits ;; esac
+
+    if [[ "$access_mode" == local ]]; then
+      retry="$(prompt "Retry remote access for $api/$organization? (y/N)" 'n')"
+      if [[ "$retry" =~ ^[Yy]$ ]]; then
+        if greens_group_git_access "$scan" "$organization" "$aliases"; then access_mode=remote; ok "Remote Git access restored for $api/$organization"
+        else warn "Keeping $api/$organization in local-only mode."; fi
+      fi
+    elif ! greens_group_git_access "$scan" "$organization" "$aliases"; then
+      answer="$(prompt "Use local commit history only for all $api/$organization repositories? (y/N)" 'n')"
+      if [[ "$answer" =~ ^[Yy]$ ]]; then access_mode=local; types=commits; ok "$api/$organization will use local commit history only"
+      else info "Skipping $provider $api/$organization because remote access is unavailable."; continue; fi
+    fi
+
+    if [[ "$access_mode" == remote && "$provider" == github ]]; then
+      if ! gh auth status --active --hostname "$api" >/dev/null 2>&1 || ! meta="$(GREENS_FETCH_TIMEOUT=15 greens_gh_api_as "$api" "" user)"; then
+        answer="$(prompt "GitHub API access failed. Use local commit history only for all $api/$organization repositories? (y/N)" 'n')"
+        if [[ "$answer" =~ ^[Yy]$ ]]; then access_mode=local; types=commits; else info "Skipping github $api/$organization."; continue; fi
+      else
+        username="$(greens_required "GitHub username for $api/$organization" "${username:-$(jq -r .login <<< "$meta")}")"
+        if ! meta="$(GREENS_FETCH_TIMEOUT=15 greens_gh_api_as "$api" "$username" user)" || [[ "$username" != "$(jq -r .login <<< "$meta")" ]]; then
+          answer="$(prompt "GitHub account validation failed. Use local commit history only for all $api/$organization repositories? (y/N)" 'n')"
+          if [[ "$answer" =~ ^[Yy]$ ]]; then access_mode=local; types=commits; else info "Skipping github $api/$organization."; continue; fi
+        fi
+      fi
+    elif [[ "$access_mode" == remote && "$provider" == gitlab ]]; then
+      if ! command -v glab >/dev/null || ! meta="$(GREENS_FETCH_TIMEOUT=15 greens_run glab api --hostname "$api" user 2>/dev/null)"; then
+        answer="$(prompt "GitLab API access failed. Use local commit history only for all $api/$organization repositories? (y/N)" 'n')"
+        if [[ "$answer" =~ ^[Yy]$ ]]; then access_mode=local; types=commits; else info "Skipping gitlab $api/$organization."; continue; fi
+      else
+        username="$(greens_required "GitLab username for $api/$organization" "${username:-$(jq -r .username <<< "$meta")}")"
+        if [[ "$username" != "$(jq -r .username <<< "$meta")" ]] || ! greens_group_gitlab_api_access "$scan" "$organization" "$aliases" "$api"; then
+          answer="$(prompt "GitLab account validation failed. Use local commit history only for all $api/$organization repositories? (y/N)" 'n')"
+          if [[ "$answer" =~ ^[Yy]$ ]]; then access_mode=local; types=commits; else info "Skipping gitlab $api/$organization."; continue; fi
+        fi
+      fi
+    fi
+    [[ "$access_mode" == local ]] && types=commits
     types="$(greens_normalize_activity_types "$provider" "$types")"
     since="$(greens_required "Include $api/$organization activity since" "${since:-$(date +%Y)-01-01}")"; greens_epoch "$since" >/dev/null || { fail "Invalid history start for $api/$organization."; return 1; }
-    if [[ "$provider" == git ]]; then types=commits; else types="$(greens_required "Activity types for $api/$organization" "${types:-$defaults}")"; fi
+    if [[ "$access_mode" == local || "$provider" == git ]]; then types=commits; else types="$(greens_required "Activity types for $api/$organization" "${types:-$defaults}")"; fi
     greens_validate_activity_types "$provider" "$types" || return 1
+    SOURCE_COUNT="$((SOURCE_COUNT + 1))"
     printf -v "SOURCE_${SOURCE_COUNT}_PROVIDER" '%s' "$provider"; printf -v "SOURCE_${SOURCE_COUNT}_REMOTE_HOSTS" '%s' "$aliases"
     printf -v "SOURCE_${SOURCE_COUNT}_API_HOST" '%s' "$api"; printf -v "SOURCE_${SOURCE_COUNT}_ORGANIZATION" '%s' "$organization"
     printf -v "SOURCE_${SOURCE_COUNT}_USERNAME" '%s' "$username"; printf -v "SOURCE_${SOURCE_COUNT}_EMAILS" '%s' "$emails"
-    printf -v "SOURCE_${SOURCE_COUNT}_SINCE" '%s' "$since"; printf -v "SOURCE_${SOURCE_COUNT}_ACTIVITY_TYPES" '%s' "$types"
+    printf -v "SOURCE_${SOURCE_COUNT}_SINCE" '%s' "$since"; printf -v "SOURCE_${SOURCE_COUNT}_ACTIVITY_TYPES" '%s' "$types"; printf -v "SOURCE_${SOURCE_COUNT}_ACCESS_MODE" '%s' "$access_mode"
   done 4< "$groups"
 
   [[ "$SOURCE_COUNT" -gt 0 ]] || { fail "Every detected source group was skipped; the existing configuration was not changed."; return 1; }
 
   info "Detected source configuration:"
-  for ((i=1; i<=SOURCE_COUNT; i++)); do info "  $(greens_source_value "$i" PROVIDER) $(greens_source_value "$i" API_HOST)/$(greens_source_value "$i" ORGANIZATION): $(greens_source_value "$i" ACTIVITY_TYPES)"; done
+  for ((i=1; i<=SOURCE_COUNT; i++)); do info "  $(greens_source_value "$i" PROVIDER) $(greens_source_value "$i" API_HOST)/$(greens_source_value "$i" ORGANIZATION): access=$(greens_source_value "$i" ACCESS_MODE), activity=$(greens_source_value "$i" ACTIVITY_TYPES)"; done
   personal_default="${PERSONAL_GH_USER:-$(gh api --hostname github.com user --jq .login)}"
   PERSONAL_GH_USER="$(greens_required 'Personal GitHub username' "$personal_default")"
   gh auth switch --hostname github.com --user "$PERSONAL_GH_USER" >/dev/null 2>&1 || { fail "Run gh auth login --hostname github.com for $PERSONAL_GH_USER first."; return 1; }
@@ -276,7 +393,7 @@ greens_sources_setup() {
   # shellcheck disable=SC2034
   if [[ "$legacy_schema" == 1 && -d "$MIRROR_DIR/.git" ]] && git -C "$MIRROR_DIR" rev-parse --verify HEAD >/dev/null 2>&1 && ! git -C "$MIRROR_DIR" log --format=%B | grep -q '^Greens-Activity: '; then printf -v GREENS_LEGACY_TIMESTAMPS '%s' 1; fi
   save_keys=(WORK_DIRS SCAN_MODE SOURCE_COUNT PERSONAL_GH_USER MIRROR_EMAIL MIRROR_NAME MIRROR_URL MIRROR_DIR COPY_MESSAGES COPY_MESSAGES_ACK SCHEDULER SYNC_HOUR GREENS_LEGACY_TIMESTAMPS)
-  for ((i=1; i<=SOURCE_COUNT; i++)); do for key in PROVIDER REMOTE_HOSTS API_HOST ORGANIZATION USERNAME EMAILS SINCE ACTIVITY_TYPES; do save_keys+=("SOURCE_${i}_${key}"); done; done
+  for ((i=1; i<=SOURCE_COUNT; i++)); do for key in PROVIDER REMOTE_HOSTS API_HOST ORGANIZATION USERNAME EMAILS SINCE ACTIVITY_TYPES ACCESS_MODE; do save_keys+=("SOURCE_${i}_${key}"); done; done
   greens_replace_config "$CONFIG_FILE" '^(WORK_DIRS?|SCAN_MODE|SOURCE_PROVIDER|SOURCE_COUNT|SOURCE_[0-9]+_.*|REMOTE_PREFIX|GITHUB_(ORG|USERNAME|TOKEN)|GITLAB_(HOST|REMOTE_HOST|USERNAME)|EMAILS|SINCE|ACTIVITY_TYPES)$' "${save_keys[@]}"
   ok "Saved configuration to $CONFIG_FILE"
   if confirm "Run the initial sync now?"; then FORCE=1 CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$SCRIPT_DIR/sync.sh"; fi
