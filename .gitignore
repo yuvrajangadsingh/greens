@@ -19,3 +19,8 @@ launch-posts.md
 
 # Local planning notes (never ship)
 .notes/
+
+# Local environment overrides; examples may be tracked.
+.env
+.env.*
+!.env.example

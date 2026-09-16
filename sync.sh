@@ -25,6 +25,8 @@ VERSION="1.8.2"
 
 # Config file location. Config uses ${VAR:-value} so env vars take precedence.
 CONFIG_FILE="${CONTRIB_MIRROR_CONFIG:-$HOME/.contrib-mirror/config}"
+source "$SCRIPT_DIR/lib/common.sh"
+CONFIG_FILE="$(greens_config_path "$CONFIG_FILE")"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Config/token hygiene — BEFORE sourcing. The config can hold a PAT and is
@@ -44,7 +46,7 @@ if [[ -f "$CONFIG_FILE" ]]; then
   if [[ -L "$CONFIG_FILE" ]]; then
     echo "NOTE: $CONFIG_FILE is a symlink; greens won't adjust or rewrite it." >&2
   else
-    _config_perms="$(stat -f '%Lp' "$CONFIG_FILE" 2>/dev/null || stat -c '%a' "$CONFIG_FILE" 2>/dev/null || echo "")"
+    _config_perms="$(stat -c '%a' "$CONFIG_FILE" 2>/dev/null || stat -f '%Lp' "$CONFIG_FILE" 2>/dev/null || echo "")"
     case "$_config_perms" in
       ""|*00) : ;;  # already owner-only (600/700/400/...) or unknown
       *)
@@ -525,7 +527,7 @@ privacy_migrate() {
   tmp_manifest="$(mktemp)"
   tmp_expected_tuples="$(mktemp)"
   local ordinal=0 retained=0 dropped_init=0 dropped_status=0
-  local H T P at ai ct ci subj aoff coff changed rblob rcontent drop
+  local H T P at ai ct ci subj aoff coff changed rblob rcontent drop activity_marker
   while IFS=$'\t' read -r H T P at ai ct ci subj; do
     [[ -z "$H" ]] && continue
     P="${P#p}"
@@ -560,7 +562,8 @@ privacy_migrate() {
     if [[ "$drop" -eq 0 ]]; then
       aoff="${ai##* }"
       coff="${ci##* }"
-      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$at" "$ordinal" "$aoff" "$ct" "$coff" "$subj" >> "$tmp_manifest"
+      activity_marker="$(git -C "$MIRROR_DIR" show -s --format=%B "$H" | sed -n 's/^Greens-Activity: \([0-9a-f]\{64\}\)$/\1/p')"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$at" "$ordinal" "$aoff" "$ct" "$coff" "${activity_marker:--}" "$subj" >> "$tmp_manifest"
       printf '%s\t%s\t%s\t%s\n' "$at" "$ai" "$ct" "$ci" >> "$tmp_expected_tuples"
       retained=$((retained + 1))
     fi
@@ -692,7 +695,7 @@ privacy_migrate() {
   echo ""
   echo "  Rebuilding $retained commits (author+committer dates preserved)..."
   local built=0 parent="" new_oid="" msg
-  while IFS=$'\t' read -r at ordinal aoff ct coff subj; do
+  while IFS=$'\t' read -r at ordinal aoff ct coff activity_marker subj; do
     [[ -z "$at" ]] && continue
     if [[ "$keep_messages" -eq 1 ]]; then
       case "$subj" in
@@ -704,6 +707,9 @@ privacy_migrate() {
       esac
     else
       msg="sync"
+    fi
+    if [[ "$activity_marker" =~ ^[0-9a-f]{64}$ ]]; then
+      msg="$(printf '%s\n\nGreens-Activity: %s' "$msg" "$activity_marker")"
     fi
     if [[ -n "$parent" ]]; then
       new_oid="$(GIT_AUTHOR_NAME="$MIRROR_NAME" GIT_AUTHOR_EMAIL="$MIRROR_EMAIL" \
@@ -954,6 +960,10 @@ case "${1:-}" in
     privacy_migrate "$@"
     ;;
   --resync)
+    if [[ "${SOURCE_COUNT:-0}" -gt 0 || "${SOURCE_PROVIDER:-github}" != github ]]; then
+      echo "Use a new empty mirror to rebuild GitLab/Git-only history; automatic force-push is unsupported." >&2
+      exit 1
+    fi
     echo "greens — resync"
     echo ""
     echo "  This will wipe all mirror commits (local + remote) and sync fresh."
@@ -963,6 +973,7 @@ case "${1:-}" in
       echo "  Cancelled."
       exit 0
     fi
+    # shellcheck source=/dev/null
     source "$CONFIG_FILE" 2>/dev/null || { echo "  No config found. Run: greens"; exit 1; }
     MIRROR_DIR="${MIRROR_DIR:-$HOME/.contrib-mirror/mirror}"
     # Legacy history must be migrated, not resynced over. (The sync this
@@ -1024,15 +1035,26 @@ case "${1:-}" in
       echo "  Not configured. Run: greens"
       exit 0
     fi
+    # shellcheck source=/dev/null
     source "$CONFIG_FILE"
     echo "  Config:       $CONFIG_FILE"
-    echo "  Work dir:     ${WORK_DIR:-not set}"
-    if [[ -d "${WORK_DIR:-}" ]]; then
-      repo_count="$(find "$WORK_DIR" -maxdepth 2 -name .git -print 2>/dev/null | wc -l | tr -d ' ')"
-      echo "  Repos found:  $repo_count"
+    if [[ -n "${WORK_DIRS:-}" ]]; then
+      echo "  Work dirs:"
+      while IFS= read -r work_root; do
+        [[ -n "$work_root" ]] || continue
+        repo_count="$(find "$work_root" -name .git -print -prune 2>/dev/null | wc -l | tr -d ' ')"
+        echo "    $work_root ($repo_count repos)"
+      done <<< "$WORK_DIRS"
+    else
+      echo "  Work dir:     ${WORK_DIR:-not set}"
+      if [[ -d "${WORK_DIR:-}" ]]; then repo_count="$(find "$WORK_DIR" -name .git -print -prune 2>/dev/null | wc -l | tr -d ' ')"; echo "  Repos found:  $repo_count"; fi
     fi
-    echo "  Remote prefix: ${REMOTE_PREFIX:-not set}"
-    echo "  Emails:       ${EMAILS:-not set}"
+    if [[ "${SOURCE_COUNT:-0}" -eq 0 && "${SOURCE_PROVIDER:-github}" != gitlab ]]; then
+      echo "  Remote prefix: ${REMOTE_PREFIX:-not set}"
+    fi
+    if [[ "${SOURCE_COUNT:-0}" -eq 0 ]]; then
+      echo "  Emails:       ${EMAILS:-not set}"
+    fi
     echo "  Mirror dir:   ${MIRROR_DIR:-not set}"
     if [[ -d "${MIRROR_DIR:-}" ]] && [[ -d "${MIRROR_DIR}/.git" ]]; then
       mirror_commits="$(git -C "$MIRROR_DIR" rev-list --count HEAD 2>/dev/null || echo "0")"
@@ -1043,22 +1065,43 @@ case "${1:-}" in
       fi
     fi
     echo "  Mirror email: ${MIRROR_EMAIL:-not set}"
-    echo "  GitHub user:  ${GITHUB_USERNAME:-not set}"
-    echo "  Activity:     ${ACTIVITY_TYPES:-commits}"
-    echo "  Since:        ${SINCE:-not set}"
+    echo "  Mirror owner: ${PERSONAL_GH_USER:-not set}"
+    if [[ "${SOURCE_COUNT:-0}" -eq 0 && "${SOURCE_PROVIDER:-github}" == github ]]; then
+      echo "  GitHub user:  ${GITHUB_USERNAME:-not set}"
+    fi
+    if [[ "${SOURCE_COUNT:-0}" -gt 0 ]]; then
+      echo "  Sources:"
+      for ((source_i=1; source_i<=SOURCE_COUNT; source_i++)); do
+        echo "    $(greens_indexed_value "$source_i" PROVIDER)://$(greens_indexed_value "$source_i" API_HOST)/$(greens_indexed_value "$source_i" ORGANIZATION)"
+        echo "      user=$(greens_indexed_value "$source_i" USERNAME), activity=$(greens_indexed_value "$source_i" ACTIVITY_TYPES), since=$(greens_indexed_value "$source_i" SINCE)"
+      done
+    else
+      echo "  Activity:     ${ACTIVITY_TYPES:-commits}"
+      echo "  Since:        ${SINCE:-not set}"
+    fi
     # Last sync
     log_dir="${LOG_DIR:-$HOME/.contrib-mirror/logs}"
     [[ -d "$log_dir" ]] || log_dir="$SCRIPT_DIR/logs"
-    stamp_file="${SUCCESS_STAMP_FILE:-$log_dir/last-success-date}"
+    stamp_file="${SUCCESS_STAMP_FILE:-$(greens_stamp_path)}"
     if [[ -f "$stamp_file" ]]; then
       echo "  Last sync:    $(cat "$stamp_file")"
     else
       echo "  Last sync:    never"
     fi
     # Scheduler
-    if launchctl list 2>/dev/null | grep -q "com.greens"; then
+    if [[ "${SOURCE_COUNT:-0}" -gt 0 ]]; then echo "  Source:       mixed provider registry"; else echo "  Source:       ${SOURCE_PROVIDER:-github}"; fi
+    if [[ "${SOURCE_COUNT:-0}" -eq 0 && "${SOURCE_PROVIDER:-}" == gitlab ]]; then
+      echo "  GitLab host:  ${GITLAB_HOST:-gitlab.com}"
+      echo "  GitLab user:  ${GITLAB_USERNAME:-authenticated user}"
+    fi
+    if systemctl --user is-enabled "$(greens_scheduler_id).timer" >/dev/null 2>&1; then
+      echo "  Scheduler:    systemd ($(greens_scheduler_id).timer)"
+      systemctl --user list-timers "$(greens_scheduler_id).timer" --no-pager
+    elif launchctl list 2>/dev/null | grep -q "com.greens"; then
       echo "  Scheduler:    launchd (active)"
-    elif crontab -l 2>/dev/null | grep -q "sync.sh"; then
+    elif crontab -l 2>/dev/null | grep -q "# $(greens_scheduler_id)$"; then
+      echo "  Scheduler:    cron"
+    elif crontab -l 2>/dev/null | grep -F "$SCRIPT_DIR/sync.sh" | grep -v '# greens-' >/dev/null; then
       echo "  Scheduler:    cron"
     elif schtasks.exe /Query /TN "greens-daily-sync" 2>/dev/null | grep -qi "greens"; then
       echo "  Scheduler:    Windows Task Scheduler (active)"
@@ -1075,6 +1118,14 @@ case "${1:-}" in
       [[ "$reply" =~ ^[Yy] ]]
     }
     # 1. Scheduler
+    if [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$(greens_scheduler_id).timer" ]]; then
+      if confirm_reset "Remove systemd scheduler?"; then greens_systemd_remove; fi
+    fi
+    if crontab -l 2>/dev/null | grep -q "# $(greens_scheduler_id)$"; then
+      if confirm_reset "Remove this configuration's cron entry?"; then
+        { crontab -l 2>/dev/null | grep -v "# $(greens_scheduler_id)$" || true; } | crontab -
+      fi
+    fi
     if launchctl list 2>/dev/null | grep -q "com.greens"; then
       if confirm_reset "Remove launchd scheduler?"; then
         launchctl bootout "gui/$(id -u)/com.greens" 2>/dev/null || true
@@ -1082,9 +1133,9 @@ case "${1:-}" in
         echo "  [ok] launchd agent removed"
       fi
     fi
-    if crontab -l 2>/dev/null | grep -q "sync.sh"; then
+    if crontab -l 2>/dev/null | grep -F "$SCRIPT_DIR/sync.sh" | grep -v '# greens-' >/dev/null; then
       if confirm_reset "Remove cron entry?"; then
-        crontab -l 2>/dev/null | grep -v "sync.sh" | crontab -
+        crontab -l 2>/dev/null | awk -v script="$SCRIPT_DIR/sync.sh" 'index($0,script)==0 || /# greens-/' | crontab -
         echo "  [ok] cron entry removed"
       fi
     fi
@@ -1153,6 +1204,7 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     exit 1
   fi
   # Reload config written by setup
+  # shellcheck source=/dev/null
   source "$CONFIG_FILE"
   echo ""
   echo "Starting first sync..."
@@ -1165,6 +1217,7 @@ fi
 
 # Directory containing your private work repos (will scan for git repos here)
 WORK_DIR="${WORK_DIR:-$HOME/work}"
+WORK_DIRS="${WORK_DIRS:-$WORK_DIR}"
 
 # Where to cache bare clones (avoids touching your working repos).
 # Default moved to ~/.contrib-mirror/cache in v1.8.2 — the old $SCRIPT_DIR
@@ -1178,7 +1231,7 @@ if [[ -z "${CACHE_DIR:-}" ]]; then
   fi
 fi
 
-# Your public mirror repo (create this on GitHub first)
+# Local clone of your GitHub mirror repository (private by default)
 MIRROR_DIR="${MIRROR_DIR:-$HOME/.contrib-mirror/mirror}"
 
 # Only sync commits after this date
@@ -1237,7 +1290,7 @@ if [[ -z "${LOG_DIR:-}" ]]; then
 fi
 
 # Success stamp file (prevents running multiple times per day)
-SUCCESS_STAMP_FILE="${SUCCESS_STAMP_FILE:-$LOG_DIR/last-success-date}"
+SUCCESS_STAMP_FILE="${SUCCESS_STAMP_FILE:-$(greens_stamp_path)}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Mirror identity — REQUIRED before anything else runs
@@ -1300,7 +1353,8 @@ for _e in ${_raw_emails[@]+"${_raw_emails[@]}"}; do
 done
 
 # Lock to prevent concurrent runs
-LOCK_DIR="/tmp/greens-sync.lock"
+umask 077
+LOCK_DIR="$(dirname "$CONFIG_FILE")/$(greens_scheduler_id).lock"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   existing_pid=""
   if [[ -f "$LOCK_DIR/pid" ]]; then
@@ -1318,6 +1372,7 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 
 echo "$$" > "$LOCK_DIR/pid"
+RUN_TMP="$(mktemp -d)"
 
 timestamp() {
   date "+%Y-%m-%d %H:%M:%S %z"
@@ -1458,8 +1513,9 @@ fetch_github_activity_with_messages() {
 tmp_pairs="$(mktemp)"
 tmp_sorted="$(mktemp)"
 cleanup() {
-  rm -f "$tmp_pairs" "$tmp_sorted" /tmp/greens_*.txt 2>/dev/null || true
+  rm -f "$tmp_pairs" "$tmp_sorted" 2>/dev/null || true
   rm -rf "$LOCK_DIR" 2>/dev/null || true
+  rm -rf "$RUN_TMP"
 }
 trap cleanup EXIT
 
@@ -1478,7 +1534,7 @@ if [[ -d "${MIRROR_DIR}/.git" ]]; then
   if git -C "$MIRROR_DIR" remote get-url origin >/dev/null 2>&1; then
     # ALL advertised refs (notes/custom included) — legacy history reachable
     # only through a stray ref must still trip the gate.
-    if ! git -C "$MIRROR_DIR" fetch --prune origin "+refs/heads/*:refs/remotes/origin/*" "+refs/*:refs/greens-remote-scan/*" --quiet 2>/dev/null; then
+    if ! greens_run git -C "$MIRROR_DIR" fetch --prune origin "+refs/heads/*:refs/remotes/origin/*" "+refs/*:refs/greens-remote-scan/*" --quiet 2>/dev/null; then
       # Local evidence of dashboard history + no proof of privacy refuses
       # immediately; a CLEAN local result is likewise not authoritative while
       # the remote is unreachable.
@@ -1519,6 +1575,18 @@ if [[ "${FORCE:-0}" != "1" ]] && [[ -f "$SUCCESS_STAMP_FILE" ]]; then
     log "Already synced today ($today). Set FORCE=1 to run anyway."
     exit 0
   fi
+fi
+
+if [[ "${SOURCE_COUNT:-0}" -gt 0 ]]; then
+  source "$SCRIPT_DIR/lib/gitlab.sh"
+  greens_mixed_sync
+  exit
+fi
+
+if [[ "${SOURCE_PROVIDER:-github}" == gitlab || "${SOURCE_PROVIDER:-github}" == git ]]; then
+  source "$SCRIPT_DIR/lib/gitlab.sh"
+  greens_provider_sync
+  exit
 fi
 
 log "Starting contribution mirror sync"
@@ -1686,13 +1754,13 @@ fi
 # Collect unique timestamps
 # ─────────────────────────────────────────────────────────────────────────────
 
-tmp_all_data="/tmp/greens_all.txt"
-tmp_origin_ts="/tmp/greens_origin_ts.txt"
-tmp_mirror_ts="/tmp/greens_mirror_ts.txt"
-tmp_missing_ts="/tmp/greens_missing_ts.txt"
-tmp_missing_data="/tmp/greens_missing_data.txt"
+tmp_all_data="$RUN_TMP/greens_all.txt"
+tmp_origin_ts="$RUN_TMP/greens_origin_ts.txt"
+tmp_mirror_ts="$RUN_TMP/greens_mirror_ts.txt"
+tmp_missing_ts="$RUN_TMP/greens_missing_ts.txt"
+tmp_missing_data="$RUN_TMP/greens_missing_data.txt"
 
-> "$tmp_all_data"
+: > "$tmp_all_data"
 
 log ""
 log "Step 3/5: Scanning commits across all branches (emails: $EMAILS)"
@@ -1757,7 +1825,7 @@ comm -23 "$tmp_origin_ts" "$tmp_mirror_ts" > "$tmp_missing_ts"
 
 # Build missing data file (with messages if enabled)
 if [[ "$COPY_MESSAGES" == "1" ]]; then
-  > "$tmp_missing_data"
+  : > "$tmp_missing_data"
   while IFS= read -r ts; do
     [[ -z "$ts" ]] && continue
     msg="$(grep "^${ts}	" "$tmp_all_data" 2>/dev/null | head -1 | cut -f2-)"

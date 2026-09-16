@@ -38,6 +38,8 @@ jobs:
 
             updated=$(echo "$formula" | sed "s|url \".*\"|url \"${{ steps.sha.outputs.url }}\"|" | sed "s|sha256 \".*\"|sha256 \"${{ steps.sha.outputs.sha256 }}\"|")
 
+            # Keep the entire runtime together in packaged installations.
+            updated=$(printf '%s\n' "$updated" | ruby -e 'text = STDIN.read; text.sub!(/^  def install\n.*?^  end/m, "  def install\n    libexec.install \"sync.sh\", \"setup.sh\", \"lib\"\n    (bin/\"greens\").write_env_script libexec/\"sync.sh\", {}\n  end") or abort "Cannot find formula install block"; print text')
             content=$(echo "$updated" | base64 -w 0)
             gh api repos/${repo}/contents/Formula/greens.rb \
               -X PUT \

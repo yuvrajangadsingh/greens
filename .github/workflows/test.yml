@@ -8,6 +8,25 @@ on:
     branches: [main]
 
 jobs:
+  provider-integration:
+    name: Mixed providers (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bash syntax
+        run: |
+          for script in sync.sh setup.sh install.sh lib/*.sh tests/*.sh; do
+            bash -n "$script"
+          done
+      - name: GitHub and GitLab integration
+        run: bash tests/providers.sh
+      - name: ShellCheck
+        if: runner.os == 'Linux'
+        run: shellcheck -S warning -x lib/*.sh tests/*.sh setup.sh sync.sh install.sh
+
   # Test scripts directly (no brew)
   test-scripts:
     runs-on: macos-latest
@@ -69,7 +88,7 @@ jobs:
           # timeout prevents infinite loop if inputs run out (prompt_mirror_url
           # spins on EOF). The || true keeps the step green regardless.
           printf '/tmp/test-work\nn\nn\ntest@test.com\ntest-org\n\npersonal@test.com\ntestuser\n\nn\n3\n3\nn\nn\n3\n' \
-            | MIRROR_DIR=/tmp/test-mirror timeout 60 bash setup.sh || true
+            | GREENS_SETUP_PROVIDER=github MIRROR_DIR=/tmp/test-mirror timeout 60 bash setup.sh || true
 
           # Verify config was created
           if [ -f "$HOME/.contrib-mirror/config" ]; then
@@ -814,7 +833,7 @@ jobs:
           # schtasks may fail due to runner permissions — that's fine,
           # we just need setup.sh to reach the scheduler code path without crashing.
           printf '/tmp/test-work\nn\nn\ntest@test.com\ntest-org\n\npersonal@test.com\ntestuser\n\nn\nn\nn\n3\n1\n9\n' \
-            | MIRROR_DIR=/tmp/test-mirror timeout 60 bash setup.sh 2>&1 || true
+            | GREENS_SETUP_PROVIDER=github MIRROR_DIR=/tmp/test-mirror timeout 60 bash setup.sh 2>&1 || true
 
           # Verify config was created
           if [ -f "$HOME/.contrib-mirror/config" ]; then

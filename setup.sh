@@ -20,8 +20,10 @@ while [[ -L "$SCRIPT_SOURCE" ]]; do
   esac
 done
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd)"
-CONFIG_DIR="$HOME/.contrib-mirror"
-CONFIG_FILE="$CONFIG_DIR/config"
+CONFIG_FILE="${CONTRIB_MIRROR_CONFIG:-$HOME/.contrib-mirror/config}"
+source "$SCRIPT_DIR/lib/common.sh"
+CONFIG_FILE="$(greens_config_path "$CONFIG_FILE")"
+CONFIG_DIR="$(dirname "$CONFIG_FILE")"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -34,7 +36,7 @@ prompt() {
   else
     printf "%s: " "$msg" >&2
   fi
-  read -r reply
+  read -r reply || { echo "Setup input ended." >&2; return 1; }
   echo "${reply:-$default}"
 }
 
@@ -607,18 +609,30 @@ echo ""
 echo "Private Work Contributions Mirror - Setup"
 echo "=========================================="
 echo ""
-echo "  This tool mirrors your private work commit activity to a public"
-echo "  GitHub repo, so your contribution graph reflects all your work."
-
-# Check prerequisites first
-check_prerequisites
+echo "  This tool mirrors your private work activity to a GitHub repository,"
+echo "  private by default, so your contribution graph reflects all your work."
 
 # Load existing config if present
 if [[ -f "$CONFIG_FILE" ]]; then
+  [[ -O "$CONFIG_FILE" ]] || { fail "Config is not owned by the current user."; exit 1; }
   info "Found existing config at $CONFIG_FILE"
+  # shellcheck source=/dev/null
   source "$CONFIG_FILE"
   echo ""
 fi
+
+# New interactive setups discover every source automatically. The environment
+# override is retained only for the repository's legacy GitHub setup tests and
+# for scripts that depend on the historical prompt sequence.
+if [[ -z "${GREENS_SETUP_PROVIDER:-}" ]]; then
+  source "$SCRIPT_DIR/lib/provider-setup.sh"
+  greens_sources_setup
+  exit
+fi
+SOURCE_PROVIDER="$GREENS_SETUP_PROVIDER"
+[[ "$SOURCE_PROVIDER" == github ]] || { fail "GREENS_SETUP_PROVIDER only supports the legacy github dialog."; exit 1; }
+
+check_prerequisites
 
 # ── Step 1: Work directory ──────────────────────────────────────────────────
 
@@ -1116,6 +1130,12 @@ if [[ "$IS_WINDOWS" == true ]]; then
   else
     sched_choice="3"
   fi
+elif [[ "$(uname -s)" == Linux ]]; then
+  echo "  1) systemd user timer (recommended; catches up missed runs at login)"
+  echo "  2) cron"
+  echo "  3) Manual"
+  sched_choice="$(prompt "Choice" "1")"
+  [[ "$sched_choice" != 1 ]] || sched_choice=systemd
 else
   echo "  1) launchd (macOS) - recommended"
   echo "     Runs missed syncs when your Mac wakes up. Survives reboots."
@@ -1128,7 +1148,7 @@ else
 fi
 
 sync_hour="0"
-if [[ "$sched_choice" == "1" || "$sched_choice" == "2" || "$sched_choice" == "win" ]]; then
+if [[ "$sched_choice" == "systemd" || "$sched_choice" == "1" || "$sched_choice" == "2" || "$sched_choice" == "win" ]]; then
   default_sync_hour="${SYNC_HOUR:-0}"
   sync_hour="$(prompt "What hour to run daily sync? (0-23, 0=midnight)" "$default_sync_hour")"
   if ! [[ "$sync_hour" =~ ^[0-9]+$ ]] || [[ "$sync_hour" -gt 23 ]]; then
@@ -1154,7 +1174,38 @@ if [[ "$IS_WINDOWS" == true ]]; then
   fi
 fi
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Write config (after scheduler so sync_hour is set)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Persist safely escaped defaults before activating any scheduler.
+WORK_DIR="$work_dir"; EMAILS="$emails"; REMOTE_PREFIX="$remote_prefix"
+MIRROR_DIR="$mirror_dir"; GITHUB_USERNAME="$github_username"
+PERSONAL_GH_USER="$personal_github_user"; MIRROR_EMAIL="$mirror_email"
+# Passed by variable name to greens_save_config.
+# shellcheck disable=SC2034
+MIRROR_NAME="${MIRROR_NAME:-greens}"; ACTIVITY_TYPES="$activity_types"
+# Passed by variable name to greens_save_config.
+# shellcheck disable=SC2034
+COPY_MESSAGES="$copy_messages" COPY_MESSAGES_ACK="$copy_messages_ack"
+SINCE="$since"; SYNC_HOUR="$sync_hour"
+greens_save_config "$CONFIG_FILE" SOURCE_PROVIDER WORK_DIR EMAILS REMOTE_PREFIX MIRROR_DIR \
+  GITHUB_USERNAME PERSONAL_GH_USER MIRROR_EMAIL MIRROR_NAME ACTIVITY_TYPES \
+  COPY_MESSAGES COPY_MESSAGES_ACK SINCE SYNC_HOUR
+if [[ -n "${DETECTED_TOKEN:-}" ]]; then
+  # shellcheck disable=SC2034
+  GITHUB_TOKEN="$DETECTED_TOKEN"
+  greens_save_config "$CONFIG_FILE" GITHUB_TOKEN
+fi
+if [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$(greens_scheduler_id).timer" ]]; then
+  greens_systemd_remove
+fi
+greens_remove_cron
 case "$sched_choice" in
+  systemd)
+    greens_install_systemd "$sync_path" "$sync_hour"
+    ;;
   win)
     if [[ -z "$GITBASH_PATH" ]]; then
       warn "Git Bash not found. Cannot create scheduled task."
@@ -1245,54 +1296,13 @@ PLIST
     ok "Daily sync scheduled via launchd (${sync_hour}:00)"
     ;;
   2)
-    cron_line="0 $sync_hour * * * /bin/bash $sync_path >> $CONFIG_DIR/logs/sync.log 2>&1"
-    mkdir -p "$CONFIG_DIR/logs"
-    (crontab -l 2>/dev/null | grep -v "$sync_path"; echo "$cron_line") | crontab -
+    greens_install_cron "$sync_path" "$sync_hour"
     ok "Daily sync scheduled via cron (${sync_hour}:00)"
     ;;
   *)
     info "Skipped. Run manually: greens"
     ;;
 esac
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Write config (after scheduler so sync_hour is set)
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Owner-only dir, atomic owner-only file — the config can hold a PAT.
-mkdir -p "$CONFIG_DIR"
-chmod 700 "$CONFIG_DIR" 2>/dev/null || true
-config_tmp="$CONFIG_FILE.tmp.$$"
-cat > "$config_tmp" << 'HEADER'
-# Private Work Contributions Mirror - Configuration
-# Env vars override these values (e.g. WORK_DIR="/other" ./sync.sh)
-HEADER
-cat >> "$config_tmp" << EOF
-# Generated by setup.sh on $(date '+%Y-%m-%d %H:%M:%S')
-
-WORK_DIR="\${WORK_DIR:-$work_dir}"
-EMAILS="\${EMAILS:-$emails}"
-REMOTE_PREFIX="\${REMOTE_PREFIX:-$remote_prefix}"
-MIRROR_DIR="\${MIRROR_DIR:-$mirror_dir}"
-GITHUB_USERNAME="\${GITHUB_USERNAME:-$github_username}"
-PERSONAL_GH_USER="\${PERSONAL_GH_USER:-${personal_github_user:-}}"
-MIRROR_EMAIL="\${MIRROR_EMAIL:-$mirror_email}"
-MIRROR_NAME="\${MIRROR_NAME:-greens}"
-ACTIVITY_TYPES="\${ACTIVITY_TYPES:-$activity_types}"
-COPY_MESSAGES="\${COPY_MESSAGES:-$copy_messages}"
-COPY_MESSAGES_ACK="\${COPY_MESSAGES_ACK:-$copy_messages_ack}"
-SINCE="\${SINCE:-$since}"
-SYNC_HOUR="\${SYNC_HOUR:-$sync_hour}"
-EOF
-
-# Add token if provided during auth setup
-if [[ -n "${DETECTED_TOKEN:-}" ]]; then
-  cat >> "$config_tmp" << EOF
-GITHUB_TOKEN="\${GITHUB_TOKEN:-$DETECTED_TOKEN}"
-EOF
-fi
-chmod 600 "$config_tmp" 2>/dev/null || true
-mv "$config_tmp" "$CONFIG_FILE"
 
 echo ""
 ok "Config saved to $CONFIG_FILE"

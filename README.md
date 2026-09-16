@@ -2,7 +2,7 @@
 
 Your work is real. Your contribution graph should show it.
 
-If you commit to private/org repos all day but your GitHub profile looks empty, greens fixes that. It mirrors commit timestamps (and optionally PRs, reviews, issues) to a public repo without exposing any code.
+If you commit to private/org repos all day but your GitHub profile looks empty, greens fixes that. It mirrors commit timestamps (and optionally PRs, reviews, issues) to a GitHub repository without exposing any code. The mirror is private by default.
 
 <p align="center">
   <img src="assets/demo.svg" alt="greens demo" width="600">
@@ -30,11 +30,35 @@ greens.cmd
 
 The setup wizard runs on first use and offers Windows Task Scheduler for daily automation.
 
+
 > **Note:** Unlike launchd on macOS, Windows Task Scheduler does not catch up on missed runs. If your machine was off or sleeping at the scheduled time, the sync is skipped until the next day. Logs are written to `~/.contrib-mirror/logs/sync.log`.
 
 > **WSL users:** Use the macOS/Linux instructions inside WSL. Don't run both WSL and Windows setups, they'll create duplicate commits.
 
 > **SSH keys:** If your SSH key has a passphrase, the scheduled task may fail silently. Use a passphrase-less key or configure ssh-agent to start at Windows login.
+
+### Linux
+
+Install Bash, Git, the GitHub CLI, and [jq](https://jqlang.org/download/).
+GitLab activity additionally requires [glab](https://docs.gitlab.com/cli/).
+Authenticate each service before setup:
+
+    gh auth login
+    glab auth login --hostname gitlab.example.com
+    git clone https://github.com/yuvrajangadsingh/greens.git
+    cd greens
+    bash install.sh --local
+
+The local installer links this checkout into ~/.local/bin; keep the checkout
+in place and add that directory to PATH. Setup detects and groups source
+providers automatically.
+Linux offers a **systemd user timer**, cron, or manual sync. The timer catches up
+after login when the machine missed its scheduled run; failed runs retry every
+15 minutes. It runs as your user without sudo.
+
+See [GitLab setup and activity semantics](docs/gitlab.md) for configuration,
+authentication, scheduling, and troubleshooting.
+
 
 <details>
 <summary>Manual install (any OS)</summary>
@@ -53,10 +77,11 @@ Then just run `greens` (macOS/Linux) or `greens.cmd` (Windows). Setup wizard run
 
 1. Scans your work repos (never modifies them)
 2. Extracts commit timestamps for your email(s) across all branches
-3. Optionally fetches PR/issue timestamps via GitHub API
-4. Creates empty commits with matching timestamps in a mirror repo, authored with a generic name and your personal email
-5. On a **verified-private** mirror, writes a dashboard README showing which repos your activity came from (visible only to people with access to that private repo)
-6. Pushes to your mirror repo (private by default)
+3. Detects GitHub, GitHub Enterprise, GitLab, and generic Git sources per organization
+4. Optionally fetches provider-specific collaboration activity for each configured source
+5. Creates empty commits with matching timestamps in a mirror repo, authored with a generic name and your personal email
+6. On a **verified-private** mirror, writes a dashboard README showing which repos your activity came from (visible only to people with access to that private repo)
+7. Pushes to your mirror repo (private by default)
 
 No source code, file paths, branch names, or messages ever leave your machine (messages only if you explicitly opt in to copying commit subjects). Work repo **names** appear in exactly one place — the dashboard README — and that is only written while the mirror is positively verified private via the GitHub CLI. Public or unverifiable mirrors get empty commits and nothing else.
 
@@ -121,6 +146,9 @@ Honest limits: the old README, identities, and messages are **removed from the r
 
 ## Tracks more than commits
 
+This table describes the GitHub provider. The GitLab provider is described below
+and in the [provider guide](docs/gitlab.md).
+
 | Activity | Tracked? |
 |:---------|:--------:|
 | Commits | Yes (always) |
@@ -128,14 +156,16 @@ Honest limits: the old README, identities, and messages are **removed from the r
 | Issues opened | Yes (with `gh` CLI) |
 | PR reviews | Opt-in only (GitHub exposes PR `updatedAt`, not review time — timestamps are unstable, so it's off by default) |
 
-Set `GITHUB_USERNAME` and authenticate `gh` CLI to enable API features.
+Setup saves `SOURCE_N_USERNAME` for each GitHub host/organization and requires a
+matching authenticated `gh` session. Legacy configurations can still use
+`GITHUB_USERNAME`.
 
 <details>
 <summary>How it works under the hood</summary>
 
 ```
 ┌─────────────────────┐     ┌─────────────────────┐     ┌─────────────────────┐
-│   Your Work Repos   │     │    Safe Cache       │     │   Public Mirror     │
+│   Your Work Repos   │     │    Safe Cache       │     │   GitHub Mirror     │
 │   (never touched)   │     │   (bare clones)     │     │   (empty commits)   │
 ├─────────────────────┤     ├─────────────────────┤     ├─────────────────────┤
 │  backend-api/       │────▶│  .cache/backend.git │     │                     │
@@ -161,20 +191,25 @@ Set `GITHUB_USERNAME` and authenticate `gh` CLI to enable API features.
 
 | Variable | Required | Default | Description |
 |:---------|:--------:|:--------|:------------|
-| `WORK_DIR` | Yes | `$HOME/work` | Directory containing your work repos |
-| `MIRROR_DIR` | Yes | `~/.contrib-mirror/mirror` | Your public mirror repo (local clone) |
-| `EMAILS` | Yes | - | Comma-separated git emails to match (exact match) |
-| `REMOTE_PREFIX` | Yes | - | Only sync repos with origins starting with this |
+| `WORK_DIRS` | Yes | prompted | Newline-separated directories containing work repositories |
+| `SOURCE_COUNT` | Yes | detected | Number of indexed host/organization source records |
+| `SOURCE_N_PROVIDER` | Yes | detected | `github`, `gitlab`, or `git` for source N |
+| `SOURCE_N_REMOTE_HOSTS` | Yes | detected | Comma-separated Git remote hosts and SSH aliases |
+| `SOURCE_N_API_HOST` | Yes | detected | GitHub/GitLab web and API hostname |
+| `SOURCE_N_ORGANIZATION` | Yes | detected | GitHub owner or top-level GitLab namespace |
+| `SOURCE_N_USERNAME` | API activity | authenticated user | Actor for API activity |
+| `SOURCE_N_EMAILS` | Commits | detected | Exact Git author emails for this source |
+| `SOURCE_N_SINCE` | Yes | current January 1 | History start for this source |
+| `SOURCE_N_ACTIVITY_TYPES` | Yes | provider default | Provider-specific activity selection |
+| `MIRROR_DIR` | Yes | `~/.contrib-mirror/mirror` | Local clone of your GitHub mirror |
 | `MIRROR_EMAIL` | Yes | - | Personal GitHub email for mirror commits (sync exits with code 2 if unset) |
 | `MIRROR_NAME` | No | `greens` | Author name for mirror commits (keep it generic) |
-| `SINCE` | No | `2024-01-01` | Only sync activity after this date |
-| `GITHUB_USERNAME` | No | - | Work GitHub username (enables API features) |
-| `GITHUB_TOKEN` | No | - | Work account PAT (alternative to multi-account gh CLI) |
-| `GITHUB_ORG` | No | (auto) | GitHub org name (auto-detected from REMOTE_PREFIX) |
-| `ACTIVITY_TYPES` | No | `commits,prs,issues` | What to track (`reviews` available but opt-in) |
 | `COPY_MESSAGES` | No | `0` | Set to `1` to copy raw git commit subjects (PR/issue/review items always get generic labels) |
 | `COPY_MESSAGES_ACK` | No | `0` | Written by setup when you type the `COPY_MESSAGES` confirmation; sync refuses `COPY_MESSAGES=1` without it |
 | `FORCE` | No | `0` | Set to `1` to bypass daily limit (does not bypass the privacy gate) |
+
+Legacy `WORK_DIR`, `SOURCE_PROVIDER`, `REMOTE_PREFIX`, `GITHUB_*`, `GITLAB_*`,
+and global `EMAILS`, `SINCE`, and `ACTIVITY_TYPES` values remain supported.
 
 </details>
 
@@ -192,6 +227,30 @@ If your work GitHub account differs from your personal one:
 Works with both SSH and HTTPS repo access.
 
 </details>
+
+## Automatic mixed-provider setup
+
+Setup scans every configured work directory and groups repositories by provider,
+API host, and organization. One mirror can contain GitHub, GitHub Enterprise,
+GitLab, self-managed GitLab, and generic Git sources. Each group has independent
+actor, author emails, history start, and activity types. See the
+[multi-provider configuration guide](docs/sources.md) and the
+[GitLab activity reference](docs/gitlab.md).
+
+Known public hosts are recognized immediately. For an unfamiliar host, setup
+asks for its web/API domain and performs bounded, TLS-verified GitHub and GitLab
+checks. It asks for manual classification only when those checks are inconclusive.
+SSH aliases and duplicate clones are retained for matching but deduplicated by
+canonical host and repository path.
+
+`SOURCE_PROVIDER` is intentionally absent from new configurations: provider is
+part of every indexed source record, and a global value would conflict with
+mixed sources. It remains supported as a legacy input.
+
+Setup saves personal defaults to ~/.contrib-mirror/config, an owner-only shell
+configuration file outside the checkout. Both setup and sync honor
+CONTRIB_MIRROR_CONFIG for an alternate location. Environment variables override
+saved values. No tracked .env file is needed.
 
 ## FAQ
 
@@ -232,7 +291,8 @@ It's private by default (since v1.8.2). Enable "Include private contributions on
 <details>
 <summary>Can I backfill old contributions?</summary>
 
-Yes. Set `SINCE` to an earlier date and run `FORCE=1 greens`.
+Yes. Rerun setup, change `SOURCE_N_SINCE` for the relevant organization, then
+run `FORCE=1 greens`.
 
 </details>
 
@@ -241,11 +301,12 @@ Yes. Set `SINCE` to an earlier date and run `FORCE=1 greens`.
 
 | Problem | Solution |
 |:--------|:---------|
-| "No matching repos found" | Check `WORK_DIR` and `REMOTE_PREFIX` match your repos |
+| "No matching repos found" | Run setup and check `WORK_DIRS`, remote aliases, and source organizations |
 | "clone failed" | Check SSH access: `ssh -T git@github.com` |
-| "gh CLI not authenticated" | Run `gh auth login` |
+| "gh CLI not authenticated" | Run `gh auth login --hostname HOST` for every configured GitHub host |
+| "glab actor mismatch" | Run `glab auth login --hostname HOST` with the configured GitLab actor |
 | Empty contribution graph | Wait 24h for GitHub to update, or check mirror repo has commits |
-| Wrong timestamps | Check `EMAILS` matches your git config |
+| Wrong timestamps | Check `SOURCE_N_EMAILS` (or legacy `EMAILS`) against commit author emails |
 | Mirror has wrong commits | Run `greens --resync` to wipe and re-sync |
 | "not verified PRIVATE" refusal (exit 3) | Make the mirror private + `gh auth login`, or scrub with `greens --privacy-migrate` |
 | Dashboard README missing | The mirror isn't verified private — check `gh auth status` and the repo's visibility |
