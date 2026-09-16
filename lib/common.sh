@@ -216,6 +216,90 @@ greens_scheduler_id() {
   printf 'greens-%s' "${hash:0:12}"
 }
 
+greens_scheduler_platform() {
+  local system
+  system="$(uname -s)"
+  if [[ "$system" == MINGW* || "$system" == MSYS* || -n "${WINDIR:-}" ]]; then
+    printf 'windows\n'
+  elif [[ "$system" == Darwin ]]; then
+    printf 'macos\n'
+  elif [[ "$system" == Linux ]]; then
+    printf 'linux\n'
+  else
+    printf 'other\n'
+  fi
+}
+
+greens_launchd_label() {
+  printf 'com.greens.%s\n' "$(greens_scheduler_id)"
+}
+
+greens_remove_launchd() {
+  local label plist
+  label="$(greens_launchd_label)"
+  plist="$HOME/Library/LaunchAgents/$label.plist"
+  [[ -e "$plist" ]] || return 0
+  command -v launchctl >/dev/null && launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+  rm -f "$plist"
+}
+
+greens_install_launchd() {
+  local script="$1" hour="$2" label plist log_dir
+  command -v launchctl >/dev/null || { echo "launchctl is unavailable; choose cron or manual." >&2; return 1; }
+  label="$(greens_launchd_label)"
+  plist="$HOME/Library/LaunchAgents/$label.plist"
+  log_dir="${LOG_DIR:-$(dirname "$CONFIG_FILE")/logs}"
+  mkdir -p "$(dirname "$plist")" "$log_dir"
+  cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>$label</string>
+<key>ProgramArguments</key><array><string>/bin/bash</string><string>$script</string></array>
+<key>StartCalendarInterval</key><dict><key>Hour</key><integer>$hour</integer><key>Minute</key><integer>0</integer></dict>
+<key>StandardOutPath</key><string>$log_dir/sync.out.log</string>
+<key>StandardErrorPath</key><string>$log_dir/sync.err.log</string>
+<key>EnvironmentVariables</key><dict><key>CONTRIB_MIRROR_CONFIG</key><string>$CONFIG_FILE</string><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+</dict></plist>
+EOF
+  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$plist"
+}
+
+greens_remove_windows_task() {
+  command -v schtasks.exe >/dev/null || return 0
+  MSYS_NO_PATHCONV=1 schtasks.exe /Delete /TN greens-daily-sync /F 2>/dev/null || true
+}
+
+greens_install_windows_task() {
+  local script="$1" hour="$2" gitbash="" path win_bash mixed_sync log_dir mixed_log task_time win_user
+  command -v schtasks.exe >/dev/null || { echo "Windows Task Scheduler is unavailable; choose manual." >&2; return 1; }
+  for path in "/c/Program Files/Git/bin/bash.exe" "/c/Program Files (x86)/Git/bin/bash.exe" "${LOCALAPPDATA:-}/Programs/Git/bin/bash.exe"; do
+    if [[ -f "$path" ]]; then gitbash="$path"; break; fi
+  done
+  gitbash="${gitbash:-$(command -v bash 2>/dev/null || true)}"
+  [[ -n "$gitbash" ]] || { echo "Git Bash is unavailable; choose manual." >&2; return 1; }
+  win_bash="$(cygpath -w "$gitbash" 2>/dev/null || printf '%s' "$gitbash")"
+  mixed_sync="$(cygpath -m "$script" 2>/dev/null || printf '%s' "$script" | sed 's|\\|/|g')"
+  log_dir="${LOG_DIR:-$(dirname "$CONFIG_FILE")/logs}"
+  mkdir -p "$log_dir"
+  mixed_log="$(cygpath -m "$log_dir/sync.log" 2>/dev/null || printf '%s' "$log_dir/sync.log")"
+  task_time="$(printf '%02d:00' "$hour")"
+  win_user="$(cmd.exe /C "echo %USERNAME%" 2>/dev/null | tr -d '\r')"
+  greens_remove_windows_task
+  MSYS_NO_PATHCONV=1 schtasks.exe /Create /TN greens-daily-sync \
+    /TR "\"$win_bash\" --login -c \"CONTRIB_MIRROR_CONFIG='$CONFIG_FILE' bash '$mixed_sync' >> '$mixed_log' 2>&1\"" \
+    /SC DAILY /ST "$task_time" /RU "$win_user" /RL LIMITED /F
+}
+
+greens_remove_all_schedulers() {
+  local timer="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$(greens_scheduler_id).timer"
+  [[ ! -f "$timer" ]] || greens_systemd_remove
+  greens_remove_cron
+  greens_remove_launchd
+  greens_remove_windows_task
+}
+
 greens_systemd_remove() {
   local id dir
   id="$(greens_scheduler_id)"

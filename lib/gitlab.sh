@@ -2,12 +2,15 @@
 # GitLab and Git-only source providers. Sourced by sync.sh after its privacy gate.
 
 gitlab_api() {
-  local endpoint="$1" output="$2" attempt
+  local endpoint="$1" output="$2" attempt parsed="$2.parsed"
   for attempt in 1 2 3; do
     if greens_run glab api --hostname "$GITLAB_HOST" "$endpoint" --paginate > "$output.raw"; then
-      jq -s 'if all(.[]; type == "array") then add else .[0] end' "$output.raw" > "$output"
-      rm -f "$output.raw"
-      return 0
+      if jq -s 'if all(.[]; type == "array") then add else .[0] end' "$output.raw" > "$parsed"; then
+        mv "$parsed" "$output"
+        rm -f "$output.raw"
+        return 0
+      fi
+      rm -f "$parsed"
     fi
     [[ "$attempt" == 3 ]] || sleep "$((attempt * 2))"
   done
@@ -84,11 +87,16 @@ greens_mixed_discover_sources() {
 }
 
 github_api_records() {
-  local kind="$1" output="$2" query date_field label
+  local kind="$1" output="$2" owner_type="$3" query date_field label qualifier
+  case "$owner_type" in
+    User) qualifier="user:$SOURCE_ORGANIZATION" ;;
+    Organization) qualifier="org:$SOURCE_ORGANIZATION" ;;
+    *) log "ERROR: unsupported GitHub owner type for $SOURCE_API_HOST/$SOURCE_ORGANIZATION: $owner_type"; return 1 ;;
+  esac
   case "$kind" in
-    prs) query="type:pr author:$SOURCE_USERNAME org:$SOURCE_ORGANIZATION created:>=$since_date"; date_field=created_at; label="prs" ;;
-    issues) query="type:issue author:$SOURCE_USERNAME org:$SOURCE_ORGANIZATION created:>=$since_date"; date_field=created_at; label="issues" ;;
-    reviews) query="type:pr reviewed-by:$SOURCE_USERNAME org:$SOURCE_ORGANIZATION updated:>=$since_date"; date_field=updated_at; label="reviews" ;;
+    prs) query="type:pr author:$SOURCE_USERNAME $qualifier created:>=$since_date"; date_field=created_at; label="prs" ;;
+    issues) query="type:issue author:$SOURCE_USERNAME $qualifier created:>=$since_date"; date_field=created_at; label="issues" ;;
+    reviews) query="type:pr reviewed-by:$SOURCE_USERNAME $qualifier updated:>=$since_date"; date_field=updated_at; label="reviews" ;;
     *) return 1 ;;
   esac
   if ! greens_gh_api_as "$SOURCE_API_HOST" "$SOURCE_USERNAME" --paginate -X GET search/issues \
@@ -256,7 +264,7 @@ greens_mixed_sync() {
   local sources checkouts source_index identity url key bare source_file state_scope state_dir checkpoint_file repodir
   local SOURCE_PROVIDER SOURCE_API_HOST SOURCE_ORGANIZATION SOURCE_USERNAME EMAILS SINCE ACTIVITY_TYPES ACCESS_MODE
   local GITLAB_HOST GITLAB_USERNAME project_path project_id project_features gitlab_user_id api_enabled
-  local since_epoch since_date run_epoch lower updated old_types checkpoint kind objects iid object_file pid failed count event_file
+  local since_epoch since_date run_epoch lower updated old_types checkpoint kind objects iid object_file pid failed count event_file owner_type
   local -a workers
   umask 077
   command -v jq >/dev/null || { log "ERROR: install jq"; return 1; }
@@ -301,7 +309,8 @@ greens_mixed_sync() {
       command -v gh >/dev/null || { log "ERROR: install gh"; return 1; }
       gh auth status --active --hostname "$SOURCE_API_HOST" >/dev/null 2>&1 || { log "ERROR: gh is not authenticated for $SOURCE_API_HOST"; return 1; }
       [[ "$(greens_gh_api_as "$SOURCE_API_HOST" "$SOURCE_USERNAME" user --jq .login)" == "$SOURCE_USERNAME" ]] || { log "ERROR: gh actor mismatch for $SOURCE_API_HOST"; return 1; }
-      for kind in prs issues reviews; do case ",$ACTIVITY_TYPES," in *,$kind,*) github_api_records "$kind" "$RUN_TMP/$key-$kind" >> "$source_file" ;; esac; done
+      owner_type="$(greens_gh_api_as "$SOURCE_API_HOST" "$SOURCE_USERNAME" "users/$SOURCE_ORGANIZATION" --jq .type)" || return 1
+      for kind in prs issues reviews; do case ",$ACTIVITY_TYPES," in *,$kind,*) github_api_records "$kind" "$RUN_TMP/$key-$kind" "$owner_type" >> "$source_file" ;; esac; done
       : > "$RUN_TMP/github-api-$source_index.done"
     fi
     if [[ "$SOURCE_PROVIDER" == gitlab && "$ACTIVITY_TYPES" != commits ]]; then
@@ -332,7 +341,11 @@ greens_mixed_sync() {
       done
       printf '%s %s:%s:%s\n' "$run_epoch" "$ACTIVITY_TYPES" "$since_epoch" "$project_features" > "$RUN_TMP/$key.checkpoint"
     else printf '%s %s:%s:true,true\n' "$run_epoch" "$ACTIVITY_TYPES" "$since_epoch" > "$RUN_TMP/$key.checkpoint"; fi
-    jq -sc 'unique_by(.key)[]' "$source_file" > "$RUN_TMP/$key.jsonl"; cat "$RUN_TMP/$key.jsonl" >> "$RUN_TMP/collected"
+    jq -sc --arg types "$ACTIVITY_TYPES" --argjson since "$since_epoch" --argjson until "$run_epoch" '
+      ($types|split(",")) as $types |
+      unique_by(.key) | map(select(.epoch >= $since and .epoch <= $until and (.kind as $kind | $types | index($kind))))[]' \
+      "$source_file" > "$RUN_TMP/$key.jsonl"
+    cat "$RUN_TMP/$key.jsonl" >> "$RUN_TMP/collected"
     printf '%s\t%s\n%s\t%s\n' "$RUN_TMP/$key.jsonl" "$state_dir/$key.jsonl" "$RUN_TMP/$key.checkpoint" "$state_dir/$key.checkpoint" >> "$RUN_TMP/publish"
   done < "$sources"
   jq -sc 'unique_by(.key)|sort_by(.epoch,.key)[]' "$RUN_TMP/collected" > "$RUN_TMP/records"

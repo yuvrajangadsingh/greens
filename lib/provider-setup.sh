@@ -151,6 +151,7 @@ greens_sources_setup() {
   local scan hosts class groups gitpath repodir url identity host rest organization
   local record provider api domain detected choice ssh_domain existing_source_count existing_sources
   local aliases username emails since types access_mode defaults meta i key owner branch default_email personal_default retry
+  local scheduler_prompt scheduler_default scheduler_values scheduler_error
   local -a save_keys
   for key in git jq gh; do command -v "$key" >/dev/null || { fail "Install $key, then rerun setup."; return 1; }; done
   existing_source_count="${SOURCE_COUNT:-0}"
@@ -305,6 +306,16 @@ greens_sources_setup() {
       emails="${EMAILS:-}"; since="${SINCE:-}"; types="${ACTIVITY_TYPES:-}"
       if [[ "$provider" == github ]]; then username="${GITHUB_USERNAME:-}"; elif [[ "$provider" == gitlab ]]; then username="${GITLAB_USERNAME:-}"; fi
     fi
+    if [[ "$_count" == 0 && -n "$record" ]]; then
+      SOURCE_COUNT="$((SOURCE_COUNT + 1))"
+      printf -v "SOURCE_${SOURCE_COUNT}_PROVIDER" '%s' "$provider"; printf -v "SOURCE_${SOURCE_COUNT}_REMOTE_HOSTS" '%s' "$aliases"
+      printf -v "SOURCE_${SOURCE_COUNT}_API_HOST" '%s' "$api"; printf -v "SOURCE_${SOURCE_COUNT}_ORGANIZATION" '%s' "$organization"
+      printf -v "SOURCE_${SOURCE_COUNT}_USERNAME" '%s' "$username"; printf -v "SOURCE_${SOURCE_COUNT}_EMAILS" '%s' "$emails"
+      printf -v "SOURCE_${SOURCE_COUNT}_SINCE" '%s' "$since"; printf -v "SOURCE_${SOURCE_COUNT}_ACTIVITY_TYPES" '%s' "$types"
+      printf -v "SOURCE_${SOURCE_COUNT}_ACCESS_MODE" '%s' "$access_mode"
+      info "Retained unavailable source $provider $api/$organization unchanged."
+      continue
+    fi
     while true; do
       emails="$(prompt "Git author emails for $api/$organization (comma-separated, or - to skip all $_count repositories)" "${emails:-$(detect_emails)}")" || return 1
       emails="$(printf '%s' "$emails" | tr -d '[:space:]')"
@@ -375,7 +386,7 @@ greens_sources_setup() {
   MIRROR_EMAIL="$(greens_required 'Personal GitHub email' "${MIRROR_EMAIL:-$default_email}")"; MIRROR_NAME="$(greens_required 'Mirror author name' "${MIRROR_NAME:-greens}")"
   MIRROR_URL="$(greens_required 'GitHub mirror URL' "${MIRROR_URL:-https://github.com/$PERSONAL_GH_USER/work-contributions-mirror}")"
   owner="$(greens_remote_identity "$MIRROR_URL")" || { fail "Invalid mirror URL."; return 1; }; [[ "$owner" == github.com/"$PERSONAL_GH_USER"/* ]] || { fail "Choose a github.com repository owned by $PERSONAL_GH_USER."; return 1; }; owner="${owner#github.com/}"
-  if ! meta="$(gh api "repos/$owner" 2>/dev/null)"; then confirm "Create private GitHub repository $owner?" || return 1; gh repo create "$owner" --private --description "Timestamp-only work contribution mirror"; meta="$(gh api "repos/$owner")"; fi
+  if ! meta="$(gh api --hostname github.com "repos/$owner" 2>/dev/null)"; then confirm "Create private GitHub repository $owner?" || return 1; GH_HOST=github.com gh repo create "$owner" --private --description "Timestamp-only work contribution mirror"; meta="$(gh api --hostname github.com "repos/$owner")"; fi
   if [[ "$(jq -r .private <<< "$meta")" != true ]]; then warn "This public mirror exposes exact work timestamps."; [[ "$(prompt 'Type PUBLIC to use this public mirror' '')" == PUBLIC ]] || return 1; fi
   branch="$(jq -er .default_branch <<< "$meta")"; MIRROR_DIR="$(greens_required 'Local mirror directory' "${MIRROR_DIR:-$CONFIG_DIR/mirror}")"; MIRROR_DIR="${MIRROR_DIR/#\~/$HOME}"
   mkdir -p "$(dirname "$MIRROR_DIR")"; MIRROR_DIR="$(cd "$(dirname "$MIRROR_DIR")" && pwd)/$(basename "$MIRROR_DIR")"
@@ -385,7 +396,14 @@ greens_sources_setup() {
   # Passed by variable name to greens_replace_config.
   # shellcheck disable=SC2034
   COPY_MESSAGES=0 COPY_MESSAGES_ACK=0
-  SCHEDULER="$(greens_required 'Scheduler (systemd, cron, or manual)' "${SCHEDULER:-$([[ "$(uname -s)" == Linux ]] && echo systemd || echo manual)}")"; case "$SCHEDULER" in systemd|cron|manual) ;; *) fail "Choose systemd, cron, or manual."; return 1 ;; esac
+  case "$(greens_scheduler_platform)" in
+    windows) scheduler_prompt='Scheduler (Windows Task Scheduler or manual)'; scheduler_default=win; scheduler_values='win|manual'; scheduler_error='Choose win or manual.' ;;
+    macos) scheduler_prompt='Scheduler (launchd, cron, or manual)'; scheduler_default=launchd; scheduler_values='launchd|cron|manual'; scheduler_error='Choose launchd, cron, or manual.' ;;
+    linux) scheduler_prompt='Scheduler (systemd, cron, or manual)'; scheduler_default=systemd; scheduler_values='systemd|cron|manual'; scheduler_error='Choose systemd, cron, or manual.' ;;
+    *) scheduler_prompt='Scheduler (cron or manual)'; scheduler_default=manual; scheduler_values='cron|manual'; scheduler_error='Choose cron or manual.' ;;
+  esac
+  SCHEDULER="$(greens_required "$scheduler_prompt" "${SCHEDULER:-$scheduler_default}")"
+  [[ "$SCHEDULER" =~ ^($scheduler_values)$ ]] || { fail "$scheduler_error"; return 1; }
   SYNC_HOUR="$(greens_required 'Daily hour (0-23, local timezone)' "${SYNC_HOUR:-0}")"; [[ "$SYNC_HOUR" =~ ^[0-9]{1,2}$ ]] && [[ "$((10#$SYNC_HOUR))" -le 23 ]] || { fail "Invalid hour."; return 1; }; SYNC_HOUR="$((10#$SYNC_HOUR))"
   # Passed by variable name to greens_replace_config.
   # shellcheck disable=SC2034
@@ -397,8 +415,13 @@ greens_sources_setup() {
   greens_replace_config "$CONFIG_FILE" '^(WORK_DIRS?|SCAN_MODE|SOURCE_PROVIDER|SOURCE_COUNT|SOURCE_[0-9]+_.*|REMOTE_PREFIX|GITHUB_(ORG|USERNAME|TOKEN)|GITLAB_(HOST|REMOTE_HOST|USERNAME)|EMAILS|SINCE|ACTIVITY_TYPES|PERSONAL_GH_USER|MIRROR_(EMAIL|NAME|URL|DIR)|COPY_MESSAGES(_ACK)?|SCHEDULER|SYNC_HOUR|GREENS_LEGACY_TIMESTAMPS)$' "${save_keys[@]}"
   ok "Saved configuration to $CONFIG_FILE"
   if confirm "Run the initial sync now?"; then FORCE=1 CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$SCRIPT_DIR/sync.sh"; fi
-  if [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$(greens_scheduler_id).timer" ]]; then greens_systemd_remove; fi
-  greens_remove_cron; case "$SCHEDULER" in systemd) greens_install_systemd "$SCRIPT_DIR/sync.sh" "$SYNC_HOUR" ;; cron) greens_install_cron "$SCRIPT_DIR/sync.sh" "$SYNC_HOUR" ;; esac
+  greens_remove_all_schedulers
+  case "$SCHEDULER" in
+    systemd) greens_install_systemd "$SCRIPT_DIR/sync.sh" "$SYNC_HOUR" ;;
+    cron) greens_install_cron "$SCRIPT_DIR/sync.sh" "$SYNC_HOUR" ;;
+    launchd) greens_install_launchd "$SCRIPT_DIR/sync.sh" "$SYNC_HOUR" ;;
+    win) greens_install_windows_task "$SCRIPT_DIR/sync.sh" "$SYNC_HOUR" ;;
+  esac
   ok "Setup complete. Run greens --status to inspect configuration and scheduling."
 }
 
