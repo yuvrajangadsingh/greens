@@ -1174,7 +1174,7 @@ if [[ "$sched_choice" == "systemd" || "$sched_choice" == "1" || "$sched_choice" 
   fi
 fi
 
-sync_path="$SCRIPT_DIR/sync.sh"
+sync_path="$(greens_sync_path "$SCRIPT_DIR/sync.sh")"
 
 # Find Git Bash for Windows Task Scheduler
 GITBASH_PATH=""

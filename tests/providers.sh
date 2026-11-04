@@ -149,17 +149,19 @@ echo "PASS: config, discovery, API pagination/filtering, stable IDs, privacy, an
 cat > "$TEST_ROOT/bin/gh" <<'MOCK'
 #!/bin/bash
 case "$*" in
-  'auth status --active --hostname github.example') exit 0 ;;
-  'auth switch --hostname github.example --user '*) printf '%s\n' "${*: -1}" > "$TEST_ROOT/github-example-active" ;;
-  'auth switch --hostname github.com --user '*)
-    echo "$*" >> "$TEST_ROOT/destination-switches"
-    [[ ! -f "$TEST_ROOT/pat-only" && ! -f "$TEST_ROOT/destination-switch-fails" ]] || exit 1
-    printf '%s\n' "${*: -1}" > "$TEST_ROOT/destination-active" ;;
-  'api --hostname github.example user') login="$(cat "$TEST_ROOT/github-example-active" 2>/dev/null || echo fixture-gh)"; printf '{"login":"%s"}\n' "$login" ;;
-  'api --hostname github.example user --jq .login') cat "$TEST_ROOT/github-example-active" 2>/dev/null || echo fixture-gh ;;
+  'auth switch '*) echo "$*" >> "$TEST_ROOT/forbidden-switches"; exit 99 ;;
+  'auth token --hostname github.example --user '*) printf 'fixture-token-%s\n' "${*: -1}" ;;
+  'auth token --hostname github.example') printf 'fixture-token-%s\n' "$(cat "$TEST_ROOT/github-example-active" 2>/dev/null || echo fixture-gh)" ;;
+  'auth token --hostname github.com --user '*)
+    echo "$*" >> "$TEST_ROOT/destination-token-requests"
+    [[ ! -f "$TEST_ROOT/pat-only" && ! -f "$TEST_ROOT/destination-token-fails" ]] || exit 1
+    printf 'fixture-token-%s\n' "${*: -1}" ;;
+  'auth token --hostname github.com') [[ ! -f "$TEST_ROOT/expired-destination" ]] || exit 1; echo fixture-token-fixture ;;
+  'api --hostname github.example user') printf '{"login":"%s"}\n' "${GH_TOKEN#fixture-token-}" ;;
+  'api --hostname github.example user --jq .login') printf '%s\n' "${GH_TOKEN#fixture-token-}" ;;
   'api --hostname github.example / --jq .current_user_url') echo 'https://github.example/api/v3/user' ;;
   api\ --hostname\ github.example\ --paginate\ -X\ GET\ search/issues*)
-    [[ "$(cat "$TEST_ROOT/github-example-active" 2>/dev/null || echo fixture-gh)" == fixture-gh ]] || exit 1
+    [[ "${GH_TOKEN:-}" == fixture-token-fixture-gh ]] || exit 1
     if [[ "$*" == *'type:issue'* ]]; then
       echo '{"items":[{"id":502,"created_at":"2021-02-03T14:00:00Z","repository_url":"https://github.example/api/v3/repos/acme/app"}]}'
     else
@@ -167,9 +169,9 @@ case "$*" in
     fi
     ;;
   'api user --jq .login'|'api --hostname github.com user --jq .login')
-    [[ ! -f "$TEST_ROOT/expired-destination" || -f "$TEST_ROOT/destination-active" ]] || exit 1
+    [[ ! -f "$TEST_ROOT/expired-destination" || "${GH_TOKEN:-}" == fixture-token-fixture ]] || exit 1
     if [[ -f "$TEST_ROOT/destination-wrong-login" ]]; then echo wrong-user
-    else cat "$TEST_ROOT/destination-active" 2>/dev/null || echo fixture; fi ;;
+    else echo fixture; fi ;;
   'api user/emails --jq '*|'api --hostname github.com user/emails --jq '*) echo mirror@example.test ;;
   'api --hostname github.com repos/fixture/mirror') echo '{"private":true,"default_branch":"main"}' ;;
   'api --hostname github.example users/'*' --jq .type') echo Organization ;;
@@ -575,7 +577,7 @@ rm -f "$TEST_ROOT/destination-switches"
   printf 'y\n'
   printf '\n%.0s' {1..14}
   printf 'n\n'
-} | GH_TOKEN=fixture-token GH_HOST=github.example CONTRIB_MIRROR_CONFIG="$masked_config" bash "$ROOT/setup.sh" > "$TEST_ROOT/masked-output" 2>&1 || {
+} | GH_TOKEN=fixture-token-fixture GH_HOST=github.example CONTRIB_MIRROR_CONFIG="$masked_config" bash "$ROOT/setup.sh" > "$TEST_ROOT/masked-output" 2>&1 || {
   cat "$TEST_ROOT/masked-output"; fail "PAT-only setup with saved credentials";
 }
 rm "$TEST_ROOT/pat-only"
@@ -697,17 +699,17 @@ rerun_setup_defaults() {
 # account. Failed switches and wrong actors still leave the config untouched.
 expired_config="$TEST_ROOT/expired-account-config"
 cp "$TEST_ROOT/ssh-only-config" "$expired_config"
-rm -f "$TEST_ROOT/destination-active" "$TEST_ROOT/destination-switches"
+rm -f "$TEST_ROOT/destination-active" "$TEST_ROOT/destination-switches" "$TEST_ROOT/destination-token-requests"
 touch "$TEST_ROOT/expired-destination"
 rerun_setup_defaults "$expired_config" "$TEST_ROOT/expired-account-output" || {
   cat "$TEST_ROOT/expired-account-output"; fail "expired active account blocked saved personal account";
 }
-grep -qx 'auth switch --hostname github.com --user fixture' "$TEST_ROOT/destination-switches" || fail "setup did not select saved personal account"
+grep -qx 'auth token --hostname github.com --user fixture' "$TEST_ROOT/destination-token-requests" || fail "setup did not obtain saved personal credentials"
 expired_hash="$(git hash-object "$expired_config")"
-for failure in destination-switch-fails destination-wrong-login; do
+for failure in destination-token-fails destination-wrong-login; do
   rm -f "$TEST_ROOT/destination-active"
   touch "$TEST_ROOT/$failure"
-  if rerun_setup_defaults "$expired_config" "$TEST_ROOT/$failure-output"; then fail "setup accepted $failure"; fi
+  if GH_TOKEN='' GITHUB_TOKEN='' rerun_setup_defaults "$expired_config" "$TEST_ROOT/$failure-output"; then fail "setup accepted $failure"; fi
   [[ "$(git hash-object "$expired_config")" == "$expired_hash" ]] || fail "failed destination authentication changed config"
   rm "$TEST_ROOT/$failure"
 done
@@ -744,6 +746,7 @@ default_config="$HOME/.contrib-mirror/config"
 cp "$TEST_ROOT/ssh-only-config" "$default_config"
 legacy_cron="0 0 * * * /bin/bash $ROOT/sync.sh >> $HOME/.contrib-mirror/logs/sync.log 2>&1"
 printf '%s\n' "$legacy_cron" \
+  "0 2 * * * /bin/bash $TEST_ROOT/Cellar/greens/1.8.2/libexec/sync.sh >> $HOME/.contrib-mirror/logs/sync.log 2>&1" \
   "0 3 * * * /bin/bash $ROOT/other-sync.sh >> $HOME/other.log 2>&1" \
   "0 4 * * * CONTRIB_MIRROR_CONFIG=$expired_config /bin/bash $ROOT/sync.sh >> $HOME/other.log 2>&1 # greens-other" \
   "0 5 * * * /bin/bash $ROOT/sync.sh --status >> $HOME/status.log 2>&1" > "$TEST_ROOT/crontab"
@@ -759,6 +762,7 @@ SCHEDULER=cron SYNC_HOUR=9 rerun_setup_defaults "$default_config" "$TEST_ROOT/le
   cat "$TEST_ROOT/legacy-scheduler-output"; fail "legacy scheduler replacement";
 }
 [[ ! -e "$HOME/Library/LaunchAgents/com.greens.plist" ]] || fail "setup retained legacy launchd agent"
+if grep -q "Cellar/greens/1.8.2" "$TEST_ROOT/crontab"; then fail "setup retained versioned legacy cron path"; fi
 if grep -qxF "$legacy_cron" "$TEST_ROOT/crontab"; then fail "setup retained legacy cron hour"; fi
 [[ "$(wc -l < "$TEST_ROOT/crontab" | tr -d ' ')" == 4 ]] || fail "scheduler replacement removed unrelated cron entries"
 grep -q '^0 9 .*# greens-' "$TEST_ROOT/crontab" || fail "replacement cron schedule did not use new hour"
@@ -770,3 +774,85 @@ SCHEDULER=manual rerun_setup_defaults "$default_config" "$TEST_ROOT/manual-sched
 [[ "$(wc -l < "$TEST_ROOT/crontab" | tr -d ' ')" == 3 ]] || fail "manual schedule retained old or scoped cron jobs"
 if grep -qxF "$legacy_cron" "$TEST_ROOT/crontab"; then fail "manual setup retained legacy cron"; fi
 echo "PASS: legacy scheduler migration, custom-config isolation, and manual cleanup"
+
+# Existing personal SSH aliases are identities on github.com, while Git keeps
+# the original alias URL (and therefore the user's SSH key selection).
+cat > "$TEST_ROOT/bin/ssh" <<'MOCK'
+#!/bin/bash
+case "$*" in
+  '-G -- github-personal') echo 'hostname github.com' ;;
+  '-G -- not-github') echo 'hostname other.example' ;;
+  *) exit 1 ;;
+esac
+MOCK
+chmod +x "$TEST_ROOT/bin/ssh"
+destination_alias_config="$TEST_ROOT/destination-alias-config"
+cp "$TEST_ROOT/ssh-only-config" "$destination_alias_config"
+cp -R "$TEST_ROOT/ssh-only-mirror" "$TEST_ROOT/destination-alias-mirror"
+destination_alias=git@github-personal:fixture/mirror.git
+git -C "$TEST_ROOT/destination-alias-mirror" remote set-url origin "$destination_alias"
+git config --global url."$TEST_ROOT/remotes/mirror.git".insteadOf "$destination_alias"
+bash -c 'source "$1/lib/common.sh"; source "$2"; MIRROR_URL="$3"; MIRROR_DIR="$4"; greens_save_config "$2" MIRROR_URL MIRROR_DIR' bash "$ROOT" "$destination_alias_config" "$destination_alias" "$TEST_ROOT/destination-alias-mirror"
+rerun_setup_defaults "$destination_alias_config" "$TEST_ROOT/destination-alias-output" || {
+  cat "$TEST_ROOT/destination-alias-output"; fail "SSH alias destination migration";
+}
+[[ "$(git -C "$TEST_ROOT/destination-alias-mirror" config remote.origin.url)" == "$destination_alias" ]] || fail "setup rewrote SSH transport alias"
+bash -c 'source "$1"; [[ "$MIRROR_URL" == "$2" ]]' bash "$destination_alias_config" "$destination_alias" || fail "setup lost saved alias URL"
+FORCE=1 CONTRIB_MIRROR_CONFIG="$destination_alias_config" bash "$ROOT/sync.sh" > "$TEST_ROOT/destination-alias-sync-output" 2>&1 || {
+  cat "$TEST_ROOT/destination-alias-sync-output"; fail "SSH alias mirror sync";
+}
+if greens_destination_identity git@not-github:fixture/mirror.git >/dev/null; then fail "non-GitHub SSH alias accepted"; fi
+echo "PASS: SSH mirror alias migration, transport preservation, and sync"
+
+# Real setup in a simulated Homebrew Cellar must install upgrade-stable jobs.
+# After removing that Cellar version, the saved runner must execute the new one.
+brew_prefix="$TEST_ROOT/brew"
+old_keg="$brew_prefix/Cellar/greens/1.9.0"
+new_keg="$brew_prefix/Cellar/greens/2.0.0"
+mkdir -p "$old_keg/libexec" "$new_keg/libexec" "$brew_prefix/opt"
+cp "$ROOT/setup.sh" "$old_keg/libexec/setup.sh"
+cp -R "$ROOT/lib" "$old_keg/libexec/lib"
+printf '#!/bin/bash\necho old > "$TEST_ROOT/brew-version"\n' > "$old_keg/libexec/sync.sh"
+printf '#!/bin/bash\necho new > "$TEST_ROOT/brew-version"\n' > "$new_keg/libexec/sync.sh"
+ln -s "$old_keg" "$brew_prefix/opt/greens"
+stable_sync="$brew_prefix/opt/greens/libexec/sync.sh"
+brew_config="$TEST_ROOT/brew-config"
+cp "$TEST_ROOT/ssh-only-config" "$brew_config"
+{
+  printf 'y\n'
+  printf '\n%.0s' {1..12}
+  printf 'n\n'
+} | SCHEDULER=cron CONTRIB_MIRROR_CONFIG="$brew_config" bash "$old_keg/libexec/setup.sh" > "$TEST_ROOT/brew-setup-output" 2>&1 || {
+  cat "$TEST_ROOT/brew-setup-output"; fail "Homebrew setup";
+}
+grep -Fq "$stable_sync" "$TEST_ROOT/crontab" || fail "setup scheduled a versioned Homebrew path"
+CONFIG_FILE="$brew_config"
+greens_install_systemd "$old_keg/libexec/sync.sh" 7
+brew_runner="$(dirname "$CONFIG_FILE")/$(greens_scheduler_id)-run"
+grep -Fq "$stable_sync" "$brew_runner" || fail "systemd runner used Cellar path"
+cat > "$TEST_ROOT/bin/launchctl" <<'MOCK'
+#!/bin/bash
+case "$1" in bootout|bootstrap) exit 0 ;; *) exit 1 ;; esac
+MOCK
+greens_install_launchd "$old_keg/libexec/sync.sh" 7
+grep -Fq "$stable_sync" "$HOME/Library/LaunchAgents/$(greens_launchd_label).plist" || fail "launchd used Cellar path"
+cat > "$TEST_ROOT/bin/schtasks.exe" <<'MOCK'
+#!/bin/bash
+printf '%s\n' "$*" >> "$TEST_ROOT/brew-windows-task"
+MOCK
+cat > "$TEST_ROOT/bin/cmd.exe" <<'MOCK'
+#!/bin/bash
+echo fixture-user
+MOCK
+chmod +x "$TEST_ROOT/bin/schtasks.exe" "$TEST_ROOT/bin/cmd.exe"
+greens_install_windows_task "$old_keg/libexec/sync.sh" 7
+grep -Fq "$stable_sync" "$TEST_ROOT/brew-windows-task" || fail "Task Scheduler used Cellar path"
+rm "$brew_prefix/opt/greens"
+ln -s "$new_keg" "$brew_prefix/opt/greens"
+rm -rf "$old_keg"
+bash "$brew_runner"
+[[ "$(cat "$TEST_ROOT/brew-version")" == new ]] || fail "scheduled runner failed after Homebrew cleanup"
+[[ "$(greens_sync_path "$ROOT/sync.sh")" == "$ROOT/sync.sh" ]] || fail "changed a non-Homebrew install path"
+echo "PASS: Homebrew setup and schedulers survive version cleanup and upgrade"
+
+[[ ! -f "$TEST_ROOT/forbidden-switches" ]] || fail "provider commands changed shared gh authentication"

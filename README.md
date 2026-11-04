@@ -18,6 +18,9 @@ If you commit to private/org repos all day but your GitHub profile looks empty, 
 brew install yuvrajangadsingh/greens/greens
 ```
 
+After upgrading from v1.8.2, run `greens --setup` once to repair scheduled jobs.
+See the [upgrade notes](docs/release-notes.md) for details.
+
 ### Windows (10/11)
 
 Requires [Git for Windows](https://git-scm.com/download/win) (includes Git Bash).
@@ -277,10 +280,11 @@ init`, or `bash setup.sh`. Setup does not replace the configuration until the
 remaining roots and regenerated source groups validate successfully.
 
 For multiple GitHub accounts, authenticate each account with `gh auth login`.
-Sync temporarily selects the account saved for each host/owner and restores the
-previous active account after every API request. Setup selects the configured
-personal account for the destination and pre-fills its username and primary
-verified email from `gh`.
+API requests and HTTPS Git operations use the account saved for each source or
+destination without changing the active `gh` account. This keeps concurrent
+configurations independent and allows a valid saved account to work when another
+account has expired. SSH mirrors retain their aliases and key selection. Setup
+pre-fills the personal username and verified email from `gh`.
 
 `SOURCE_PROVIDER` is intentionally absent from new configurations: provider is
 part of every indexed source record, and a global value would conflict with
