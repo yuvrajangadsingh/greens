@@ -18,3 +18,23 @@ Setup and sync use command-local credentials for the saved source and destinatio
 accounts. They preserve the active GitHub CLI account, support simultaneous
 configurations, and can use a valid saved account even if the active account has
 expired. Existing SSH destination aliases remain usable during setup migration.
+
+Saved account names are matched without regard to case. Matching explicit PATs
+retain priority over saved CLI tokens, and credentials embedded in existing HTTPS
+mirror URLs continue to work without a separate personal CLI login. Git helpers
+are scoped to the clone host; plain HTTP keeps its configured helpers.
+
+## Sync reliability and development-build compatibility
+
+The Perl timeout fallback now preserves successful exit codes, closes output
+pipes immediately, and terminates the command's process group on a deadline.
+Each configuration has a separate bare-repository cache, so simultaneous syncs
+sharing a cache directory cannot race while initializing or fetching a repo.
+Existing activity state is retained; bare repositories are fetched again once.
+
+GitHub activity markers from earlier builds with mixed-case owners/repositories
+are recognized from retained checkout URLs and the configuration's activity
+cache. Keep that cache during the upgrade if URLs have also changed casing.
+An opaque old hash cannot recover spelling when both sources of that spelling
+have been removed; this affects development builds predating normalization,
+not released v1.8.2 configurations.

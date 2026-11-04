@@ -44,6 +44,18 @@ git init --bare --quiet "$IDENTITY_TEST/mirror.git"
 git init --quiet "$MIRROR_DIR"
 git -C "$MIRROR_DIR" symbolic-ref HEAD refs/heads/main
 git -C "$MIRROR_DIR" remote add origin "$IDENTITY_TEST/mirror.git"
+# Preserve already mirrored activities from pre-normalization builds. Public
+# GitHub has only its original URL; Enterprise has only an old cached key with
+# casing that no current URL retains. Neither may be emitted a second time.
+sha="$(git -C "$IDENTITY_TEST/base" rev-parse HEAD)"
+for old_key in "github.com/Team/Repo/commit/$sha" "github.enterprise.example/tEaM/rEpO/commit/$sha"; do
+  marker="$(printf '%s' "$old_key" | greens_hash)"
+  GIT_AUTHOR_DATE=2021-01-01T12:00:00Z GIT_COMMITTER_DATE=2021-01-01T12:00:00Z \
+    git -C "$MIRROR_DIR" commit --quiet --allow-empty -m "$(printf 'sync\n\nGreens-Activity: %s' "$marker")"
+done
+mkdir -p "$CACHE_DIR/activity-state/$(greens_scheduler_id)-old-scope"
+jq -nc --arg key "github.enterprise.example/tEaM/rEpO/commit/$sha" '{key:$key}' > "$CACHE_DIR/activity-state/$(greens_scheduler_id)-old-scope/retained.jsonl"
+git -C "$MIRROR_DIR" push --quiet origin HEAD
 log() { printf '%s\n' "$*"; }
 mirror_visibility() { echo public; }
 greens_mixed_discover_checkouts > "$IDENTITY_TEST/checkouts"
@@ -60,4 +72,17 @@ mv "$IDENTITY_TEST/not-yet-discovered" "$IDENTITY_TEST/work/github-lower"
 greens_mixed_sync >> "$IDENTITY_TEST/output" 2>&1 || { cat "$IDENTITY_TEST/output"; fail "identity rerun"; }
 [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 4 ]] || fail "a newly discovered case variant duplicated activities"
 [[ "$(git -C "$IDENTITY_TEST/work/github-upper" config remote.origin.url)" == git@github.com:Team/Repo.git ]] || fail "changed source URL casing"
-echo "PASS: GitHub and Enterprise casing deduplication, aliases, and case-sensitive generic Git paths"
+# API review keys retain their case-sensitive timestamp suffix. A prior
+# mixed-case owner marker skips only that review observation, not later ones.
+old_review='github.com/TEAM/github/reviews/77/2021-01-02T12:00:00Z'
+new_review='github.com/team/github/reviews/77/2021-01-02T12:00:00Z'
+marker="$(printf '%s' "$old_review" | greens_hash)"
+git -C "$MIRROR_DIR" commit --quiet --allow-empty -m "$(printf 'sync\n\nGreens-Activity: %s' "$marker")"
+jq -nc --arg key "$new_review" '{key:$key,date:"2021-01-02 12:00:00 +0000",epoch:1609588800,kind:"reviews",project:"team/repo"}' > "$RUN_TMP/review-records"
+: > "$RUN_TMP/review-publish"
+greens_mirror_mixed_records "$RUN_TMP/review-records" "$RUN_TMP/review-publish" >> "$IDENTITY_TEST/output" 2>&1 || { cat "$IDENTITY_TEST/output"; fail "historical review marker"; }
+[[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 5 ]] || fail "duplicated historical review"
+jq '.key |= sub("2021-01-02T";"2021-01-03T") | .date="2021-01-03 12:00:00 +0000" | .epoch=1609675200' "$RUN_TMP/review-records" > "$RUN_TMP/later-review-records"
+greens_mirror_mixed_records "$RUN_TMP/later-review-records" "$RUN_TMP/review-publish" >> "$IDENTITY_TEST/output" 2>&1 || { cat "$IDENTITY_TEST/output"; fail "later review marker"; }
+[[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 6 ]] || fail "dropped later review observation"
+echo "PASS: GitHub and Enterprise casing, historical markers, aliases, and case-sensitive generic Git paths"

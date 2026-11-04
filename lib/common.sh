@@ -107,22 +107,58 @@ greens_count_repositories() {
   printf '%s\n' "$count"
 }
 
-greens_gh_token() {
-  local host="$1" user="$2" environment_fallback="${3:-1}" token=""
+# GitHub logins are case-insensitive, including saved configuration values.
+greens_gh_same_account() {
+  [[ -n "$1" && -n "$2" && "$(greens_provider_identity github "$1")" == "$(greens_provider_identity github "$2")" ]]
+}
+
+greens_gh_token_actor() (
+  local host="$1" token="$2"
+  export GH_HOST="$host" GH_TOKEN="$token" GITHUB_TOKEN="$token"
+  export GH_ENTERPRISE_TOKEN="$token" GITHUB_ENTERPRISE_TOKEN="$token"
+  greens_run gh api --hostname "$host" user --jq .login
+)
+
+greens_gh_token() (
+  local host="$1" user="$2" environment_fallback="${3:-1}" token="" candidate="" actor="" login logins
+  if [[ "$environment_fallback" == 1 ]]; then
+    case "$host" in
+      github.com|*.ghe.com) candidate="${GH_TOKEN:-${GITHUB_TOKEN:-}}" ;;
+      *) candidate="${GH_ENTERPRISE_TOKEN:-${GITHUB_ENTERPRISE_TOKEN:-}}" ;;
+    esac
+    # A matching explicit PAT may carry scopes/SSO grants absent from gh's
+    # saved token. Never lend an unrelated ambient work PAT to the mirror.
+    if [[ -n "$candidate" ]]; then
+      if [[ -z "$user" ]]; then printf '%s' "$candidate"; return; fi
+      actor="$(greens_gh_token_actor "$host" "$candidate" 2>/dev/null)" || actor=""
+      if greens_gh_same_account "$actor" "$user"; then printf '%s' "$candidate"; return; fi
+    fi
+  fi
+  unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
   if [[ -n "$user" ]]; then
     token="$(greens_run gh auth token --hostname "$host" --user "$user" 2>/dev/null)" || token=""
+    if [[ -z "$token" ]]; then
+      # gh's --user lookup is case-sensitive. Resolve to its stored spelling;
+      # JSON status also lists accounts when the active account has expired.
+      logins="$(greens_run gh auth status --hostname "$host" --json hosts --jq '.hosts[][] | .login' 2>/dev/null)" || logins=""
+      if [[ -z "$logins" ]]; then
+        # Multi-account gh versions predating JSON auth status.
+        logins="$( { greens_run gh auth status --hostname "$host" 2>&1 || true; } |
+          awk '{for(i=1;i<NF;i++) if($i=="account") print $(i+1)}')"
+      fi
+      while IFS= read -r login; do
+        if greens_gh_same_account "$login" "$user"; then
+          token="$(greens_run gh auth token --hostname "$host" --user "$login" 2>/dev/null)" || token=""
+          break
+        fi
+      done <<< "$logins"
+    fi
   else
     token="$(greens_run gh auth token --hostname "$host" 2>/dev/null)" || token=""
   fi
-  if [[ -z "$token" && "$environment_fallback" == 1 ]]; then
-    case "$host" in
-      github.com|*.ghe.com) token="${GH_TOKEN:-${GITHUB_TOKEN:-}}" ;;
-      *) token="${GH_ENTERPRISE_TOKEN:-${GITHUB_ENTERPRISE_TOKEN:-}}" ;;
-    esac
-  fi
   [[ -n "$token" ]] || return 1
   printf '%s' "$token"
-}
+)
 
 # Keep credentials local to one command. Named account lookup does not depend
 # on the active account and never changes gh's shared authentication state.
@@ -134,7 +170,7 @@ greens_gh_as() (
   export GH_ENTERPRISE_TOKEN="$token" GITHUB_ENTERPRISE_TOKEN="$token"
   if [[ -n "$user" && "${GREENS_GH_VERIFY_ACTOR:-1}" == 1 ]]; then
     actor="$(greens_run gh api --hostname "$host" user --jq .login)" || return 1
-    [[ "$actor" == "$user" ]] || { echo "GitHub account does not match $user on $host." >&2; return 1; }
+    greens_gh_same_account "$actor" "$user" || { echo "GitHub account does not match $user on $host." >&2; return 1; }
   fi
   "$@"
 )
@@ -148,24 +184,29 @@ greens_gh_api_as() {
 # Git's gh credential helper inherits the command-local account as well. SSH
 # keeps its existing key/alias selection; other providers keep their helpers.
 greens_git_as() {
-  local provider="$1" host="$2" user="$3" url="$4" token="" verify_actor=1
+  local provider="$1" host="$2" user="$3" url="$4" token="" verify_actor=1 authority
   shift 4
-  if [[ "$provider" == github && -n "$user" && ( "$url" == https://* || "$url" == http://* ) ]]; then
+  authority="${url#*://}"; authority="${authority%%/*}"
+  # URL credentials win in every mode, including legacy HTTPS destinations.
+  # gh's helper supports HTTPS only; leave HTTP to its existing Git helpers.
+  if [[ "$provider" == github && -n "$user" && "$url" == https://* && "$authority" != *@* ]]; then
     if [[ "${GREENS_GIT_TRANSPORT_ONLY:-0}" == 1 ]]; then
-      # A historical username must not require API authentication for commits.
-      # Prefer explicit URL credentials, or existing helpers when gh has none.
-      if [[ "${url#*://}" == *@* ]] || ! token="$(greens_gh_token "$host" "$user" 0)"; then
+      if ! token="$(greens_gh_token "$host" "$user" 0)"; then
         GITHUB_TOKEN="${GITHUB_TOKEN:-}" greens_run git "$@"
         return
+      fi
+      # If gh has this account, a matching explicit PAT still takes priority.
+      # With no saved account the native helper path above needs no API call.
+      if [[ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}${GH_ENTERPRISE_TOKEN:-}${GITHUB_ENTERPRISE_TOKEN:-}" ]]; then
+        token="$(greens_gh_token "$host" "$user")" || return 1
       fi
       verify_actor=0
     fi
     GREENS_COMMAND_GH_TOKEN="$token" GREENS_GH_VERIFY_ACTOR="$verify_actor" \
       greens_gh_as "$host" "$user" greens_run git -c credential.helper= \
-      -c "credential.https://$host.helper=" -c "credential.https://$host.helper=!gh auth git-credential" \
-      -c "credential.http://$host.helper=" -c "credential.http://$host.helper=!gh auth git-credential" "$@"
+      -c "credential.https://$authority.helper=" -c "credential.https://$authority.helper=!gh auth git-credential" "$@"
   else
-    greens_run git "$@"
+    GITHUB_TOKEN="${GITHUB_TOKEN:-}" greens_run git "$@"
   fi
 }
 
@@ -186,7 +227,7 @@ greens_destination_identity() {
     [[ -z "$resolved" ]] || identity="$resolved/${identity#*/}"
   fi
   [[ "$identity" == github.com/* ]] || return 1
-  printf '%s\n' "$identity"
+  printf '%s\n' "$(greens_provider_identity github "$identity")"
 }
 
 # Homebrew's opt symlink survives upgrades; physical Cellar paths do not.
@@ -202,6 +243,32 @@ greens_sync_path() {
   printf '%s\n' "$script"
 }
 
+# One Perl supervisor owns both the deadline and the child process group.
+# There is no background shell/sleep retaining command-substitution pipes.
+greens_perl_timeout() {
+  perl -MPOSIX -MErrno=EINTR -e '
+    my $seconds = shift @ARGV;
+    my $pid = fork();
+    defined $pid or die "fork: $!";
+    if (!$pid) {
+      setpgrp(0, 0) or die "setpgrp: $!";
+      exec @ARGV or POSIX::_exit(127);
+    }
+    my $expired = 0;
+    $SIG{ALRM} = sub {
+      if ($expired) { kill "KILL", -$pid; }
+      else { $expired = 1; kill "TERM", -$pid; alarm 10; }
+    };
+    alarm $seconds;
+    my $waited;
+    do { $waited = waitpid($pid, 0); } while ($waited == -1 && $! == EINTR);
+    my $status = $?;
+    alarm 0;
+    if ($expired) { kill "KILL", -$pid; exit 124; }
+    exit($status & 127 ? 128 + ($status & 127) : $status >> 8);
+  ' "$@"
+}
+
 greens_run() {
   local seconds="${GREENS_FETCH_TIMEOUT:-120}"
   if declare -p TIMEOUT_CMD >/dev/null 2>&1; then
@@ -211,7 +278,7 @@ greens_run() {
   elif command -v timeout >/dev/null 2>&1; then
     timeout --kill-after=10 "$seconds" "$@"
   elif command -v perl >/dev/null 2>&1; then
-    perl -e 'alarm shift; exec @ARGV or die $!' "$seconds" "$@"
+    greens_perl_timeout "$seconds" "$@"
   else
     echo "A timeout utility or Perl is required for bounded network requests." >&2
     return 1
@@ -304,6 +371,12 @@ greens_remote_identity() {
   path="${path#/}"; path="${path%/}"; path="${path%.git}"
   [[ -n "$authority" && "$path" == */* && "$path" != *$'\t'* && "$path" != *$'\n'* ]] || return 1
   printf '%s/%s\n' "$(printf '%s' "$authority" | tr '[:upper:]' '[:lower:]')" "$path"
+}
+
+# Configuration locks protect this namespace, including bare-repo init/fetch.
+# Different configs may intentionally share CACHE_DIR and use different actors.
+greens_bare_cache_dir() {
+  printf '%s/bare/%s\n' "$CACHE_DIR" "$(greens_scheduler_id)"
 }
 
 greens_scheduler_id() {

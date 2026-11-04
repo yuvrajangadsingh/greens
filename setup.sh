@@ -93,7 +93,7 @@ verify_mirror_owner() {
 
   local actual_owner
   actual_owner="$(parse_remote_owner "$remote_url")"
-  if [[ -n "$actual_owner" && "$actual_owner" == "$expected_user" ]]; then
+  if greens_gh_same_account "$actual_owner" "$expected_user"; then
     ok "Mirror repo owner matches personal account ($actual_owner)"
     owner_verified=1
   elif [[ -n "$actual_owner" ]]; then
@@ -205,7 +205,7 @@ detect_personal_ssh() {
     local gh_user
     gh_user="$(echo "$ssh_output" | sed -n 's/.*Hi \([^!]*\)!.*/\1/p' | head -1)"
 
-    if [[ -n "$gh_user" && "$gh_user" != "$work_user" ]]; then
+    if [[ -n "$gh_user" ]] && ! greens_gh_same_account "$gh_user" "$work_user"; then
       PERSONAL_SSH_HOST="$h"
       PERSONAL_GH_USER="$gh_user"
       return 0
@@ -959,7 +959,7 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
     # Only proceed with SSH auto-construction if we still have valid SSH info
     # (may have been cleared if user declined SSH detection above)
     if [[ -n "$personal_user" && -n "$personal_host" ]]; then
-      if [[ "$personal_user" != "$personal_github_user" ]]; then
+      if ! greens_gh_same_account "$personal_user" "$personal_github_user"; then
         warn "SSH config detected '$personal_user', but your personal account is '$personal_github_user'."
         warn "SSH host '$personal_host' may use the wrong key for '$personal_github_user'."
         warn "Skipping auto-constructed URL. Provide the mirror URL manually."
@@ -974,7 +974,7 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
         repo_created=0
         if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
           gh_user="$(gh api user -q .login 2>/dev/null || echo "")"
-          if [[ "$gh_user" == "$personal_user" ]]; then
+          if greens_gh_same_account "$gh_user" "$personal_user"; then
             # gh is on the personal account, create directly
             if gh repo create "$mirror_repo_name" "--$mirror_visibility" --description "Mirror of private work contributions" 2>/dev/null; then
               ok "Created github.com/$personal_user/$mirror_repo_name ($mirror_visibility)"
@@ -1005,11 +1005,11 @@ if [[ ! -d "$mirror_dir/.git" ]]; then
       if [[ -n "$gh_user" ]]; then
         # Verify gh is on the personal account, not work
         is_wrong_account=0
-        if [[ -n "${personal_github_user:-}" && "$gh_user" != "$personal_github_user" ]]; then
+        if [[ -n "${personal_github_user:-}" ]] && ! greens_gh_same_account "$gh_user" "$personal_github_user"; then
           is_wrong_account=1
-        elif [[ -n "${org_name:-}" && "$gh_user" == "$org_name" ]]; then
+        elif greens_gh_same_account "$gh_user" "${org_name:-}"; then
           is_wrong_account=1
-        elif [[ -n "${github_username:-}" && "$gh_user" == "$github_username" ]]; then
+        elif greens_gh_same_account "$gh_user" "${github_username:-}"; then
           is_wrong_account=1
         fi
 

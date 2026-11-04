@@ -404,7 +404,7 @@ greens_sources_setup() {
         if [[ "$answer" =~ ^[Yy]$ ]]; then access_mode=local; types=commits; else info "Skipping github $api/$organization."; continue; fi
       else
         if [[ "$account_selected" == 0 ]]; then username="$(greens_required "GitHub username for $api/$organization" "${username:-$(jq -r .login <<< "$meta")}")"; fi
-        if ! meta="$(GREENS_FETCH_TIMEOUT=15 greens_gh_api_as "$api" "$username" user)" || [[ "$username" != "$(jq -r .login <<< "$meta")" ]]; then
+        if ! meta="$(GREENS_FETCH_TIMEOUT=15 greens_gh_api_as "$api" "$username" user)" || ! greens_gh_same_account "$username" "$(jq -r .login <<< "$meta")"; then
           answer="$(prompt "GitHub account validation failed. Use local commit history only for all $api/$organization repositories? (y/N)" 'n')"
           if [[ "$answer" =~ ^[Yy]$ ]]; then access_mode=local; types=commits; else info "Skipping github $api/$organization."; continue; fi
         fi
@@ -439,12 +439,14 @@ greens_sources_setup() {
     personal_default="$(greens_gh_api_as github.com "" user --jq .login 2>/dev/null || true)"
   fi
   PERSONAL_GH_USER="$(greens_required 'Personal GitHub username' "$personal_default")"
-  [[ "$(greens_gh_api_as github.com "$PERSONAL_GH_USER" user --jq .login)" == "$PERSONAL_GH_USER" ]] || { fail "GitHub account does not match $PERSONAL_GH_USER."; return 1; }
+  greens_gh_same_account "$(greens_gh_api_as github.com "$PERSONAL_GH_USER" user --jq .login)" "$PERSONAL_GH_USER" || { fail "GitHub account does not match $PERSONAL_GH_USER."; return 1; }
   default_email="$(greens_gh_api_as github.com "$PERSONAL_GH_USER" user/emails --jq '.[] | select(.verified and .primary) | .email' 2>/dev/null || true)"
   MIRROR_EMAIL="$(greens_required 'Personal GitHub email' "${MIRROR_EMAIL:-$default_email}")"; MIRROR_NAME="$(greens_required 'Mirror author name' "${MIRROR_NAME:-greens}")"
   url="${MIRROR_URL:-https://github.com/$PERSONAL_GH_USER/work-contributions-mirror}"
   MIRROR_URL="$(greens_required 'GitHub mirror URL' "$url" "$(mask_url "$url")")"
-  owner="$(greens_destination_identity "$MIRROR_URL")" || { fail "Invalid mirror URL."; return 1; }; [[ "$owner" == github.com/"$PERSONAL_GH_USER"/* ]] || { fail "Choose a github.com repository owned by $PERSONAL_GH_USER."; return 1; }; owner="${owner#github.com/}"
+  owner="$(greens_destination_identity "$MIRROR_URL")" || { fail "Invalid mirror URL."; return 1; }
+  owner="${owner#github.com/}"
+  greens_gh_same_account "${owner%%/*}" "$PERSONAL_GH_USER" || { fail "Choose a github.com repository owned by $PERSONAL_GH_USER."; return 1; }
   if ! meta="$(greens_gh_api_as github.com "$PERSONAL_GH_USER" "repos/$owner" 2>/dev/null)"; then confirm "Create private GitHub repository $owner?" || return 1; greens_gh_as github.com "$PERSONAL_GH_USER" greens_run gh repo create "$owner" --private --description "Timestamp-only work contribution mirror"; meta="$(greens_gh_api_as github.com "$PERSONAL_GH_USER" "repos/$owner")"; fi
   if [[ "$(jq -r .private <<< "$meta")" != true ]]; then warn "This public mirror exposes exact work timestamps."; [[ "$(prompt 'Type PUBLIC to use this public mirror' '')" == PUBLIC ]] || return 1; fi
   branch="$(jq -er .default_branch <<< "$meta")"; MIRROR_DIR="$(greens_required 'Local mirror directory' "${MIRROR_DIR:-$CONFIG_DIR/mirror}")"; MIRROR_DIR="${MIRROR_DIR/#\~/$HOME}"
