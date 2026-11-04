@@ -1654,36 +1654,14 @@ LC_ALL=C sort -u "$tmp_pairs" > "$tmp_sorted"
 export GIT_TERMINAL_PROMPT GIT_SSH_COMMAND
 
 # Per-fetch hard timeout so one stuck repo can't wedge the whole sync.
-# Prefer GNU coreutils, then macOS-native timeout, else a Bash-native fallback
-# that kills the whole process group.
+# Prefer GNU coreutils, then the Perl process-group supervisor.
 GREENS_FETCH_TIMEOUT="${GREENS_FETCH_TIMEOUT:-120}"
 if command -v gtimeout >/dev/null 2>&1; then
   TIMEOUT_CMD=(gtimeout --kill-after=10 "$GREENS_FETCH_TIMEOUT")
 elif command -v timeout >/dev/null 2>&1; then
   TIMEOUT_CMD=(timeout --kill-after=10 "$GREENS_FETCH_TIMEOUT")
 elif command -v perl >/dev/null 2>&1; then
-  # perl setpgrp makes the exec'd command a process group leader, so
-  # kill -TERM -$pid terminates git AND its ssh child. If setpgrp is a
-  # no-op on this platform, the negative-pid kill falls back to the
-  # positive-pid form so at least git itself gets terminated.
-  run_with_timeout() {
-    local seconds="$1"; shift
-    perl -e 'setpgrp 0,0; exec @ARGV or die "exec failed: $!"' "$@" &
-    local pid=$!
-    (
-      sleep "$seconds"
-      kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
-      sleep 10
-      kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
-    ) &
-    local watcher=$!
-    wait "$pid" 2>/dev/null
-    local rc=$?
-    kill "$watcher" 2>/dev/null
-    wait "$watcher" 2>/dev/null
-    return "$rc"
-  }
-  TIMEOUT_CMD=(run_with_timeout "$GREENS_FETCH_TIMEOUT")
+  TIMEOUT_CMD=(greens_perl_timeout "$GREENS_FETCH_TIMEOUT")
 else
   log "WARN: no timeout or perl available; fetches won't be bounded."
   TIMEOUT_CMD=()
@@ -1694,11 +1672,12 @@ repo_total="$(wc -l < "$tmp_sorted" | tr -d " ")"
 log ""
 log "Step 2/5: Caching $repo_total repos (read-only copies — your code stays untouched)"
 
+mkdir -p "$(greens_bare_cache_dir)"
 failures=0
 fetched_ok=0
 while read -r remote_repo url; do
   [[ -z "$remote_repo" ]] && continue
-  bare="$CACHE_DIR/$remote_repo"
+  bare="$(greens_bare_cache_dir)/$remote_repo"
 
   if [[ ! -d "$bare" ]]; then
     log "Cloning $remote_repo"
@@ -1753,7 +1732,7 @@ log "Step 3/5: Scanning commits across all branches (emails: $EMAILS)"
 log "  (Checks every branch — feature, hotfix, etc. No double-counting after merge)"
 
 # Collect git commits (with or without messages based on COPY_MESSAGES)
-for bare in "$CACHE_DIR"/*.git; do
+for bare in "$(greens_bare_cache_dir)"/*.git; do
   [[ -d "$bare" ]] || continue
 
   origin_url="$(git --git-dir="$bare" remote get-url origin 2>/dev/null || true)"
@@ -1891,7 +1870,7 @@ if [[ "$(mirror_visibility)" == "private" ]]; then
   # Collect per-repo stats
   tmp_repo_stats="$(mktemp)"
   tmp_dates="$(mktemp)"
-  for bare in "$CACHE_DIR"/*.git; do
+  for bare in "$(greens_bare_cache_dir)"/*.git; do
     [[ -d "$bare" ]] || continue
     repo_name="$(basename "$bare" .git)"
 

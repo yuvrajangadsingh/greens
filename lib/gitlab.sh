@@ -184,7 +184,7 @@ greens_preflight_mixed_sources() {
     api_done="$RUN_TMP/preflight-api-$source_index.done"
     if [[ "$provider" == github ]]; then
       if [[ ! -f "$api_done" ]]; then
-        if [[ "$(GREENS_FETCH_TIMEOUT=15 greens_gh_api_as "$api" "$username" user --jq .login 2>/dev/null || true)" != "$username" ]]; then
+        if ! greens_gh_same_account "$(GREENS_FETCH_TIMEOUT=15 greens_gh_api_as "$api" "$username" user --jq .login 2>/dev/null || true)" "$username"; then
           greens_offer_local_fallback "$source_index" "GitHub API authentication is unavailable" || return 1
           continue
         fi
@@ -210,6 +210,55 @@ greens_preflight_mixed_sources() {
   done 4< "$sources"
 }
 
+# Earlier builds hashed the original GitHub owner/repository casing. Recognize
+# those markers using retained checkout URLs and this config's activity cache;
+# only existing hashes are aliases, and no historical records are imported.
+greens_recognize_github_case_markers() {
+  local records="$1" i api org_key raw_org source_index identity url repodir raw_identity cached old_key new_key old_hash
+  : > "$RUN_TMP/github-prefixes"; : > "$RUN_TMP/github-case-aliases"; : > "$RUN_TMP/old-activity-keys"
+  for ((i=1; i<=${SOURCE_COUNT:-0}; i++)); do
+    [[ "$(greens_indexed_value "$i" PROVIDER)" == github ]] || continue
+    api="$(greens_indexed_value "$i" API_HOST)"; org_key="SOURCE_${i}_ORGANIZATION"; raw_org="${!org_key}"
+    printf '%s/%s\n' "$api" "$raw_org" | LC_ALL=C tr '[:upper:]' '[:lower:]' >> "$RUN_TMP/github-prefixes"
+    printf '%s/%s\t%s/%s\n' "$api" "$raw_org" "$api" "$(greens_indexed_value "$i" ORGANIZATION)" >> "$RUN_TMP/github-case-aliases"
+  done
+  [[ -s "$RUN_TMP/github-prefixes" && -s "$RUN_TMP/known" ]] || return 0
+  if [[ -f "$RUN_TMP/mixed-checkouts" ]]; then
+    while IFS=$'\t' read -r source_index identity url repodir; do
+      [[ "$(greens_indexed_value "$source_index" PROVIDER)" == github ]] || continue
+      raw_identity="$(greens_remote_identity "$url")" || continue
+      api="$(greens_indexed_value "$source_index" API_HOST)"
+      printf '%s/%s\t%s\n' "$api" "${raw_identity#*/}" "$identity" >> "$RUN_TMP/github-case-aliases"
+    done < "$RUN_TMP/mixed-checkouts"
+  fi
+  for cached in "$CACHE_DIR/activity-state/$(greens_scheduler_id)-"*/*.jsonl; do
+    [[ -f "$cached" ]] || continue
+    jq -r '.key // empty' "$cached" >> "$RUN_TMP/old-activity-keys" || return 1
+  done
+  jq -nr --slurpfile records "$records" --rawfile prefixes "$RUN_TMP/github-prefixes" \
+    --rawfile aliases "$RUN_TMP/github-case-aliases" --rawfile old "$RUN_TMP/old-activity-keys" '
+    ($prefixes|split("\n")|map(select(length>0))) as $prefixes |
+    def canonical:
+      split("/") as $p |
+      if ($prefixes|index($p[0:2]|join("/")|ascii_downcase)) == null then .
+      elif $p[3] == "commit" then (($p[0:3]|map(ascii_downcase))+$p[3:]|join("/"))
+      elif $p[2] == "github" then (($p[0:2]|map(ascii_downcase))+$p[2:]|join("/"))
+      else . end;
+    (reduce $records[] as $r ({}; .[($r.key|canonical)]=$r.key)) as $current |
+    (($old|split("\n")[]),
+      ($aliases|split("\n")[]|split("\t")|select(length==2)|. as $alias |
+        $records[].key | select(startswith($alias[1]+"/")) | $alias[0]+.[($alias[1]|length):])) |
+    select(length>0) as $old | $current[($old|canonical)] as $new |
+    select($new != null and $old != $new) | [$old,$new]|@tsv
+  ' | LC_ALL=C sort -u > "$RUN_TMP/github-case-keys" || return 1
+  while IFS=$'\t' read -r old_key new_key; do
+    old_hash="$(printf '%s' "$old_key" | greens_hash)"
+    if grep -qxF "$old_hash" "$RUN_TMP/known"; then
+      printf '%s' "$new_key" | greens_hash >> "$RUN_TMP/known"
+    fi
+  done < "$RUN_TMP/github-case-keys"
+}
+
 greens_mirror_mixed_records() {
   local records="$1" publish="$2" mirror_branch ref marker msg activity_key activity_date activity_epoch
   local pending=0 today
@@ -224,6 +273,7 @@ greens_mirror_mixed_records() {
   fi
   { git -C "$MIRROR_DIR" log --format=%B HEAD 2>/dev/null || true; } |
     sed -n 's/^Greens-Activity: \([0-9a-f]\{64\}\)$/\1/p' | sort -u > "$RUN_TMP/known"
+  greens_recognize_github_case_markers "$records" || return 1
   : > "$RUN_TMP/legacy-epochs"
   if [[ "${GREENS_LEGACY_TIMESTAMPS:-0}" == 1 ]]; then
     git -C "$MIRROR_DIR" log --format=%at --author="<$MIRROR_EMAIL>" \
@@ -288,7 +338,7 @@ greens_mixed_sync() {
     EMAILS="$(greens_indexed_value "$source_index" EMAILS)"; SINCE="$(greens_indexed_value "$source_index" SINCE)"; ACTIVITY_TYPES="$(greens_indexed_value "$source_index" ACTIVITY_TYPES)"; ACCESS_MODE="$(greens_source_access_mode "$source_index")"
     transport_only=0; [[ "$ACTIVITY_TYPES" != commits ]] || transport_only=1
     since_epoch="$(greens_epoch "$SINCE")" || { log "ERROR: invalid SINCE for source $source_index"; return 1; }; since_date="${SINCE%% *}"
-    project_path="${identity#*/}"; key="$(printf '%s' "$identity" | greens_hash)"; bare="$CACHE_DIR/$key.git"; source_file="$RUN_TMP/$key.records"; : > "$source_file"
+    project_path="${identity#*/}"; key="$(printf '%s' "$identity" | greens_hash)"; bare="$(greens_bare_cache_dir)/$key.git"; source_file="$RUN_TMP/$key.records"; : > "$source_file"
     state_scope="$(printf '%s\n' "$SOURCE_PROVIDER" "$SOURCE_API_HOST" "$SOURCE_ORGANIZATION" "$SOURCE_USERNAME" "$EMAILS" "$SINCE" "$ACTIVITY_TYPES" "$ACCESS_MODE" | greens_hash)"
     state_dir="$CACHE_DIR/activity-state/$(greens_scheduler_id)-$state_scope"; checkpoint_file="$state_dir/$key.checkpoint"
     [[ ! -f "$state_dir/$key.jsonl" ]] || cat "$state_dir/$key.jsonl" >> "$source_file"
@@ -301,7 +351,7 @@ greens_mixed_sync() {
           jq -Rrc --arg identity "$identity" --arg path "$project_path" --arg emails "$EMAILS" --argjson since "$since_epoch" --argjson until "$run_epoch" '
           split("\t")|select(length==4)|. as $r|($emails|ascii_downcase|split(",")|map(gsub("^\\s+|\\s+$";""))) as $e|select(($e|index($r[3]|ascii_downcase))!=null)|(.[1]|tonumber) as $t|select($t >= $since and $t <= $until)|{key:($identity+"/commit/"+.[0]),epoch:$t,date:.[2],kind:"commits",project:$path}' >> "$source_file"
       else
-        if [[ ! -d "$bare" ]]; then git init --bare --quiet "$bare"; git --git-dir="$bare" remote add origin "$url"; fi
+        if [[ ! -d "$bare" ]]; then mkdir -p "$(dirname "$bare")"; git init --bare --quiet "$bare"; git --git-dir="$bare" remote add origin "$url"; fi
         git --git-dir="$bare" remote set-url origin "$url"
         if [[ "$SOURCE_PROVIDER" == gitlab ]]; then
           greens_run git --git-dir="$bare" fetch --quiet --prune --filter=blob:none origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' '+refs/merge-requests/*/head:refs/merge-requests/*/head'
@@ -313,7 +363,7 @@ greens_mixed_sync() {
     fi
     if [[ "$SOURCE_PROVIDER" == github && "$ACTIVITY_TYPES" != commits && ! -f "$RUN_TMP/github-api-$source_index.done" ]]; then
       command -v gh >/dev/null || { log "ERROR: install gh"; return 1; }
-      [[ "$(greens_gh_api_as "$SOURCE_API_HOST" "$SOURCE_USERNAME" user --jq .login)" == "$SOURCE_USERNAME" ]] || { log "ERROR: gh actor mismatch for $SOURCE_API_HOST"; return 1; }
+      greens_gh_same_account "$(greens_gh_api_as "$SOURCE_API_HOST" "$SOURCE_USERNAME" user --jq .login)" "$SOURCE_USERNAME" || { log "ERROR: gh actor mismatch for $SOURCE_API_HOST"; return 1; }
       owner_type="$(greens_gh_api_as "$SOURCE_API_HOST" "$SOURCE_USERNAME" "users/$SOURCE_ORGANIZATION" --jq .type)" || return 1
       for kind in prs issues reviews; do case ",$ACTIVITY_TYPES," in *,$kind,*) github_api_records "$kind" "$RUN_TMP/$key-$kind" "$owner_type" >> "$source_file" ;; esac; done
       : > "$RUN_TMP/github-api-$source_index.done"
@@ -399,7 +449,7 @@ greens_provider_sync() {
   while IFS=$'\t' read -r identity url; do
     key="$(printf '%s' "$identity" | greens_hash)"
     project_path="${identity#*/}"
-    bare="$CACHE_DIR/$key.git"
+    bare="$(greens_bare_cache_dir)/$key.git"
     source_file="$RUN_TMP/$key.records"
     : > "$source_file"
     if [[ -f "$state_dir/$key.jsonl" ]]; then cat "$state_dir/$key.jsonl" >> "$source_file"; fi
@@ -412,7 +462,7 @@ greens_provider_sync() {
     fi
     log "Collecting $project_path"
     if [[ ",$ACTIVITY_TYPES," == *,commits,* ]]; then
-      if [[ ! -d "$bare" ]]; then git init --bare --quiet "$bare"; git --git-dir="$bare" remote add origin "$url"; fi
+      if [[ ! -d "$bare" ]]; then mkdir -p "$(dirname "$bare")"; git init --bare --quiet "$bare"; git --git-dir="$bare" remote add origin "$url"; fi
       git --git-dir="$bare" remote set-url origin "$url"
       # MR refs retain commits from deleted source branches when GitLab retains them.
       if [[ "$SOURCE_PROVIDER" == gitlab ]]; then
