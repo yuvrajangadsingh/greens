@@ -162,7 +162,7 @@ greens_validate_local_sources() {
 
 greens_preflight_mixed_sources() {
   local sources="$1" source_index identity url mode provider api username types key encoded api_user api_done
-  while IFS=$'\t' read -r source_index identity url; do
+  while IFS=$'\t' read -r source_index identity url <&4; do
     mode="$(greens_source_access_mode "$source_index")"
     types="$(greens_indexed_value "$source_index" ACTIVITY_TYPES)"
     if [[ "$mode" == local ]]; then
@@ -203,7 +203,7 @@ greens_preflight_mixed_sources() {
         fi
       fi
     fi
-  done < "$sources"
+  done 4< "$sources"
 }
 
 greens_mirror_mixed_records() {

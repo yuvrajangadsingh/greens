@@ -14,9 +14,11 @@ greens_config_path() {
 # could append a new default without removing an earlier assignment, causing the
 # earlier value to win through shell default-expansion syntax.
 greens_source_config() {
-  local file="$1"
-  # shellcheck disable=SC1090
-  source <(awk '
+  local file="$1" filtered rc
+  # Bash 3.2 reads sourced files by stat size; a Linux process-substitution
+  # pipe has size zero. Use a private regular file for the filtered config.
+  filtered="$(mktemp)" || return 1
+  awk '
     function config_key(line, clean) {
       clean=line
       sub(/^[[:space:]]*export[[:space:]]+/, "", clean)
@@ -26,7 +28,11 @@ greens_source_config() {
     }
     NR==FNR { key=config_key($0); if (key != "") last[key]=FNR; next }
     { key=config_key($0); if (key != "" && last[key] != FNR) next; print }
-  ' "$file" "$file")
+  ' "$file" "$file" > "$filtered" || { rm -f "$filtered"; return 1; }
+  # shellcheck disable=SC1090
+  if source "$filtered"; then rc=0; else rc=$?; fi
+  rm -f "$filtered"
+  return "$rc"
 }
 
 greens_stamp_path() {
@@ -79,7 +85,7 @@ greens_count_repositories() {
     url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
     if identity="$(greens_remote_identity "$url" 2>/dev/null)"; then key="origin:$identity"; else key="path:$repodir"; fi
     duplicate=0
-    for existing in "${seen[@]}"; do [[ "$existing" == "$key" ]] && { duplicate=1; break; }; done
+    for existing in ${seen[@]+"${seen[@]}"}; do [[ "$existing" == "$key" ]] && { duplicate=1; break; }; done
     [[ "$duplicate" == 1 ]] && continue
     seen+=("$key")
     count="$((count + 1))"
@@ -238,7 +244,6 @@ greens_remove_launchd() {
   local label plist
   label="$(greens_launchd_label)"
   plist="$HOME/Library/LaunchAgents/$label.plist"
-  [[ -e "$plist" ]] || return 0
   command -v launchctl >/dev/null && launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
   rm -f "$plist"
 }
@@ -293,7 +298,8 @@ greens_install_windows_task() {
 }
 
 greens_remove_all_schedulers() {
-  local timer="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$(greens_scheduler_id).timer"
+  local timer
+  timer="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$(greens_scheduler_id).timer"
   [[ ! -f "$timer" ]] || greens_systemd_remove
   greens_remove_cron
   greens_remove_launchd

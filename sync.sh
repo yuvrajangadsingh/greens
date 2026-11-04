@@ -1132,8 +1132,15 @@ case "${1:-}" in
         { crontab -l 2>/dev/null | grep -v "# $(greens_scheduler_id)$" || true; } | crontab -
       fi
     fi
-    if launchctl list 2>/dev/null | grep -q "com.greens"; then
-      if confirm_reset "Remove launchd scheduler?"; then
+    launchd_label="$(greens_launchd_label)"
+    if [[ -f "$HOME/Library/LaunchAgents/$launchd_label.plist" ]] || launchctl list "$launchd_label" >/dev/null 2>&1; then
+      if confirm_reset "Remove this configuration's launchd scheduler?"; then
+        greens_remove_launchd
+        echo "  [ok] launchd agent removed"
+      fi
+    fi
+    if [[ -f "$HOME/Library/LaunchAgents/com.greens.plist" ]] || launchctl list com.greens >/dev/null 2>&1; then
+      if confirm_reset "Remove legacy launchd scheduler?"; then
         launchctl bootout "gui/$(id -u)/com.greens" 2>/dev/null || true
         rm -f "$HOME/Library/LaunchAgents/com.greens.plist"
         echo "  [ok] launchd agent removed"

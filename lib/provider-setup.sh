@@ -5,7 +5,7 @@ declare -p setup_remove_dirs >/dev/null 2>&1 || setup_remove_dirs=()
 
 greens_required() {
   local value
-  value="$(prompt "$1" "${2:-}")" || return 1
+  value="$(prompt "$1" "${2:-}" "${3:-${2:-}}")" || return 1
   [[ -n "$value" ]] || { echo "$1 is required." >&2; return 1; }
   printf '%s\n' "$value"
 }
@@ -141,7 +141,7 @@ greens_show_existing_config() {
   elif [[ -n "${SOURCE_PROVIDER:-}" || -n "${REMOTE_PREFIX:-}" ]]; then
     info "  Source: ${SOURCE_PROVIDER:-github} (legacy configuration)"
   fi
-  info "  Mirror: ${MIRROR_URL:-${MIRROR_DIR:-not configured}}"
+  info "  Mirror: $(mask_url "${MIRROR_URL:-${MIRROR_DIR:-not configured}}")"
   info "  Scan mode: ${SCAN_MODE:-recursive}"
   info "  Scheduler: ${SCHEDULER:-legacy/default}"
 }
@@ -150,7 +150,7 @@ greens_sources_setup() {
   local had_config=0 legacy_schema=0 roots_removed=0 existing_dirs suggested_dir="" dirs="" path canonical answer setup_tmp choice index remove
   local scan hosts class groups gitpath repodir url identity host rest organization
   local record provider api domain detected choice ssh_domain existing_source_count existing_sources
-  local aliases username emails since types access_mode defaults meta i key owner branch default_email personal_default retry
+  local aliases username emails since types access_mode defaults meta i key owner branch default_email personal_default retry active_user
   local scheduler_prompt scheduler_default scheduler_values scheduler_error
   local -a save_keys
   for key in git jq gh; do command -v "$key" >/dev/null || { fail "Install $key, then rerun setup."; return 1; }; done
@@ -262,7 +262,7 @@ greens_sources_setup() {
     fi
     case "$host" in github.com) provider=github; api=github.com ;; gitlab.com) provider=gitlab; api=gitlab.com ;;
       *)
-        ssh_domain="$(ssh -G "$host" 2>/dev/null | awk 'tolower($1)=="hostname" {print $2; exit}')"
+        ssh_domain="$(ssh -G "$host" 2>/dev/null | awk 'tolower($1)=="hostname" {print $2; exit}' || true)"
         domain="$(greens_required "Web/API domain for remote host $host" "${ssh_domain:-$host}")"
         domain="${domain#https://}"; domain="${domain#http://}"; domain="${domain%/}"
         if detected="$(greens_probe_provider "$domain")"; then provider="$detected"; api="$domain"; ok "$host detected as $provider ($api)"
@@ -340,7 +340,14 @@ greens_sources_setup() {
       else info "Skipping $provider $api/$organization because remote access is unavailable."; continue; fi
     fi
 
-    if [[ "$access_mode" == remote && "$provider" == github ]]; then
+    [[ "$access_mode" == local ]] && types=commits
+    types="$(greens_normalize_activity_types "$provider" "$types")"
+    if [[ "$access_mode" == local || "$provider" == git ]]; then types=commits; else types="$(greens_required "Activity types for $api/$organization" "${types:-$defaults}")"; fi
+    greens_validate_activity_types "$provider" "$types" || return 1
+
+    # Commit collection uses Git transport authentication, including SSH. Only
+    # API activity needs a provider session and a validated account.
+    if [[ "$access_mode" == remote && "$types" != commits && "$provider" == github ]]; then
       if ! gh auth status --active --hostname "$api" >/dev/null 2>&1 || ! meta="$(GREENS_FETCH_TIMEOUT=15 greens_gh_api_as "$api" "" user)"; then
         answer="$(prompt "GitHub API access failed. Use local commit history only for all $api/$organization repositories? (y/N)" 'n')"
         if [[ "$answer" =~ ^[Yy]$ ]]; then access_mode=local; types=commits; else info "Skipping github $api/$organization."; continue; fi
@@ -351,7 +358,7 @@ greens_sources_setup() {
           if [[ "$answer" =~ ^[Yy]$ ]]; then access_mode=local; types=commits; else info "Skipping github $api/$organization."; continue; fi
         fi
       fi
-    elif [[ "$access_mode" == remote && "$provider" == gitlab ]]; then
+    elif [[ "$access_mode" == remote && "$types" != commits && "$provider" == gitlab ]]; then
       if ! command -v glab >/dev/null || ! meta="$(GREENS_FETCH_TIMEOUT=15 greens_run glab api --hostname "$api" user 2>/dev/null)"; then
         answer="$(prompt "GitLab API access failed. Use local commit history only for all $api/$organization repositories? (y/N)" 'n')"
         if [[ "$answer" =~ ^[Yy]$ ]]; then access_mode=local; types=commits; else info "Skipping gitlab $api/$organization."; continue; fi
@@ -364,10 +371,7 @@ greens_sources_setup() {
       fi
     fi
     [[ "$access_mode" == local ]] && types=commits
-    types="$(greens_normalize_activity_types "$provider" "$types")"
     since="$(greens_required "Include $api/$organization activity since" "${since:-$(date +%Y)-01-01}")"; greens_epoch "$since" >/dev/null || { fail "Invalid history start for $api/$organization."; return 1; }
-    if [[ "$access_mode" == local || "$provider" == git ]]; then types=commits; else types="$(greens_required "Activity types for $api/$organization" "${types:-$defaults}")"; fi
-    greens_validate_activity_types "$provider" "$types" || return 1
     SOURCE_COUNT="$((SOURCE_COUNT + 1))"
     printf -v "SOURCE_${SOURCE_COUNT}_PROVIDER" '%s' "$provider"; printf -v "SOURCE_${SOURCE_COUNT}_REMOTE_HOSTS" '%s' "$aliases"
     printf -v "SOURCE_${SOURCE_COUNT}_API_HOST" '%s' "$api"; printf -v "SOURCE_${SOURCE_COUNT}_ORGANIZATION" '%s' "$organization"
@@ -379,12 +383,17 @@ greens_sources_setup() {
 
   info "Detected source configuration:"
   for ((i=1; i<=SOURCE_COUNT; i++)); do info "  $(greens_source_value "$i" PROVIDER) $(greens_source_value "$i" API_HOST)/$(greens_source_value "$i" ORGANIZATION): access=$(greens_source_value "$i" ACCESS_MODE), activity=$(greens_source_value "$i" ACTIVITY_TYPES)"; done
-  personal_default="${PERSONAL_GH_USER:-$(gh api --hostname github.com user --jq .login)}"
+  active_user="$(gh api --hostname github.com user --jq .login)" || { fail "Authenticate gh for github.com, then rerun setup."; return 1; }
+  personal_default="${PERSONAL_GH_USER:-$active_user}"
   PERSONAL_GH_USER="$(greens_required 'Personal GitHub username' "$personal_default")"
-  gh auth switch --hostname github.com --user "$PERSONAL_GH_USER" >/dev/null 2>&1 || { fail "Run gh auth login --hostname github.com for $PERSONAL_GH_USER first."; return 1; }
+  if [[ "$PERSONAL_GH_USER" != "$active_user" ]]; then
+    gh auth switch --hostname github.com --user "$PERSONAL_GH_USER" >/dev/null 2>&1 || { fail "Authenticate gh for $PERSONAL_GH_USER on github.com first."; return 1; }
+    [[ "$(gh api --hostname github.com user --jq .login)" == "$PERSONAL_GH_USER" ]] || { fail "GitHub account does not match $PERSONAL_GH_USER."; return 1; }
+  fi
   default_email="$(gh api --hostname github.com user/emails --jq '.[] | select(.verified and .primary) | .email' 2>/dev/null || true)"
   MIRROR_EMAIL="$(greens_required 'Personal GitHub email' "${MIRROR_EMAIL:-$default_email}")"; MIRROR_NAME="$(greens_required 'Mirror author name' "${MIRROR_NAME:-greens}")"
-  MIRROR_URL="$(greens_required 'GitHub mirror URL' "${MIRROR_URL:-https://github.com/$PERSONAL_GH_USER/work-contributions-mirror}")"
+  url="${MIRROR_URL:-https://github.com/$PERSONAL_GH_USER/work-contributions-mirror}"
+  MIRROR_URL="$(greens_required 'GitHub mirror URL' "$url" "$(mask_url "$url")")"
   owner="$(greens_remote_identity "$MIRROR_URL")" || { fail "Invalid mirror URL."; return 1; }; [[ "$owner" == github.com/"$PERSONAL_GH_USER"/* ]] || { fail "Choose a github.com repository owned by $PERSONAL_GH_USER."; return 1; }; owner="${owner#github.com/}"
   if ! meta="$(gh api --hostname github.com "repos/$owner" 2>/dev/null)"; then confirm "Create private GitHub repository $owner?" || return 1; GH_HOST=github.com gh repo create "$owner" --private --description "Timestamp-only work contribution mirror"; meta="$(gh api --hostname github.com "repos/$owner")"; fi
   if [[ "$(jq -r .private <<< "$meta")" != true ]]; then warn "This public mirror exposes exact work timestamps."; [[ "$(prompt 'Type PUBLIC to use this public mirror' '')" == PUBLIC ]] || return 1; fi
@@ -407,7 +416,8 @@ greens_sources_setup() {
   SYNC_HOUR="$(greens_required 'Daily hour (0-23, local timezone)' "${SYNC_HOUR:-0}")"; [[ "$SYNC_HOUR" =~ ^[0-9]{1,2}$ ]] && [[ "$((10#$SYNC_HOUR))" -le 23 ]] || { fail "Invalid hour."; return 1; }; SYNC_HOUR="$((10#$SYNC_HOUR))"
   # Passed by variable name to greens_replace_config.
   # shellcheck disable=SC2034
-  GREENS_LEGACY_TIMESTAMPS=0
+  # Indexed reruns still need the timestamp deduplication enabled at migration.
+  GREENS_LEGACY_TIMESTAMPS="${GREENS_LEGACY_TIMESTAMPS:-0}"
   # shellcheck disable=SC2034
   if [[ "$legacy_schema" == 1 && -d "$MIRROR_DIR/.git" ]] && git -C "$MIRROR_DIR" rev-parse --verify HEAD >/dev/null 2>&1 && ! git -C "$MIRROR_DIR" log --format=%B | grep -q '^Greens-Activity: '; then printf -v GREENS_LEGACY_TIMESTAMPS '%s' 1; fi
   save_keys=(WORK_DIRS SCAN_MODE SOURCE_COUNT PERSONAL_GH_USER MIRROR_EMAIL MIRROR_NAME MIRROR_URL MIRROR_DIR COPY_MESSAGES COPY_MESSAGES_ACK SCHEDULER SYNC_HOUR GREENS_LEGACY_TIMESTAMPS)
