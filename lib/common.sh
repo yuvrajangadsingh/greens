@@ -304,6 +304,31 @@ greens_remove_all_schedulers() {
   greens_remove_cron
   greens_remove_launchd
   greens_remove_windows_task
+  greens_remove_legacy_schedulers "$1"
+}
+
+# v1.8.2 jobs have no configuration selector, so they belong to the default
+# config. Retire them when replacing that config's schedule, including manual.
+greens_remove_legacy_schedulers() {
+  local script="$1" tmp legacy_command
+  [[ "$CONFIG_FILE" == "$(greens_config_path "$HOME/.contrib-mirror/config")" ]] || return 0
+  command -v launchctl >/dev/null && launchctl bootout "gui/$(id -u)/com.greens" 2>/dev/null || true
+  rm -f "$HOME/Library/LaunchAgents/com.greens.plist"
+  command -v crontab >/dev/null || return 0
+  tmp="$(mktemp)" || return 1
+  legacy_command="/bin/bash $script >> $HOME/.contrib-mirror/logs/sync.log 2>&1"
+  if crontab -l > "$tmp" 2>/dev/null; then
+    awk -v legacy="$legacy_command" '
+      {
+        command=$0
+        sub(/^[[:space:]]*0[[:space:]]+[0-9]+[[:space:]]+\*[[:space:]]+\*[[:space:]]+\*[[:space:]]+/, "", command)
+        if (command != legacy) print
+      }' "$tmp" > "$tmp.next"
+    if ! cmp -s "$tmp" "$tmp.next"; then
+      crontab - < "$tmp.next" || { rm -f "$tmp" "$tmp.next"; return 1; }
+    fi
+  fi
+  rm -f "$tmp" "$tmp.next"
 }
 
 greens_systemd_remove() {

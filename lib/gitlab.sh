@@ -222,7 +222,8 @@ greens_mirror_mixed_records() {
     sed -n 's/^Greens-Activity: \([0-9a-f]\{64\}\)$/\1/p' | sort -u > "$RUN_TMP/known"
   : > "$RUN_TMP/legacy-epochs"
   if [[ "${GREENS_LEGACY_TIMESTAMPS:-0}" == 1 ]]; then
-    git -C "$MIRROR_DIR" log --format=%at --author="<$MIRROR_EMAIL>" 2>/dev/null | sort -u > "$RUN_TMP/legacy-epochs"
+    git -C "$MIRROR_DIR" log --format=%at --author="<$MIRROR_EMAIL>" \
+      --invert-grep --grep='^Greens-Activity: ' 2>/dev/null | sort -u > "$RUN_TMP/legacy-epochs"
   elif git -C "$MIRROR_DIR" rev-parse --verify HEAD >/dev/null 2>&1 && [[ ! -s "$RUN_TMP/known" ]]; then
     log "ERROR: destination history has no activity IDs; rerun setup to migrate a legacy greens configuration."
     return 1
