@@ -15,7 +15,7 @@ cat > "$TEST_ROOT/bin/crontab" <<'MOCK'
 #!/bin/bash
 case "$1" in
   -l) [[ -f "$TEST_ROOT/crontab" ]] && cat "$TEST_ROOT/crontab" ;;
-  -) cat > "$TEST_ROOT/crontab" ;;
+  -) cat > "$TEST_ROOT/crontab.next"; mv "$TEST_ROOT/crontab.next" "$TEST_ROOT/crontab" ;;
   *) exit 1 ;;
 esac
 MOCK
@@ -153,7 +153,8 @@ case "$*" in
   'auth switch --hostname github.example --user '*) printf '%s\n' "${*: -1}" > "$TEST_ROOT/github-example-active" ;;
   'auth switch --hostname github.com --user '*)
     echo "$*" >> "$TEST_ROOT/destination-switches"
-    [[ ! -f "$TEST_ROOT/pat-only" ]] ;;
+    [[ ! -f "$TEST_ROOT/pat-only" && ! -f "$TEST_ROOT/destination-switch-fails" ]] || exit 1
+    printf '%s\n' "${*: -1}" > "$TEST_ROOT/destination-active" ;;
   'api --hostname github.example user') login="$(cat "$TEST_ROOT/github-example-active" 2>/dev/null || echo fixture-gh)"; printf '{"login":"%s"}\n' "$login" ;;
   'api --hostname github.example user --jq .login') cat "$TEST_ROOT/github-example-active" 2>/dev/null || echo fixture-gh ;;
   'api --hostname github.example / --jq .current_user_url') echo 'https://github.example/api/v3/user' ;;
@@ -165,7 +166,10 @@ case "$*" in
       echo '{"items":[{"id":501,"created_at":"2021-02-03T13:00:00Z","updated_at":"2021-02-03T13:00:00Z","repository_url":"https://github.example/api/v3/repos/acme/app"}]}'
     fi
     ;;
-  'api user --jq .login'|'api --hostname github.com user --jq .login') echo fixture ;;
+  'api user --jq .login'|'api --hostname github.com user --jq .login')
+    [[ ! -f "$TEST_ROOT/expired-destination" || -f "$TEST_ROOT/destination-active" ]] || exit 1
+    if [[ -f "$TEST_ROOT/destination-wrong-login" ]]; then echo wrong-user
+    else cat "$TEST_ROOT/destination-active" 2>/dev/null || echo fixture; fi ;;
   'api user/emails --jq '*|'api --hostname github.com user/emails --jq '*) echo mirror@example.test ;;
   'api --hostname github.com repos/fixture/mirror') echo '{"private":true,"default_branch":"main"}' ;;
   'api --hostname github.example users/'*' --jq .type') echo Organization ;;
@@ -646,3 +650,123 @@ echo TERMINAL_PREFLIGHT_PASSED
 FIXTURE
 python3 "$ROOT/tests/terminal-preflight.py" "$TEST_ROOT/terminal-preflight" "$ROOT"
 echo "PASS: terminal preflight fallback reads confirmations for every source"
+
+# A migrated mirror retains timestamp deduplication only for legacy commits.
+# Distinct IDs discovered on separate runs may legitimately share an epoch.
+(
+  MIRROR_DIR="$TEST_ROOT/legacy-epoch-mirror" MIRROR_EMAIL=mirror@example.test MIRROR_NAME=greens
+  RUN_TMP="$TEST_ROOT/legacy-epoch-run" SUCCESS_STAMP_FILE="$TEST_ROOT/legacy-epoch-stamp"
+  GREENS_LEGACY_TIMESTAMPS=1
+  mkdir -p "$RUN_TMP"
+  git init --bare --quiet "$TEST_ROOT/remotes/legacy-epoch-mirror.git"
+  git init --quiet "$MIRROR_DIR"
+  git -C "$MIRROR_DIR" symbolic-ref HEAD refs/heads/main
+  git -C "$MIRROR_DIR" remote add origin "$TEST_ROOT/remotes/legacy-epoch-mirror.git"
+  GIT_AUTHOR_DATE=2021-01-01T12:00:00Z GIT_COMMITTER_DATE=2021-01-01T12:00:00Z \
+    git -C "$MIRROR_DIR" -c user.email="$MIRROR_EMAIL" commit --quiet --allow-empty -m sync
+  mirror_visibility() { echo public; }
+  : > "$RUN_TMP/publish"
+  legacy_epoch="$(git -C "$MIRROR_DIR" log -1 --format=%at)"
+  new_epoch=1612353600 # 2021-02-03T12:00:00Z, independent of the test host timezone.
+  jq -nc --argjson legacy "$legacy_epoch" --argjson epoch "$new_epoch" '
+    {key:"legacy",epoch:$legacy,date:"2021-01-01T12:00:00Z",kind:"commits",project:"one"},
+    {key:"first",epoch:$epoch,date:"2021-02-03T12:00:00Z",kind:"commits",project:"one"}' > "$RUN_TMP/input"
+  greens_mirror_mixed_records "$RUN_TMP/input" "$RUN_TMP/publish" > "$TEST_ROOT/legacy-epoch-output" 2>&1
+  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 2 ]] || fail "legacy timestamp was duplicated"
+  jq -nc --argjson epoch "$new_epoch" '{key:"second",epoch:$epoch,date:"2021-02-03T12:00:00Z",kind:"commits",project:"two"}' >> "$RUN_TMP/input"
+  greens_mirror_mixed_records "$RUN_TMP/input" "$RUN_TMP/publish" >> "$TEST_ROOT/legacy-epoch-output" 2>&1
+  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 3 ]] || fail "new activity at a marked commit timestamp was skipped"
+  [[ "$(cat "$RUN_TMP/legacy-epochs")" == "$legacy_epoch" ]] || fail "marked commits entered legacy timestamp baseline"
+  mirrored_head="$(git -C "$MIRROR_DIR" rev-parse HEAD)"
+  greens_mirror_mixed_records "$RUN_TMP/input" "$RUN_TMP/publish" >> "$TEST_ROOT/legacy-epoch-output" 2>&1
+  [[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$mirrored_head" ]] || fail "legacy-mode rerun duplicated activity IDs"
+)
+echo "PASS: legacy timestamps exclude marked activities across repeated syncs"
+
+# The following configs each have one remote commit-only source and one root:
+# accept saved defaults, then decline the initial sync.
+rerun_setup_defaults() {
+  {
+    printf 'y\n'
+    printf '\n%.0s' {1..12}
+    printf 'n\n'
+  } | CONTRIB_MIRROR_CONFIG="$1" bash "$ROOT/setup.sh" > "$2" 2>&1
+}
+
+# An expired active work account must not prevent selecting the saved personal
+# account. Failed switches and wrong actors still leave the config untouched.
+expired_config="$TEST_ROOT/expired-account-config"
+cp "$TEST_ROOT/ssh-only-config" "$expired_config"
+rm -f "$TEST_ROOT/destination-active" "$TEST_ROOT/destination-switches"
+touch "$TEST_ROOT/expired-destination"
+rerun_setup_defaults "$expired_config" "$TEST_ROOT/expired-account-output" || {
+  cat "$TEST_ROOT/expired-account-output"; fail "expired active account blocked saved personal account";
+}
+grep -qx 'auth switch --hostname github.com --user fixture' "$TEST_ROOT/destination-switches" || fail "setup did not select saved personal account"
+expired_hash="$(git hash-object "$expired_config")"
+for failure in destination-switch-fails destination-wrong-login; do
+  rm -f "$TEST_ROOT/destination-active"
+  touch "$TEST_ROOT/$failure"
+  if rerun_setup_defaults "$expired_config" "$TEST_ROOT/$failure-output"; then fail "setup accepted $failure"; fi
+  [[ "$(git hash-object "$expired_config")" == "$expired_hash" ]] || fail "failed destination authentication changed config"
+  rm "$TEST_ROOT/$failure"
+done
+rm -f "$TEST_ROOT/expired-destination" "$TEST_ROOT/destination-active"
+echo "PASS: expired active account recovery and destination identity checks"
+
+# One group remains visible while its second root is offline. Keep both host
+# aliases, then prove discovery includes the returned alias after remounting.
+alias_config="$TEST_ROOT/alias-config"
+cp "$TEST_ROOT/ssh-only-config" "$alias_config"
+mkdir -p "$TEST_ROOT/alias-work/repo"
+git init --quiet "$TEST_ROOT/alias-work/repo"
+git -C "$TEST_ROOT/alias-work/repo" remote add origin git@gitlab-work:ssh-only/other.git
+bash -c 'source "$1/lib/common.sh"; source "$2"; WORK_DIRS="$WORK_DIRS"$'"'"'\n'"'"'"$3"; SOURCE_1_REMOTE_HOSTS=gitlab.com,gitlab-work; greens_save_config "$2" WORK_DIRS SOURCE_1_REMOTE_HOSTS' bash "$ROOT" "$alias_config" "$TEST_ROOT/alias-work"
+mv "$TEST_ROOT/alias-work" "$TEST_ROOT/alias-work-offline"
+{
+  printf 'y\n'
+  printf '\n%.0s' {1..12}
+  printf 'n\n'
+} | CONTRIB_MIRROR_CONFIG="$alias_config" bash "$ROOT/setup.sh" > "$TEST_ROOT/alias-output" 2>&1 || {
+  cat "$TEST_ROOT/alias-output"; fail "partially discovered source setup";
+}
+bash -c 'source "$1"; [[ "$SOURCE_1_REMOTE_HOSTS" == gitlab.com,gitlab-work ]]' bash "$alias_config" || fail "setup dropped or duplicated saved aliases"
+mv "$TEST_ROOT/alias-work-offline" "$TEST_ROOT/alias-work"
+bash -c 'source "$1/lib/common.sh"; source "$1/lib/gitlab.sh"; source "$2"; CACHE_DIR="$TEST_ROOT/unused-cache"; greens_mixed_discover_checkouts' bash "$ROOT" "$alias_config" > "$TEST_ROOT/alias-checkouts"
+[[ "$(wc -l < "$TEST_ROOT/alias-checkouts" | tr -d ' ')" == 2 ]] || fail "returned alias checkout was not discovered"
+grep -q 'gitlab.com/ssh-only/other' "$TEST_ROOT/alias-checkouts" || fail "returned alias was not mapped to saved API host"
+echo "PASS: saved aliases survive partial discovery and a returning work root"
+
+# Replacing the default configuration's schedule retires unscoped v1.8.2
+# jobs. Custom configs and unrelated cron entries must remain independent.
+mkdir -p "$HOME/.contrib-mirror" "$HOME/Library/LaunchAgents"
+default_config="$HOME/.contrib-mirror/config"
+cp "$TEST_ROOT/ssh-only-config" "$default_config"
+legacy_cron="0 0 * * * /bin/bash $ROOT/sync.sh >> $HOME/.contrib-mirror/logs/sync.log 2>&1"
+printf '%s\n' "$legacy_cron" \
+  "0 3 * * * /bin/bash $ROOT/other-sync.sh >> $HOME/other.log 2>&1" \
+  "0 4 * * * CONTRIB_MIRROR_CONFIG=$expired_config /bin/bash $ROOT/sync.sh >> $HOME/other.log 2>&1 # greens-other" \
+  "0 5 * * * /bin/bash $ROOT/sync.sh --status >> $HOME/status.log 2>&1" > "$TEST_ROOT/crontab"
+cp "$TEST_ROOT/crontab" "$TEST_ROOT/legacy-crontab"
+touch "$HOME/Library/LaunchAgents/com.greens.plist"
+rerun_setup_defaults "$expired_config" "$TEST_ROOT/custom-scheduler-output" || {
+  cat "$TEST_ROOT/custom-scheduler-output"; fail "custom-config scheduler rerun";
+}
+cmp -s "$TEST_ROOT/crontab" "$TEST_ROOT/legacy-crontab" || fail "custom setup removed a default or unrelated cron job"
+[[ -f "$HOME/Library/LaunchAgents/com.greens.plist" ]] || fail "custom setup removed default legacy launchd agent"
+rm -f "$TEST_ROOT/launchctl-calls"
+SCHEDULER=cron SYNC_HOUR=9 rerun_setup_defaults "$default_config" "$TEST_ROOT/legacy-scheduler-output" || {
+  cat "$TEST_ROOT/legacy-scheduler-output"; fail "legacy scheduler replacement";
+}
+[[ ! -e "$HOME/Library/LaunchAgents/com.greens.plist" ]] || fail "setup retained legacy launchd agent"
+if grep -qxF "$legacy_cron" "$TEST_ROOT/crontab"; then fail "setup retained legacy cron hour"; fi
+[[ "$(wc -l < "$TEST_ROOT/crontab" | tr -d ' ')" == 4 ]] || fail "scheduler replacement removed unrelated cron entries"
+grep -q '^0 9 .*# greens-' "$TEST_ROOT/crontab" || fail "replacement cron schedule did not use new hour"
+grep -qx "gui/$(id -u)/com.greens" "$TEST_ROOT/launchctl-calls" || fail "setup did not boot out legacy agent"
+printf '%s\n' "$legacy_cron" >> "$TEST_ROOT/crontab"
+SCHEDULER=manual rerun_setup_defaults "$default_config" "$TEST_ROOT/manual-scheduler-output" || {
+  cat "$TEST_ROOT/manual-scheduler-output"; fail "legacy scheduler removal for manual sync";
+}
+[[ "$(wc -l < "$TEST_ROOT/crontab" | tr -d ' ')" == 3 ]] || fail "manual schedule retained old or scoped cron jobs"
+if grep -qxF "$legacy_cron" "$TEST_ROOT/crontab"; then fail "manual setup retained legacy cron"; fi
+echo "PASS: legacy scheduler migration, custom-config isolation, and manual cleanup"

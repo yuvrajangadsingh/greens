@@ -150,7 +150,7 @@ greens_sources_setup() {
   local had_config=0 legacy_schema=0 roots_removed=0 existing_dirs suggested_dir="" dirs="" path canonical answer setup_tmp choice index remove
   local scan hosts class groups gitpath repodir url identity host rest organization
   local record provider api domain detected choice ssh_domain existing_source_count existing_sources
-  local aliases username emails since types access_mode defaults meta i key owner branch default_email personal_default retry active_user
+  local aliases saved_aliases alias username emails since types access_mode defaults meta i key owner branch default_email personal_default retry active_user
   local scheduler_prompt scheduler_default scheduler_values scheduler_error
   local -a save_keys
   for key in git jq gh; do command -v "$key" >/dev/null || { fail "Install $key, then rerun setup."; return 1; }; done
@@ -292,16 +292,24 @@ greens_sources_setup() {
   existing_sources="$setup_tmp/existing-sources"
   : > "$existing_sources"
   for ((i=1; i<=existing_source_count; i++)); do
-    printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
       "$(greens_source_value "$i" PROVIDER)" "$(greens_source_value "$i" API_HOST)" "$(greens_source_value "$i" ORGANIZATION)" \
       "$(greens_source_value "$i" USERNAME)" "$(greens_source_value "$i" EMAILS)" "$(greens_source_value "$i" SINCE)" "$(greens_source_value "$i" ACTIVITY_TYPES)" \
-      "$(greens_source_value "$i" ACCESS_MODE)" >> "$existing_sources"
+      "$(greens_source_value "$i" ACCESS_MODE)" "$(greens_source_value "$i" REMOTE_HOSTS)" >> "$existing_sources"
   done
   SOURCE_COUNT=0
   while IFS=$'\t' read -r provider api organization aliases _count <&4; do
     username=""; emails=""; since=""; types=""; access_mode=remote
     record="$(awk -F '|' -v p="$provider" -v a="$api" -v o="$organization" '$1==p && $2==a && $3==o {print; exit}' "$existing_sources")"
-    if [[ -n "$record" ]]; then IFS='|' read -r _ _ _ username emails since types access_mode <<< "$record"; access_mode="${access_mode:-remote}"; fi
+    if [[ -n "$record" ]]; then
+      IFS='|' read -r _ _ _ username emails since types access_mode saved_aliases <<< "$record"
+      access_mode="${access_mode:-remote}"
+      if [[ "$roots_removed" == 0 ]]; then
+        for alias in ${saved_aliases//,/ }; do
+          case ",$aliases," in *",$alias,"*) ;; *) aliases="${aliases:+$aliases,}$alias" ;; esac
+        done
+      fi
+    fi
     if [[ -z "$record" && "$existing_source_count" -eq 0 ]]; then
       emails="${EMAILS:-}"; since="${SINCE:-}"; types="${ACTIVITY_TYPES:-}"
       if [[ "$provider" == github ]]; then username="${GITHUB_USERNAME:-}"; elif [[ "$provider" == gitlab ]]; then username="${GITLAB_USERNAME:-}"; fi
@@ -383,7 +391,10 @@ greens_sources_setup() {
 
   info "Detected source configuration:"
   for ((i=1; i<=SOURCE_COUNT; i++)); do info "  $(greens_source_value "$i" PROVIDER) $(greens_source_value "$i" API_HOST)/$(greens_source_value "$i" ORGANIZATION): access=$(greens_source_value "$i" ACCESS_MODE), activity=$(greens_source_value "$i" ACTIVITY_TYPES)"; done
-  active_user="$(gh api --hostname github.com user --jq .login)" || { fail "Authenticate gh for github.com, then rerun setup."; return 1; }
+  if ! active_user="$(gh api --hostname github.com user --jq .login 2>/dev/null)"; then
+    active_user=""
+    [[ -n "${PERSONAL_GH_USER:-}" ]] || { fail "Authenticate gh for github.com, then rerun setup."; return 1; }
+  fi
   personal_default="${PERSONAL_GH_USER:-$active_user}"
   PERSONAL_GH_USER="$(greens_required 'Personal GitHub username' "$personal_default")"
   if [[ "$PERSONAL_GH_USER" != "$active_user" ]]; then
@@ -425,7 +436,7 @@ greens_sources_setup() {
   greens_replace_config "$CONFIG_FILE" '^(WORK_DIRS?|SCAN_MODE|SOURCE_PROVIDER|SOURCE_COUNT|SOURCE_[0-9]+_.*|REMOTE_PREFIX|GITHUB_(ORG|USERNAME|TOKEN)|GITLAB_(HOST|REMOTE_HOST|USERNAME)|EMAILS|SINCE|ACTIVITY_TYPES|PERSONAL_GH_USER|MIRROR_(EMAIL|NAME|URL|DIR)|COPY_MESSAGES(_ACK)?|SCHEDULER|SYNC_HOUR|GREENS_LEGACY_TIMESTAMPS)$' "${save_keys[@]}"
   ok "Saved configuration to $CONFIG_FILE"
   if confirm "Run the initial sync now?"; then FORCE=1 CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$SCRIPT_DIR/sync.sh"; fi
-  greens_remove_all_schedulers
+  greens_remove_all_schedulers "$SCRIPT_DIR/sync.sh"
   case "$SCHEDULER" in
     systemd) greens_install_systemd "$SCRIPT_DIR/sync.sh" "$SYNC_HOUR" ;;
     cron) greens_install_cron "$SCRIPT_DIR/sync.sh" "$SYNC_HOUR" ;;
