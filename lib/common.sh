@@ -93,26 +93,32 @@ greens_count_repositories() {
   printf '%s\n' "$count"
 }
 
-# Keep credentials local to one command. Named account lookup does not depend
-# on the active account and never changes gh's shared authentication state.
-greens_gh_as() (
-  local host="$1" user="$2" token="" actor
-  shift 2
+greens_gh_token() {
+  local host="$1" user="$2" environment_fallback="${3:-1}" token=""
   if [[ -n "$user" ]]; then
     token="$(greens_run gh auth token --hostname "$host" --user "$user" 2>/dev/null)" || token=""
   else
     token="$(greens_run gh auth token --hostname "$host" 2>/dev/null)" || token=""
   fi
-  if [[ -z "$token" ]]; then
+  if [[ -z "$token" && "$environment_fallback" == 1 ]]; then
     case "$host" in
       github.com|*.ghe.com) token="${GH_TOKEN:-${GITHUB_TOKEN:-}}" ;;
       *) token="${GH_ENTERPRISE_TOKEN:-${GITHUB_ENTERPRISE_TOKEN:-}}" ;;
     esac
   fi
-  [[ -n "$token" ]] || { echo "Authenticate GitHub account '${user:-active}' for $host." >&2; return 1; }
+  [[ -n "$token" ]] || return 1
+  printf '%s' "$token"
+}
+
+# Keep credentials local to one command. Named account lookup does not depend
+# on the active account and never changes gh's shared authentication state.
+greens_gh_as() (
+  local host="$1" user="$2" token="${GREENS_COMMAND_GH_TOKEN:-}" actor
+  shift 2
+  if [[ -z "$token" ]]; then token="$(greens_gh_token "$host" "$user")" || { echo "Authenticate GitHub account '${user:-active}' for $host." >&2; return 1; }; fi
   export GH_HOST="$host" GH_TOKEN="$token" GITHUB_TOKEN="$token"
   export GH_ENTERPRISE_TOKEN="$token" GITHUB_ENTERPRISE_TOKEN="$token"
-  if [[ -n "$user" ]]; then
+  if [[ -n "$user" && "${GREENS_GH_VERIFY_ACTOR:-1}" == 1 ]]; then
     actor="$(greens_run gh api --hostname "$host" user --jq .login)" || return 1
     [[ "$actor" == "$user" ]] || { echo "GitHub account does not match $user on $host." >&2; return 1; }
   fi
@@ -128,10 +134,20 @@ greens_gh_api_as() {
 # Git's gh credential helper inherits the command-local account as well. SSH
 # keeps its existing key/alias selection; other providers keep their helpers.
 greens_git_as() {
-  local provider="$1" host="$2" user="$3" url="$4"
+  local provider="$1" host="$2" user="$3" url="$4" token="" verify_actor=1
   shift 4
   if [[ "$provider" == github && -n "$user" && ( "$url" == https://* || "$url" == http://* ) ]]; then
-    greens_gh_as "$host" "$user" greens_run git -c credential.helper= \
+    if [[ "${GREENS_GIT_TRANSPORT_ONLY:-0}" == 1 ]]; then
+      # A historical username must not require API authentication for commits.
+      # Prefer explicit URL credentials, or existing helpers when gh has none.
+      if [[ "${url#*://}" == *@* ]] || ! token="$(greens_gh_token "$host" "$user" 0)"; then
+        GITHUB_TOKEN="${GITHUB_TOKEN:-}" greens_run git "$@"
+        return
+      fi
+      verify_actor=0
+    fi
+    GREENS_COMMAND_GH_TOKEN="$token" GREENS_GH_VERIFY_ACTOR="$verify_actor" \
+      greens_gh_as "$host" "$user" greens_run git -c credential.helper= \
       -c "credential.https://$host.helper=" -c "credential.https://$host.helper=!gh auth git-credential" \
       -c "credential.http://$host.helper=" -c "credential.http://$host.helper=!gh auth git-credential" "$@"
   else
