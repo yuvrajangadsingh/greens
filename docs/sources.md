@@ -46,17 +46,21 @@ in the normal `gh` and `glab` credential stores.
 
 Each GitHub owner has its own configured account, while the destination has a
 separate personal-account setting. There is no separate-account question: the
-selected usernames already provide that information. API calls temporarily
-select the source account with `gh`, then restore the previously active account.
+selected usernames already provide that information. API requests and HTTPS Git
+operations use credentials for the selected account only within that command. They never change the active `gh` account, so multiple
+configurations can run concurrently. A valid configured account also works when
+an unrelated active account has expired.
 The personal destination username and primary verified email are pre-filled
 from the authenticated personal `github.com` account.
 
 Choose activity types before account validation. A `commits`-only source uses
 Git transport authentication (including SSH) and does not require `gh` or `glab`
 authentication for that source. The destination still needs an authenticated
-GitHub.com account; an active `GH_TOKEN` or `GITHUB_TOKEN` works without a stored
-CLI account to switch to. Homebrew installs `git`, `jq`, and `gh`; install `glab`
-separately when selecting GitLab API activity.
+GitHub.com account; a matching `GH_TOKEN` or `GITHUB_TOKEN` also works without a
+stored CLI account. SSH destinations keep their original aliases and keys; setup
+resolves the alias hostname only when checking the destination identity.
+Homebrew installs `git`, `jq`, and `gh`; install `glab` separately when selecting
+GitLab API activity.
 
 ## Configuration schema
 

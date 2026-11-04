@@ -170,7 +170,8 @@ greens_preflight_mixed_sources() {
       continue
     fi
     [[ "$mode" == remote ]] || { log "ERROR: invalid access mode for source $source_index: $mode"; return 1; }
-    if ! GIT_TERMINAL_PROMPT=0 GREENS_FETCH_TIMEOUT=15 greens_run git ls-remote "$url" HEAD >/dev/null 2>&1; then
+    provider="$(greens_indexed_value "$source_index" PROVIDER)"; api="$(greens_indexed_value "$source_index" API_HOST)"; username="$(greens_indexed_value "$source_index" USERNAME)"
+    if ! GIT_TERMINAL_PROMPT=0 GREENS_FETCH_TIMEOUT=15 greens_git_as "$provider" "$api" "$username" "$url" ls-remote "$url" HEAD >/dev/null 2>&1; then
       greens_offer_local_fallback "$source_index" "Git remote is unreachable" || return 1
       continue
     fi
@@ -179,8 +180,7 @@ greens_preflight_mixed_sources() {
     api_done="$RUN_TMP/preflight-api-$source_index.done"
     if [[ "$provider" == github ]]; then
       if [[ ! -f "$api_done" ]]; then
-        if ! gh auth status --active --hostname "$api" >/dev/null 2>&1 ||
-           [[ "$(GREENS_FETCH_TIMEOUT=15 greens_gh_api_as "$api" "$username" user --jq .login 2>/dev/null || true)" != "$username" ]]; then
+        if [[ "$(GREENS_FETCH_TIMEOUT=15 greens_gh_api_as "$api" "$username" user --jq .login 2>/dev/null || true)" != "$username" ]]; then
           greens_offer_local_fallback "$source_index" "GitHub API authentication is unavailable" || return 1
           continue
         fi
@@ -254,7 +254,7 @@ greens_mirror_mixed_records() {
   fi
   if git -C "$MIRROR_DIR" rev-parse --verify HEAD >/dev/null 2>&1; then
     [[ "${GREENS_PUSH_FORCE:-0}" != 1 ]] || { log "ERROR: mixed sources never force-push"; return 1; }
-    greens_run git -C "$MIRROR_DIR" push origin "HEAD:refs/heads/$mirror_branch"
+    greens_mirror_git -C "$MIRROR_DIR" push origin "HEAD:refs/heads/$mirror_branch"
   fi
   while IFS=$'\t' read -r from to; do mkdir -p "$(dirname "$to")"; mv "$from" "$to"; done < "$publish"
   printf '%s\n' "$today" > "$SUCCESS_STAMP_FILE.tmp.$$"; mv "$SUCCESS_STAMP_FILE.tmp.$$" "$SUCCESS_STAMP_FILE"
@@ -300,7 +300,7 @@ greens_mixed_sync() {
         git --git-dir="$bare" remote set-url origin "$url"
         if [[ "$SOURCE_PROVIDER" == gitlab ]]; then
           greens_run git --git-dir="$bare" fetch --quiet --prune --filter=blob:none origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' '+refs/merge-requests/*/head:refs/merge-requests/*/head'
-        else greens_run git --git-dir="$bare" fetch --quiet --prune --filter=blob:none origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'; fi
+        else greens_git_as "$SOURCE_PROVIDER" "$SOURCE_API_HOST" "$SOURCE_USERNAME" "$url" --git-dir="$bare" fetch --quiet --prune --filter=blob:none origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'; fi
         git --git-dir="$bare" log --all --format='%H%x09%at%x09%ai%x09%ae' |
           jq -Rrc --arg identity "$identity" --arg path "$project_path" --arg emails "$EMAILS" --argjson since "$since_epoch" --argjson until "$run_epoch" '
           split("\t")|select(length==4)|. as $r|($emails|ascii_downcase|split(",")|map(gsub("^\\s+|\\s+$";""))) as $e|select(($e|index($r[3]|ascii_downcase))!=null)|(.[1]|tonumber) as $t|select($t >= $since and $t <= $until)|{key:($identity+"/commit/"+.[0]),epoch:$t,date:.[2],kind:"commits",project:$path}' >> "$source_file"
@@ -308,7 +308,6 @@ greens_mixed_sync() {
     fi
     if [[ "$SOURCE_PROVIDER" == github && "$ACTIVITY_TYPES" != commits && ! -f "$RUN_TMP/github-api-$source_index.done" ]]; then
       command -v gh >/dev/null || { log "ERROR: install gh"; return 1; }
-      gh auth status --active --hostname "$SOURCE_API_HOST" >/dev/null 2>&1 || { log "ERROR: gh is not authenticated for $SOURCE_API_HOST"; return 1; }
       [[ "$(greens_gh_api_as "$SOURCE_API_HOST" "$SOURCE_USERNAME" user --jq .login)" == "$SOURCE_USERNAME" ]] || { log "ERROR: gh actor mismatch for $SOURCE_API_HOST"; return 1; }
       owner_type="$(greens_gh_api_as "$SOURCE_API_HOST" "$SOURCE_USERNAME" "users/$SOURCE_ORGANIZATION" --jq .type)" || return 1
       for kind in prs issues reviews; do case ",$ACTIVITY_TYPES," in *,$kind,*) github_api_records "$kind" "$RUN_TMP/$key-$kind" "$owner_type" >> "$source_file" ;; esac; done
@@ -547,7 +546,7 @@ greens_provider_sync() {
     if [[ "${GREENS_PUSH_FORCE:-0}" == 1 ]]; then
       log "ERROR: the new providers never force-push; use an empty destination"; return 1
     fi
-    greens_run git -C "$MIRROR_DIR" push origin "HEAD:refs/heads/$mirror_branch"
+    greens_mirror_git -C "$MIRROR_DIR" push origin "HEAD:refs/heads/$mirror_branch"
   fi
   # All collection and the push succeeded: publish local normalized state.
   while IFS=$'\t' read -r identity url; do

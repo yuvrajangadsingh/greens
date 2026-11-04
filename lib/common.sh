@@ -93,32 +93,92 @@ greens_count_repositories() {
   printf '%s\n' "$count"
 }
 
-# Run one GitHub API request as a configured account, then restore the account
-# that was active for that host. gh selects accounts per host rather than per
-# command, so this keeps multiple owners and a personal destination account
-# from changing each other's authentication context.
-greens_gh_api_as() {
-  local host="$1" user="$2" active switched=0 rc
+# Keep credentials local to one command. Named account lookup does not depend
+# on the active account and never changes gh's shared authentication state.
+greens_gh_as() (
+  local host="$1" user="$2" token="" actor
   shift 2
-  active="$(greens_run gh api --hostname "$host" user --jq .login 2>/dev/null)" || return 1
-  if [[ -n "$user" && "$user" != "$active" ]]; then
-    gh auth switch --hostname "$host" --user "$user" >/dev/null 2>&1 || {
-      echo "GitHub account '$user' is not authenticated for $host. Run: gh auth login --hostname $host" >&2
-      return 1
-    }
-    switched=1
+  if [[ -n "$user" ]]; then
+    token="$(greens_run gh auth token --hostname "$host" --user "$user" 2>/dev/null)" || token=""
+  else
+    token="$(greens_run gh auth token --hostname "$host" 2>/dev/null)" || token=""
   fi
-  if greens_run gh api --hostname "$host" "$@"; then rc=0; else rc=$?; fi
-  if [[ "$switched" == 1 ]] && ! gh auth switch --hostname "$host" --user "$active" >/dev/null 2>&1; then
-    echo "Could not restore GitHub account '$active' for $host." >&2
-    return 1
+  if [[ -z "$token" ]]; then
+    case "$host" in
+      github.com|*.ghe.com) token="${GH_TOKEN:-${GITHUB_TOKEN:-}}" ;;
+      *) token="${GH_ENTERPRISE_TOKEN:-${GITHUB_ENTERPRISE_TOKEN:-}}" ;;
+    esac
   fi
-  return "$rc"
+  [[ -n "$token" ]] || { echo "Authenticate GitHub account '${user:-active}' for $host." >&2; return 1; }
+  export GH_HOST="$host" GH_TOKEN="$token" GITHUB_TOKEN="$token"
+  export GH_ENTERPRISE_TOKEN="$token" GITHUB_ENTERPRISE_TOKEN="$token"
+  if [[ -n "$user" ]]; then
+    actor="$(greens_run gh api --hostname "$host" user --jq .login)" || return 1
+    [[ "$actor" == "$user" ]] || { echo "GitHub account does not match $user on $host." >&2; return 1; }
+  fi
+  "$@"
+)
+
+greens_gh_api_as() {
+  local host="$1" user="$2"
+  shift 2
+  greens_gh_as "$host" "$user" greens_run gh api --hostname "$host" "$@"
+}
+
+# Git's gh credential helper inherits the command-local account as well. SSH
+# keeps its existing key/alias selection; other providers keep their helpers.
+greens_git_as() {
+  local provider="$1" host="$2" user="$3" url="$4"
+  shift 4
+  if [[ "$provider" == github && -n "$user" && ( "$url" == https://* || "$url" == http://* ) ]]; then
+    greens_gh_as "$host" "$user" greens_run git -c credential.helper= \
+      -c "credential.https://$host.helper=" -c "credential.https://$host.helper=!gh auth git-credential" \
+      -c "credential.http://$host.helper=" -c "credential.http://$host.helper=!gh auth git-credential" "$@"
+  else
+    greens_run git "$@"
+  fi
+}
+
+greens_mirror_git() {
+  local url
+  url="$(git -C "$MIRROR_DIR" config remote.origin.url)" || return 1
+  greens_git_as github github.com "${PERSONAL_GH_USER:-}" "$url" "$@"
+}
+
+# Resolve destination SSH aliases for identity checks without rewriting the
+# transport URL, which may select a different SSH key or port.
+greens_destination_identity() {
+  local url="$1" identity host resolved
+  identity="$(greens_remote_identity "$url")" || return 1
+  host="${identity%%/*}"
+  if [[ "$host" != github.com && ( "$url" == ssh://* || "$url" != *://* ) ]]; then
+    resolved="$(ssh -G -- "$host" 2>/dev/null | awk 'tolower($1)=="hostname" {print tolower($2); exit}' || true)"
+    [[ -z "$resolved" ]] || identity="$resolved/${identity#*/}"
+  fi
+  [[ "$identity" == github.com/* ]] || return 1
+  printf '%s\n' "$identity"
+}
+
+# Homebrew's opt symlink survives upgrades; physical Cellar paths do not.
+greens_sync_path() {
+  local script="$1" prefix stable
+  case "$script" in
+    */Cellar/greens/*/libexec/sync.sh)
+      prefix="${script%%/Cellar/greens/*}"
+      stable="$prefix/opt/greens/libexec/sync.sh"
+      if [[ -f "$stable" ]]; then printf '%s\n' "$stable"; return; fi
+      ;;
+  esac
+  printf '%s\n' "$script"
 }
 
 greens_run() {
   local seconds="${GREENS_FETCH_TIMEOUT:-120}"
-  if command -v timeout >/dev/null 2>&1; then
+  if declare -p TIMEOUT_CMD >/dev/null 2>&1; then
+    ${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout --kill-after=10 "$seconds" "$@"
+  elif command -v timeout >/dev/null 2>&1; then
     timeout --kill-after=10 "$seconds" "$@"
   elif command -v perl >/dev/null 2>&1; then
     perl -e 'alarm shift; exec @ARGV or die $!' "$seconds" "$@"
@@ -250,6 +310,7 @@ greens_remove_launchd() {
 
 greens_install_launchd() {
   local script="$1" hour="$2" label plist log_dir
+  script="$(greens_sync_path "$script")"
   command -v launchctl >/dev/null || { echo "launchctl is unavailable; choose cron or manual." >&2; return 1; }
   label="$(greens_launchd_label)"
   plist="$HOME/Library/LaunchAgents/$label.plist"
@@ -278,6 +339,7 @@ greens_remove_windows_task() {
 
 greens_install_windows_task() {
   local script="$1" hour="$2" gitbash="" path win_bash mixed_sync log_dir mixed_log task_time win_user
+  script="$(greens_sync_path "$script")"
   command -v schtasks.exe >/dev/null || { echo "Windows Task Scheduler is unavailable; choose manual." >&2; return 1; }
   for path in "/c/Program Files/Git/bin/bash.exe" "/c/Program Files (x86)/Git/bin/bash.exe" "${LOCALAPPDATA:-}/Programs/Git/bin/bash.exe"; do
     if [[ -f "$path" ]]; then gitbash="$path"; break; fi
@@ -304,25 +366,27 @@ greens_remove_all_schedulers() {
   greens_remove_cron
   greens_remove_launchd
   greens_remove_windows_task
-  greens_remove_legacy_schedulers "$1"
+  greens_remove_legacy_schedulers
 }
 
 # v1.8.2 jobs have no configuration selector, so they belong to the default
 # config. Retire them when replacing that config's schedule, including manual.
 greens_remove_legacy_schedulers() {
-  local script="$1" tmp legacy_command
+  local tmp legacy_tail
   [[ "$CONFIG_FILE" == "$(greens_config_path "$HOME/.contrib-mirror/config")" ]] || return 0
   command -v launchctl >/dev/null && launchctl bootout "gui/$(id -u)/com.greens" 2>/dev/null || true
   rm -f "$HOME/Library/LaunchAgents/com.greens.plist"
   command -v crontab >/dev/null || return 0
   tmp="$(mktemp)" || return 1
-  legacy_command="/bin/bash $script >> $HOME/.contrib-mirror/logs/sync.log 2>&1"
+  legacy_tail=" >> $HOME/.contrib-mirror/logs/sync.log 2>&1"
   if crontab -l > "$tmp" 2>/dev/null; then
-    awk -v legacy="$legacy_command" '
+    awk -v tail="$legacy_tail" '
       {
         command=$0
         sub(/^[[:space:]]*0[[:space:]]+[0-9]+[[:space:]]+\*[[:space:]]+\*[[:space:]]+\*[[:space:]]+/, "", command)
-        if (command != legacy) print
+        path=substr(command,1,length(command)-length(tail))
+        if (command != $0 && path ~ /^\/bin\/bash .*\/sync[.]sh$/ && substr(command,length(path)+1)==tail) next
+        print
       }' "$tmp" > "$tmp.next"
     if ! cmp -s "$tmp" "$tmp.next"; then
       crontab - < "$tmp.next" || { rm -f "$tmp" "$tmp.next"; return 1; }
@@ -343,6 +407,7 @@ greens_systemd_remove() {
 
 greens_install_systemd() {
   local script="$1" hour="$2" id dir runner escaped
+  script="$(greens_sync_path "$script")"
   command -v systemctl >/dev/null || { echo "systemd is unavailable; choose cron or manual." >&2; return 1; }
   systemctl --user show-environment >/dev/null || return 1
   id="$(greens_scheduler_id)"
@@ -387,6 +452,7 @@ EOF
 
 greens_install_cron() {
   local script="$1" hour="$2" id line
+  script="$(greens_sync_path "$script")"
   id="$(greens_scheduler_id)"
   printf -v line '0 %s * * * CONTRIB_MIRROR_CONFIG=%q /bin/bash %q >> %q 2>&1 # %s' \
     "$hour" "$CONFIG_FILE" "$script" "${LOG_DIR:-$HOME/.contrib-mirror/logs}/sync.log" "$id"

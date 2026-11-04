@@ -170,24 +170,18 @@ mirror_visibility() {
     echo "$MIRROR_VIS"
     return 0
   fi
-  local raw effective src="" vis="" owner_repo=""
+  local raw effective identity="" vis="" owner_repo=""
   raw="$(git -C "$MIRROR_DIR" config remote.origin.url 2>/dev/null || true)"
   effective="$(git -C "$MIRROR_DIR" remote get-url origin 2>/dev/null || true)"
-  case "$raw" in *github*) src="$raw" ;; esac
-  if [[ -z "$src" ]]; then
-    case "$effective" in *github*) src="$effective" ;; esac
-  fi
+  identity="$(greens_destination_identity "$raw" 2>/dev/null || greens_destination_identity "$effective" 2>/dev/null || true)"
   MIRROR_VIS="unverifiable"
-  if [[ -n "$src" ]]; then
-    owner_repo="$(echo "$src" | sed -n 's|.*[:/]\([^/:]*/[^/:]*\)$|\1|p')"
-    owner_repo="${owner_repo%.git}"
-    if [[ -n "$owner_repo" ]] && command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
-      vis="$(gh repo view "$owner_repo" --json visibility -q .visibility 2>/dev/null || true)"
-      case "$vis" in
-        PRIVATE|private) MIRROR_VIS="private" ;;
-        PUBLIC|public)   MIRROR_VIS="public" ;;
-      esac
-    fi
+  if [[ -n "$identity" ]] && command -v gh >/dev/null 2>&1; then
+    owner_repo="${identity#github.com/}"
+    vis="$(greens_gh_as github.com "${PERSONAL_GH_USER:-}" greens_run gh repo view "$owner_repo" --json visibility -q .visibility 2>/dev/null || true)"
+    case "$vis" in
+      PRIVATE|private) MIRROR_VIS="private" ;;
+      PUBLIC|public)   MIRROR_VIS="public" ;;
+    esac
   fi
   echo "$MIRROR_VIS"
 }
@@ -279,7 +273,7 @@ privacy_migrate() {
 
   # ── Step 1: resolve the remote default branch ────────────────────────────
   local symref_out default_branch
-  if ! symref_out="$(git -C "$MIRROR_DIR" ls-remote --symref origin HEAD 2>&1)"; then
+  if ! symref_out="$(greens_mirror_git -C "$MIRROR_DIR" ls-remote --symref origin HEAD 2>&1)"; then
     echo "  ERROR: can't reach the mirror remote ($masked_url):"
     echo "$symref_out" | tail -3 | sed 's/^/    /'
     echo "  Nothing was changed. Fix access (greens --setup) and re-run."
@@ -310,8 +304,8 @@ privacy_migrate() {
     owner_repo="${owner_repo%.git}"
   fi
   if [[ "$github_mirror" -eq 1 ]]; then
-    if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
-      visibility="$(gh repo view "$owner_repo" --json visibility -q .visibility 2>/dev/null || true)"
+    if command -v gh >/dev/null 2>&1; then
+      visibility="$(greens_gh_as github.com "${PERSONAL_GH_USER:-}" greens_run gh repo view "$owner_repo" --json visibility -q .visibility 2>/dev/null || true)"
     fi
     case "$visibility" in
       PRIVATE|private)
@@ -346,7 +340,7 @@ privacy_migrate() {
   # pointing at the legacy tip would otherwise keep the old README fetchable
   # after a "successful" migration.
   local fetch_out
-  if ! fetch_out="$(git -C "$MIRROR_DIR" fetch --prune origin "+refs/heads/*:refs/remotes/origin/*" "+refs/*:refs/greens-remote-scan/*" 2>&1)"; then
+  if ! fetch_out="$(greens_mirror_git -C "$MIRROR_DIR" fetch --prune origin "+refs/heads/*:refs/remotes/origin/*" "+refs/*:refs/greens-remote-scan/*" 2>&1)"; then
     echo "  ERROR: couldn't fetch the mirror's refs:"
     echo "$fetch_out" | tail -3 | sed 's/^/    /'
     echo "  Nothing was changed."
@@ -354,7 +348,7 @@ privacy_migrate() {
   fi
   local tmp_snapshot
   tmp_snapshot="$(mktemp)"
-  if ! git -C "$MIRROR_DIR" ls-remote origin > "$tmp_snapshot.raw" 2>/dev/null; then
+  if ! greens_mirror_git -C "$MIRROR_DIR" ls-remote origin > "$tmp_snapshot.raw" 2>/dev/null; then
     echo "  ERROR: couldn't list the mirror's remote refs. Nothing was changed."
     rm -f "$tmp_snapshot" "$tmp_snapshot.raw"
     exit 1
@@ -813,14 +807,14 @@ privacy_migrate() {
 
   echo "  Pushing (atomic, force-with-lease on every ref)..."
   local push_out push_rc=0
-  push_out="$(git -C "$tmp_build" push origin "${push_args[@]}" 2>&1)" || push_rc=$?
+  push_out="$(greens_mirror_git -C "$tmp_build" push origin "${push_args[@]}" 2>&1)" || push_rc=$?
 
   # ── Step 10: verify the REMOTE state — never trust the client exit alone ──
   # The COMPLETE advertised ref set must now be exactly the default branch.
   local tmp_after new_tip after_query_ok=1
   tmp_after="$(mktemp)"
   new_tip="$(git -C "$tmp_build" rev-parse "$db_ref")"
-  if git -C "$tmp_build" ls-remote origin > "$tmp_after.raw" 2>/dev/null; then
+  if greens_mirror_git -C "$tmp_build" ls-remote origin > "$tmp_after.raw" 2>/dev/null; then
     grep -v '\^{}' "$tmp_after.raw" | awk '$2 != "HEAD"' > "$tmp_after" || true
   else
     after_query_ok=0
@@ -913,7 +907,7 @@ privacy_migrate() {
 replace_mirror_with_clean_clone() {
   local url="$1" branch="$2" tmp_clone
   tmp_clone="$(mktemp -d)/mirror"
-  if ! git clone --quiet --branch "$branch" "$url" "$tmp_clone" 2>/dev/null; then
+  if ! greens_git_as github github.com "${PERSONAL_GH_USER:-}" "$url" clone --quiet --branch "$branch" "$url" "$tmp_clone" 2>/dev/null; then
     echo "  [!] Couldn't re-clone the migrated remote; local mirror left as-is."
     return 1
   fi
@@ -1002,9 +996,9 @@ case "${1:-}" in
     # GitHub counts contributions. No main/master guessing: symref first,
     # then the remote's only branch; a truly unborn remote keeps git's own
     # init default (the first push defines the branch).
-    default_branch="$(git ls-remote --symref "$remote_url" HEAD 2>/dev/null | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2; exit}')"
+    default_branch="$(greens_git_as github github.com "${PERSONAL_GH_USER:-}" "$remote_url" ls-remote --symref "$remote_url" HEAD 2>/dev/null | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2; exit}')"
     if [[ -z "$default_branch" ]]; then
-      default_branch="$(git ls-remote --heads "$remote_url" 2>/dev/null | awk 'NR==1 {sub("refs/heads/", "", $2); print $2}')"
+      default_branch="$(greens_git_as github github.com "${PERSONAL_GH_USER:-}" "$remote_url" ls-remote --heads "$remote_url" 2>/dev/null | awk 'NR==1 {sub("refs/heads/", "", $2); print $2}')"
     fi
     # Wipe and re-init mirror. No init commit — the first mirrored activity
     # commit becomes the new root.
@@ -1018,7 +1012,7 @@ case "${1:-}" in
     chmod 600 "$MIRROR_DIR/.git/config" 2>/dev/null || true
     # Verify the remote is reachable (the actual push happens after the sync
     # below rebuilds the commits, with --force to overwrite remote history).
-    if ! git -C "$MIRROR_DIR" ls-remote origin >/dev/null 2>&1; then
+    if ! greens_mirror_git -C "$MIRROR_DIR" ls-remote origin >/dev/null 2>&1; then
       echo "  [!] Can't reach the mirror remote. Re-run 'greens --setup' for access."
       exit 1
     fi
@@ -1426,27 +1420,14 @@ fetch_github_activity() {
     return
   fi
 
-  # Auth: GITHUB_TOKEN takes priority, otherwise try account switching
-  if [[ -n "$GITHUB_TOKEN" ]]; then
-    export GITHUB_TOKEN
-  elif [[ -n "$GITHUB_USERNAME" ]]; then
-    local original_account
-    original_account=$(gh auth status --active 2>&1 | grep 'Logged in' | sed 's/.*account //' | awk '{print $1}' || true)
-    if [[ "$original_account" != "$GITHUB_USERNAME" ]]; then
-      gh auth switch --user "$GITHUB_USERNAME" &>/dev/null || true
-    fi
-    trap 'if [[ -n "${original_account:-}" && "${original_account}" != "$GITHUB_USERNAME" ]]; then gh auth switch --user "$original_account" &>/dev/null || true; fi' RETURN
-  fi
-
-  # Check gh auth status
-  if ! gh auth status &>/dev/null; then
-    echo "[$(date "+%Y-%m-%d %H:%M:%S %z")] WARN: gh CLI not authenticated, skipping GitHub activity fetch" >&2
+  if ! greens_gh_api_as "${GH_HOST:-github.com}" "$GITHUB_USERNAME" user --jq .login >/dev/null 2>&1; then
+    echo "[$(date "+%Y-%m-%d %H:%M:%S %z")] WARN: configured GitHub account is unavailable, skipping GitHub activity fetch" >&2
     return
   fi
 
   # PRs created
   if [[ "$ACTIVITY_TYPES" == *"prs"* ]]; then
-    gh search prs --author="$GITHUB_USERNAME" --created=">=$since_date" \
+    greens_gh_as "${GH_HOST:-github.com}" "$GITHUB_USERNAME" greens_run gh search prs --author="$GITHUB_USERNAME" --created=">=$since_date" \
       --owner="$org" --json createdAt --jq '.[].createdAt' 2>/dev/null | \
       while read -r ts; do
         if [[ -n "$ts" ]]; then iso_to_git_format "$ts"; fi
@@ -1455,7 +1436,7 @@ fetch_github_activity() {
 
   # PR reviews
   if [[ "$ACTIVITY_TYPES" == *"reviews"* ]]; then
-    gh search prs --reviewed-by="$GITHUB_USERNAME" --updated=">=$since_date" \
+    greens_gh_as "${GH_HOST:-github.com}" "$GITHUB_USERNAME" greens_run gh search prs --reviewed-by="$GITHUB_USERNAME" --updated=">=$since_date" \
       --owner="$org" --json updatedAt --jq '.[].updatedAt' 2>/dev/null | \
       while read -r ts; do
         if [[ -n "$ts" ]]; then iso_to_git_format "$ts"; fi
@@ -1464,7 +1445,7 @@ fetch_github_activity() {
 
   # Issues created
   if [[ "$ACTIVITY_TYPES" == *"issues"* ]]; then
-    gh search issues --author="$GITHUB_USERNAME" --created=">=$since_date" \
+    greens_gh_as "${GH_HOST:-github.com}" "$GITHUB_USERNAME" greens_run gh search issues --author="$GITHUB_USERNAME" --created=">=$since_date" \
       --owner="$org" --json createdAt --jq '.[].createdAt' 2>/dev/null | \
       while read -r ts; do
         if [[ -n "$ts" ]]; then iso_to_git_format "$ts"; fi
@@ -1484,24 +1465,13 @@ fetch_github_activity_with_messages() {
     return
   fi
 
-  if [[ -n "$GITHUB_TOKEN" ]]; then
-    export GITHUB_TOKEN
-  elif [[ -n "$GITHUB_USERNAME" ]]; then
-    local original_account
-    original_account=$(gh auth status --active 2>&1 | grep 'Logged in' | sed 's/.*account //' | awk '{print $1}' || true)
-    if [[ "$original_account" != "$GITHUB_USERNAME" ]]; then
-      gh auth switch --user "$GITHUB_USERNAME" &>/dev/null || true
-    fi
-    trap 'if [[ -n "${original_account:-}" && "${original_account}" != "$GITHUB_USERNAME" ]]; then gh auth switch --user "$original_account" &>/dev/null || true; fi' RETURN
-  fi
-
-  if ! gh auth status &>/dev/null; then
-    echo "[$(date "+%Y-%m-%d %H:%M:%S %z")] WARN: gh CLI not authenticated, skipping GitHub activity fetch" >&2
+  if ! greens_gh_api_as "${GH_HOST:-github.com}" "$GITHUB_USERNAME" user --jq .login >/dev/null 2>&1; then
+    echo "[$(date "+%Y-%m-%d %H:%M:%S %z")] WARN: configured GitHub account is unavailable, skipping GitHub activity fetch" >&2
     return
   fi
 
   if [[ "$ACTIVITY_TYPES" == *"prs"* ]]; then
-    gh search prs --author="$GITHUB_USERNAME" --created=">=$since_date" \
+    greens_gh_as "${GH_HOST:-github.com}" "$GITHUB_USERNAME" greens_run gh search prs --author="$GITHUB_USERNAME" --created=">=$since_date" \
       --owner="$org" --json createdAt --jq '.[].createdAt' 2>/dev/null | \
       while read -r ts; do
         if [[ -n "$ts" ]]; then printf '%s\tPR activity\n' "$(iso_to_git_format "$ts")"; fi
@@ -1509,7 +1479,7 @@ fetch_github_activity_with_messages() {
   fi
 
   if [[ "$ACTIVITY_TYPES" == *"reviews"* ]]; then
-    gh search prs --reviewed-by="$GITHUB_USERNAME" --updated=">=$since_date" \
+    greens_gh_as "${GH_HOST:-github.com}" "$GITHUB_USERNAME" greens_run gh search prs --reviewed-by="$GITHUB_USERNAME" --updated=">=$since_date" \
       --owner="$org" --json updatedAt --jq '.[].updatedAt' 2>/dev/null | \
       while read -r ts; do
         if [[ -n "$ts" ]]; then printf '%s\tReview activity\n' "$(iso_to_git_format "$ts")"; fi
@@ -1517,7 +1487,7 @@ fetch_github_activity_with_messages() {
   fi
 
   if [[ "$ACTIVITY_TYPES" == *"issues"* ]]; then
-    gh search issues --author="$GITHUB_USERNAME" --created=">=$since_date" \
+    greens_gh_as "${GH_HOST:-github.com}" "$GITHUB_USERNAME" greens_run gh search issues --author="$GITHUB_USERNAME" --created=">=$since_date" \
       --owner="$org" --json createdAt --jq '.[].createdAt' 2>/dev/null | \
       while read -r ts; do
         if [[ -n "$ts" ]]; then printf '%s\tIssue activity\n' "$(iso_to_git_format "$ts")"; fi
@@ -1549,7 +1519,7 @@ if [[ -d "${MIRROR_DIR}/.git" ]]; then
   if git -C "$MIRROR_DIR" remote get-url origin >/dev/null 2>&1; then
     # ALL advertised refs (notes/custom included) — legacy history reachable
     # only through a stray ref must still trip the gate.
-    if ! greens_run git -C "$MIRROR_DIR" fetch --prune origin "+refs/heads/*:refs/remotes/origin/*" "+refs/*:refs/greens-remote-scan/*" --quiet 2>/dev/null; then
+    if ! greens_mirror_git -C "$MIRROR_DIR" fetch --prune origin "+refs/heads/*:refs/remotes/origin/*" "+refs/*:refs/greens-remote-scan/*" --quiet 2>/dev/null; then
       # Local evidence of dashboard history + no proof of privacy refuses
       # immediately; a CLEAN local result is likewise not authoritative while
       # the remote is unreachable.
@@ -1733,7 +1703,7 @@ while read -r remote_repo url; do
     log "Cloning $remote_repo"
     # ${arr[@]+...} guards the empty-array case — bash 3.2 + set -u aborts on
     # plain "${arr[@]}" when the array has no elements.
-    if ! err="$(${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} git clone --bare --filter=blob:none --no-tags "$url" "$bare" 2>&1)"; then
+    if ! err="$(greens_git_as github "${GH_HOST:-github.com}" "$GITHUB_USERNAME" "$url" clone --bare --filter=blob:none --no-tags "$url" "$bare" 2>&1)"; then
       log "WARN: clone failed for $remote_repo: $(echo "$err" | tail -n 3 | tr '\n' ' ')"
       failures=$((failures + 1))
       rm -rf "$bare" >/dev/null 2>&1 || true
@@ -1748,7 +1718,7 @@ while read -r remote_repo url; do
   fi
 
   log "Fetching $remote_repo"
-  if ! err="$(${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} git --git-dir="$bare" fetch --prune --no-tags --filter=blob:none origin "+refs/heads/*:refs/heads/*" 2>&1)"; then
+  if ! err="$(greens_git_as github "${GH_HOST:-github.com}" "$GITHUB_USERNAME" "$url" --git-dir="$bare" fetch --prune --no-tags --filter=blob:none origin "+refs/heads/*:refs/heads/*" 2>&1)"; then
     log "WARN: fetch failed for $remote_repo: $(echo "$err" | tail -n 3 | tr '\n' ' ')"
     failures=$((failures + 1))
     continue
@@ -2043,9 +2013,9 @@ if ! git -C "$MIRROR_DIR" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
 else
   do_push() {
     if [[ "${GREENS_PUSH_FORCE:-0}" == "1" ]]; then
-      git -C "$MIRROR_DIR" push --force origin HEAD 2>&1
+      greens_mirror_git -C "$MIRROR_DIR" push --force origin HEAD 2>&1
     else
-      git -C "$MIRROR_DIR" push origin HEAD 2>&1
+      greens_mirror_git -C "$MIRROR_DIR" push origin HEAD 2>&1
     fi
   }
   push_output=""

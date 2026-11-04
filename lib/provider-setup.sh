@@ -102,13 +102,13 @@ greens_remove_work_dir() {
 }
 
 greens_group_git_access() {
-  local scan="$1" organization="$2" aliases="$3" identity repodir url checked=0
+  local scan="$1" organization="$2" aliases="$3" provider="${4:-git}" api="${5:-}" username="${6:-}" identity repodir url checked=0
   while IFS=$'\t' read -r identity repodir; do
     checked=1
     url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
     [[ -n "$url" ]] || return 1
     if ! GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=10}" \
-      GREENS_FETCH_TIMEOUT=15 greens_run git ls-remote "$url" HEAD >/dev/null 2>&1; then
+      GREENS_FETCH_TIMEOUT=15 greens_git_as "$provider" "$api" "$username" "$url" ls-remote "$url" HEAD >/dev/null 2>&1; then
       warn "Remote access failed for $identity"
       return 1
     fi
@@ -150,7 +150,7 @@ greens_sources_setup() {
   local had_config=0 legacy_schema=0 roots_removed=0 existing_dirs suggested_dir="" dirs="" path canonical answer setup_tmp choice index remove
   local scan hosts class groups gitpath repodir url identity host rest organization
   local record provider api domain detected choice ssh_domain existing_source_count existing_sources
-  local aliases saved_aliases alias username emails since types access_mode defaults meta i key owner branch default_email personal_default retry active_user
+  local aliases saved_aliases alias username emails since types access_mode defaults meta i key owner branch default_email personal_default retry sync_path
   local scheduler_prompt scheduler_default scheduler_values scheduler_error
   local -a save_keys
   for key in git jq gh; do command -v "$key" >/dev/null || { fail "Install $key, then rerun setup."; return 1; }; done
@@ -339,10 +339,10 @@ greens_sources_setup() {
     if [[ "$access_mode" == local ]]; then
       retry="$(prompt "Retry remote access for $api/$organization? (y/N)" 'n')"
       if [[ "$retry" =~ ^[Yy]$ ]]; then
-        if greens_group_git_access "$scan" "$organization" "$aliases"; then access_mode=remote; ok "Remote Git access restored for $api/$organization"
+        if greens_group_git_access "$scan" "$organization" "$aliases" "$provider" "$api" "$username"; then access_mode=remote; ok "Remote Git access restored for $api/$organization"
         else warn "Keeping $api/$organization in local-only mode."; fi
       fi
-    elif ! greens_group_git_access "$scan" "$organization" "$aliases"; then
+    elif ! greens_group_git_access "$scan" "$organization" "$aliases" "$provider" "$api" "$username"; then
       answer="$(prompt "Use local commit history only for all $api/$organization repositories? (y/N)" 'n')"
       if [[ "$answer" =~ ^[Yy]$ ]]; then access_mode=local; types=commits; ok "$api/$organization will use local commit history only"
       else info "Skipping $provider $api/$organization because remote access is unavailable."; continue; fi
@@ -356,7 +356,7 @@ greens_sources_setup() {
     # Commit collection uses Git transport authentication, including SSH. Only
     # API activity needs a provider session and a validated account.
     if [[ "$access_mode" == remote && "$types" != commits && "$provider" == github ]]; then
-      if ! gh auth status --active --hostname "$api" >/dev/null 2>&1 || ! meta="$(GREENS_FETCH_TIMEOUT=15 greens_gh_api_as "$api" "" user)"; then
+      if ! meta="$(GREENS_FETCH_TIMEOUT=15 greens_gh_api_as "$api" "$username" user)"; then
         answer="$(prompt "GitHub API access failed. Use local commit history only for all $api/$organization repositories? (y/N)" 'n')"
         if [[ "$answer" =~ ^[Yy]$ ]]; then access_mode=local; types=commits; else info "Skipping github $api/$organization."; continue; fi
       else
@@ -391,27 +391,23 @@ greens_sources_setup() {
 
   info "Detected source configuration:"
   for ((i=1; i<=SOURCE_COUNT; i++)); do info "  $(greens_source_value "$i" PROVIDER) $(greens_source_value "$i" API_HOST)/$(greens_source_value "$i" ORGANIZATION): access=$(greens_source_value "$i" ACCESS_MODE), activity=$(greens_source_value "$i" ACTIVITY_TYPES)"; done
-  if ! active_user="$(gh api --hostname github.com user --jq .login 2>/dev/null)"; then
-    active_user=""
-    [[ -n "${PERSONAL_GH_USER:-}" ]] || { fail "Authenticate gh for github.com, then rerun setup."; return 1; }
+  personal_default="${PERSONAL_GH_USER:-}"
+  if [[ -z "$personal_default" ]]; then
+    personal_default="$(greens_gh_api_as github.com "" user --jq .login)" || { fail "Authenticate gh for github.com, then rerun setup."; return 1; }
   fi
-  personal_default="${PERSONAL_GH_USER:-$active_user}"
   PERSONAL_GH_USER="$(greens_required 'Personal GitHub username' "$personal_default")"
-  if [[ "$PERSONAL_GH_USER" != "$active_user" ]]; then
-    gh auth switch --hostname github.com --user "$PERSONAL_GH_USER" >/dev/null 2>&1 || { fail "Authenticate gh for $PERSONAL_GH_USER on github.com first."; return 1; }
-    [[ "$(gh api --hostname github.com user --jq .login)" == "$PERSONAL_GH_USER" ]] || { fail "GitHub account does not match $PERSONAL_GH_USER."; return 1; }
-  fi
-  default_email="$(gh api --hostname github.com user/emails --jq '.[] | select(.verified and .primary) | .email' 2>/dev/null || true)"
+  [[ "$(greens_gh_api_as github.com "$PERSONAL_GH_USER" user --jq .login)" == "$PERSONAL_GH_USER" ]] || { fail "GitHub account does not match $PERSONAL_GH_USER."; return 1; }
+  default_email="$(greens_gh_api_as github.com "$PERSONAL_GH_USER" user/emails --jq '.[] | select(.verified and .primary) | .email' 2>/dev/null || true)"
   MIRROR_EMAIL="$(greens_required 'Personal GitHub email' "${MIRROR_EMAIL:-$default_email}")"; MIRROR_NAME="$(greens_required 'Mirror author name' "${MIRROR_NAME:-greens}")"
   url="${MIRROR_URL:-https://github.com/$PERSONAL_GH_USER/work-contributions-mirror}"
   MIRROR_URL="$(greens_required 'GitHub mirror URL' "$url" "$(mask_url "$url")")"
-  owner="$(greens_remote_identity "$MIRROR_URL")" || { fail "Invalid mirror URL."; return 1; }; [[ "$owner" == github.com/"$PERSONAL_GH_USER"/* ]] || { fail "Choose a github.com repository owned by $PERSONAL_GH_USER."; return 1; }; owner="${owner#github.com/}"
-  if ! meta="$(gh api --hostname github.com "repos/$owner" 2>/dev/null)"; then confirm "Create private GitHub repository $owner?" || return 1; GH_HOST=github.com gh repo create "$owner" --private --description "Timestamp-only work contribution mirror"; meta="$(gh api --hostname github.com "repos/$owner")"; fi
+  owner="$(greens_destination_identity "$MIRROR_URL")" || { fail "Invalid mirror URL."; return 1; }; [[ "$owner" == github.com/"$PERSONAL_GH_USER"/* ]] || { fail "Choose a github.com repository owned by $PERSONAL_GH_USER."; return 1; }; owner="${owner#github.com/}"
+  if ! meta="$(greens_gh_api_as github.com "$PERSONAL_GH_USER" "repos/$owner" 2>/dev/null)"; then confirm "Create private GitHub repository $owner?" || return 1; greens_gh_as github.com "$PERSONAL_GH_USER" greens_run gh repo create "$owner" --private --description "Timestamp-only work contribution mirror"; meta="$(greens_gh_api_as github.com "$PERSONAL_GH_USER" "repos/$owner")"; fi
   if [[ "$(jq -r .private <<< "$meta")" != true ]]; then warn "This public mirror exposes exact work timestamps."; [[ "$(prompt 'Type PUBLIC to use this public mirror' '')" == PUBLIC ]] || return 1; fi
   branch="$(jq -er .default_branch <<< "$meta")"; MIRROR_DIR="$(greens_required 'Local mirror directory' "${MIRROR_DIR:-$CONFIG_DIR/mirror}")"; MIRROR_DIR="${MIRROR_DIR/#\~/$HOME}"
   mkdir -p "$(dirname "$MIRROR_DIR")"; MIRROR_DIR="$(cd "$(dirname "$MIRROR_DIR")" && pwd)/$(basename "$MIRROR_DIR")"
   while IFS= read -r path; do case "$MIRROR_DIR/" in "$path/"*) fail "Choose a mirror directory outside every work directory."; return 1 ;; esac; done <<< "$WORK_DIRS"
-  if [[ ! -d "$MIRROR_DIR/.git" ]]; then git clone "$MIRROR_URL" "$MIRROR_DIR"; elif [[ "$(greens_remote_identity "$(git -C "$MIRROR_DIR" config remote.origin.url)")" != "github.com/$owner" ]]; then fail "Existing mirror has a different origin."; return 1; fi
+  if [[ ! -d "$MIRROR_DIR/.git" ]]; then greens_git_as github github.com "$PERSONAL_GH_USER" "$MIRROR_URL" clone "$MIRROR_URL" "$MIRROR_DIR"; elif [[ "$(greens_destination_identity "$(git -C "$MIRROR_DIR" config remote.origin.url)")" != "github.com/$owner" ]]; then fail "Existing mirror has a different origin."; return 1; fi
   if ! git -C "$MIRROR_DIR" rev-parse --verify HEAD >/dev/null 2>&1; then git -C "$MIRROR_DIR" symbolic-ref HEAD "refs/heads/$branch"; fi
   # Passed by variable name to greens_replace_config.
   # shellcheck disable=SC2034
@@ -435,13 +431,14 @@ greens_sources_setup() {
   for ((i=1; i<=SOURCE_COUNT; i++)); do for key in PROVIDER REMOTE_HOSTS API_HOST ORGANIZATION USERNAME EMAILS SINCE ACTIVITY_TYPES ACCESS_MODE; do save_keys+=("SOURCE_${i}_${key}"); done; done
   greens_replace_config "$CONFIG_FILE" '^(WORK_DIRS?|SCAN_MODE|SOURCE_PROVIDER|SOURCE_COUNT|SOURCE_[0-9]+_.*|REMOTE_PREFIX|GITHUB_(ORG|USERNAME|TOKEN)|GITLAB_(HOST|REMOTE_HOST|USERNAME)|EMAILS|SINCE|ACTIVITY_TYPES|PERSONAL_GH_USER|MIRROR_(EMAIL|NAME|URL|DIR)|COPY_MESSAGES(_ACK)?|SCHEDULER|SYNC_HOUR|GREENS_LEGACY_TIMESTAMPS)$' "${save_keys[@]}"
   ok "Saved configuration to $CONFIG_FILE"
-  if confirm "Run the initial sync now?"; then FORCE=1 CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$SCRIPT_DIR/sync.sh"; fi
-  greens_remove_all_schedulers "$SCRIPT_DIR/sync.sh"
+  sync_path="$(greens_sync_path "$SCRIPT_DIR/sync.sh")"
+  if confirm "Run the initial sync now?"; then FORCE=1 CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$sync_path"; fi
+  greens_remove_all_schedulers "$sync_path"
   case "$SCHEDULER" in
-    systemd) greens_install_systemd "$SCRIPT_DIR/sync.sh" "$SYNC_HOUR" ;;
-    cron) greens_install_cron "$SCRIPT_DIR/sync.sh" "$SYNC_HOUR" ;;
-    launchd) greens_install_launchd "$SCRIPT_DIR/sync.sh" "$SYNC_HOUR" ;;
-    win) greens_install_windows_task "$SCRIPT_DIR/sync.sh" "$SYNC_HOUR" ;;
+    systemd) greens_install_systemd "$sync_path" "$SYNC_HOUR" ;;
+    cron) greens_install_cron "$sync_path" "$SYNC_HOUR" ;;
+    launchd) greens_install_launchd "$sync_path" "$SYNC_HOUR" ;;
+    win) greens_install_windows_task "$sync_path" "$SYNC_HOUR" ;;
   esac
   ok "Setup complete. Run greens --status to inspect configuration and scheduling."
 }

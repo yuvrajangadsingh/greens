@@ -26,7 +26,9 @@ jobs:
             bash -n "$script"
           done
       - name: GitHub and GitLab integration
-        run: ${{ matrix.bash }} tests/providers.sh
+        run: |
+          ${{ matrix.bash }} tests/providers.sh
+          ${{ matrix.bash }} tests/accounts.sh
       - name: ShellCheck
         if: runner.os == 'Linux'
         run: shellcheck -S warning -x lib/*.sh tests/*.sh setup.sh sync.sh install.sh
@@ -208,8 +210,8 @@ jobs:
           cd - >/dev/null
 
           # GITHUB_USERNAME omitted on purpose: setting it activates sync.sh's
-          # gh-API branch (gh search prs / gh auth switch), which needs auth
-          # the runner doesn't have. PERSONAL_GH_USER is read only by setup.sh.
+          # gh-API branch (gh search prs / account credentials), which needs auth
+          # the runner doesn't have. Leave PERSONAL_GH_USER unset as well.
           cat > "$cfg" <<EOF
           WORK_DIR="$work"
           EMAILS="ci@test.com"
@@ -439,7 +441,7 @@ jobs:
           cat > "$base/bin/gh" <<EOF
           #!/bin/bash
           case "\${1:-}" in
-            auth) exit 0 ;;
+            auth) [[ "\${2:-}" != token ]] || echo fixture-token; exit 0 ;;
             repo) cat "$base/vis.state" 2>/dev/null; exit 0 ;;
             *) exit 1 ;;
           esac
@@ -447,20 +449,19 @@ jobs:
           chmod +x "$base/bin/gh"
           echo PRIVATE > "$base/vis.state"
 
-          # raw mirror URL is a plain path; insteadOf maps it to a local path
-          # that contains "github", driving the real visibility code path
+          # Keep a real GitHub identity; rewrite transport to local fixtures.
           cat > "$base/home/.gitconfig" <<EOF
           [user]
           	name = T
           	email = t@t.com
-          [url "$base/github-alias/mirror.git"]
-          	insteadOf = $base/plainpath/mirror.git
+          [url "$base/github-alias/"]
+            insteadOf = https://github.com/fixture/
           EOF
 
           git init --bare --quiet "$base/github-alias/mirror.git"
           git -C "$base/github-alias/mirror.git" symbolic-ref HEAD refs/heads/main
           git init --quiet "$base/mirror"
-          git -C "$base/mirror" remote add origin "$base/plainpath/mirror.git"
+          git -C "$base/mirror" remote add origin https://github.com/fixture/mirror.git
 
           git init --bare --quiet "$base/workremote/repo-one.git"
           git -C "$base/workremote/repo-one.git" symbolic-ref HEAD refs/heads/main
@@ -509,7 +510,7 @@ jobs:
           git init --bare --quiet "$base/github-alias/mirror2.git"
           git -C "$base/github-alias/mirror2.git" symbolic-ref HEAD refs/heads/main
           git init --quiet "$base/mirror2"
-          git -C "$base/mirror2" remote add origin "$base/github-alias/mirror2.git"
+          git -C "$base/mirror2" remote add origin https://github.com/fixture/mirror2.git
           sed -i '' -e "s|$base/mirror\"|$base/mirror2\"|" "$base/cfg" 2>/dev/null || \
             sed -i -e "s|$base/mirror\"|$base/mirror2\"|" "$base/cfg"
           CONTRIB_MIRROR_CONFIG="$base/cfg" HOME="$base/home" PATH="$base/bin:$PATH" FORCE=1 \
@@ -988,8 +989,8 @@ jobs:
           cd - >/dev/null
 
           # GITHUB_USERNAME omitted on purpose: setting it activates sync.sh's
-          # gh-API branch (gh search prs / gh auth switch), which needs auth
-          # the runner doesn't have. PERSONAL_GH_USER is read only by setup.sh.
+          # gh-API branch (gh search prs / account credentials), which needs auth
+          # the runner doesn't have. Leave PERSONAL_GH_USER unset as well.
           cat > "$cfg" <<EOF
           WORK_DIR="$work"
           EMAILS="ci@test.com"
