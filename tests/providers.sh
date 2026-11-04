@@ -3,11 +3,14 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
+TEST_ROOT="$(cd "$TEST_ROOT" && pwd -P)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 export TEST_ROOT HOME="$TEST_ROOT/home" GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL="$TEST_ROOT/gitconfig"
 mkdir -p "$HOME" "$TEST_ROOT/bin"
 export PATH="$TEST_ROOT/bin:$PATH"
+# Keep nested setup/sync invocations on the interpreter running this suite.
+ln -s "$BASH" "$TEST_ROOT/bin/bash"
 cat > "$TEST_ROOT/bin/crontab" <<'MOCK'
 #!/bin/bash
 case "$1" in
@@ -148,7 +151,9 @@ cat > "$TEST_ROOT/bin/gh" <<'MOCK'
 case "$*" in
   'auth status --active --hostname github.example') exit 0 ;;
   'auth switch --hostname github.example --user '*) printf '%s\n' "${*: -1}" > "$TEST_ROOT/github-example-active" ;;
-  'auth switch --hostname github.com --user '*) exit 0 ;;
+  'auth switch --hostname github.com --user '*)
+    echo "$*" >> "$TEST_ROOT/destination-switches"
+    [[ ! -f "$TEST_ROOT/pat-only" ]] ;;
   'api --hostname github.example user') login="$(cat "$TEST_ROOT/github-example-active" 2>/dev/null || echo fixture-gh)"; printf '{"login":"%s"}\n' "$login" ;;
   'api --hostname github.example user --jq .login') cat "$TEST_ROOT/github-example-active" 2>/dev/null || echo fixture-gh ;;
   'api --hostname github.example / --jq .current_user_url') echo 'https://github.example/api/v3/user' ;;
@@ -162,9 +167,12 @@ case "$*" in
     ;;
   'api user --jq .login'|'api --hostname github.com user --jq .login') echo fixture ;;
   'api user/emails --jq '*|'api --hostname github.com user/emails --jq '*) echo mirror@example.test ;;
-  'api repos/fixture/mirror') echo '{"private":true,"default_branch":"main"}' ;;
+  'api --hostname github.com repos/fixture/mirror') echo '{"private":true,"default_branch":"main"}' ;;
+  'api --hostname github.example users/'*' --jq .type') echo Organization ;;
   'auth status'*) exit 0 ;;
-  'repo view '*' --json visibility -q .visibility') echo "${FIXTURE_VISIBILITY:-PRIVATE}" ;;
+  'repo view '*' --json visibility -q .visibility')
+    echo "$*" >> "$TEST_ROOT/visibility-calls"
+    echo "${FIXTURE_VISIBILITY:-PRIVATE}" ;;
   *) exit 1 ;;
 esac
 MOCK
@@ -172,8 +180,8 @@ chmod +x "$TEST_ROOT/bin/gh"
 git config --global url."$TEST_ROOT/remotes/mirror.git".insteadOf https://github.com/fixture/mirror
 dialog_config="$TEST_ROOT/dialog/config"
 {
-  printf '%s\n\nforge.example\nauthor@example.test\nfixture\n2021-01-01\n' "$WORK_DIR"
-  printf '\nfixture\nmirror@example.test\ngreens\n'
+  printf '%s\n\nforge.example\nauthor@example.test\n\nfixture\n2021-01-01\n' "$WORK_DIR"
+  printf 'fixture\nmirror@example.test\ngreens\n'
   printf 'https://github.com/fixture/mirror\n%s\nmanual\n0\nn\n' "$TEST_ROOT/dialog-mirror"
 } | ACTIVITY_TYPES=commits,prs,issues CONTRIB_MIRROR_CONFIG="$dialog_config" bash "$ROOT/setup.sh" --in-root > "$TEST_ROOT/dialog-output" 2>&1 || {
   cat "$TEST_ROOT/dialog-output"; fail "setup dialog";
@@ -253,8 +261,8 @@ github_dialog_config="$TEST_ROOT/github-dialog/config"
 {
   printf '%s\n\n\n' "$TEST_ROOT/github-dialog-work"
   printf '%s\n' '-'
-  printf 'author@example.test\n\n2021-01-01\ncommits,prs,issues\n'
-  printf 'author@example.test\n\n2021-01-01\ncommits\n'
+  printf 'author@example.test\ncommits,prs,issues\n\n2021-01-01\n'
+  printf 'author@example.test\ncommits\n2021-01-01\n'
   printf '\nmirror@example.test\ngreens\nhttps://github.com/fixture/mirror\n%s\nmanual\n0\nn\n' "$TEST_ROOT/github-dialog-mirror"
 } | CONTRIB_MIRROR_CONFIG="$github_dialog_config" bash "$ROOT/setup.sh" --in-root > "$TEST_ROOT/github-dialog-output" 2>&1 || {
   cat "$TEST_ROOT/github-dialog-output"; fail "multi-owner GitHub setup dialog";
@@ -371,7 +379,8 @@ for provider in git github; do
   git init --quiet "$TEST_ROOT/$provider-mirror"
   git -C "$TEST_ROOT/$provider-mirror" symbolic-ref HEAD refs/heads/main
   git init --bare --quiet "$TEST_ROOT/remotes/$provider-mirror.git"
-  git -C "$TEST_ROOT/$provider-mirror" remote add origin "$TEST_ROOT/remotes/$provider-mirror.git"
+  git -C "$TEST_ROOT/$provider-mirror" remote add origin "https://github.com/fixture/$provider-mirror"
+  git config --global url."$TEST_ROOT/remotes/$provider-mirror.git".insteadOf "https://github.com/fixture/$provider-mirror"
   prefix=git@forge.example:team/
   expected_count=3
   if [[ "$provider" == github ]]; then
@@ -400,7 +409,8 @@ git init --bare --quiet "$TEST_ROOT/remotes/mixed-mirror.git"
 git --git-dir="$TEST_ROOT/remotes/mixed-mirror.git" symbolic-ref HEAD refs/heads/main
 git init --quiet "$TEST_ROOT/mixed-mirror"
 git -C "$TEST_ROOT/mixed-mirror" symbolic-ref HEAD refs/heads/main
-git -C "$TEST_ROOT/mixed-mirror" remote add origin "$TEST_ROOT/remotes/mixed-mirror.git"
+git -C "$TEST_ROOT/mixed-mirror" remote add origin https://github.com/fixture/mixed-mirror
+git config --global url."$TEST_ROOT/remotes/mixed-mirror.git".insteadOf https://github.com/fixture/mixed-mirror
 legacy_config="$CONFIG_FILE"
 CONFIG_FILE="$TEST_ROOT/mixed-config"
 # Values are consumed by name in greens_save_config.
@@ -425,6 +435,28 @@ FIXTURE_VISIBILITY=PUBLIC run_sync
 [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 13 ]] || fail "mixed provider rerun duplicated activity"
 echo "PASS: mixed GitLab and GitHub Enterprise sources"
 
+# Public GitHub origins are rewritten only for transport, so visibility still
+# reaches gh and dashboard history must refuse to sync with exit code 3.
+grep -q 'repo view fixture/mixed-mirror ' "$TEST_ROOT/visibility-calls" || fail "mixed mirror visibility was not queried"
+cat > "$MIRROR_DIR/README.md" <<'DASHBOARD'
+# Work Contributions Mirror
+## Overview
+## Repository Breakdown
+## Sync Info
+Generated by [greens](https://github.com/yuvrajangadsingh/greens)
+DASHBOARD
+git -C "$MIRROR_DIR" add README.md
+git -C "$MIRROR_DIR" commit --quiet -m 'Update sync status'
+git -C "$MIRROR_DIR" push --quiet origin main
+public_head="$(git -C "$MIRROR_DIR" rev-parse HEAD)"
+public_checkpoints="$(cat "$CACHE_DIR"/activity-state/*/*.checkpoint)"
+public_rc=0
+FIXTURE_VISIBILITY=PUBLIC CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" FORCE=1 bash "$ROOT/sync.sh" > "$TEST_ROOT/public-refusal-output" 2>&1 || public_rc=$?
+[[ "$public_rc" == 3 ]] || { cat "$TEST_ROOT/public-refusal-output"; fail "public dashboard history did not exit 3"; }
+[[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$public_head" ]] || fail "public refusal changed mirror history"
+[[ "$(cat "$CACHE_DIR"/activity-state/*/*.checkpoint)" == "$public_checkpoints" ]] || fail "public refusal advanced checkpoints"
+echo "PASS: verified public mirror visibility and dashboard refusal"
+
 # Local-only groups scan every local ref across duplicate checkouts without
 # contacting Git or provider APIs, and deduplicate shared commits.
 mkdir -p "$TEST_ROOT/local-work/one"
@@ -441,7 +473,8 @@ git init --bare --quiet "$TEST_ROOT/remotes/local-mirror.git"
 git --git-dir="$TEST_ROOT/remotes/local-mirror.git" symbolic-ref HEAD refs/heads/main
 git init --quiet "$TEST_ROOT/local-mirror"
 git -C "$TEST_ROOT/local-mirror" symbolic-ref HEAD refs/heads/main
-git -C "$TEST_ROOT/local-mirror" remote add origin "$TEST_ROOT/remotes/local-mirror.git"
+git -C "$TEST_ROOT/local-mirror" remote add origin https://github.com/fixture/local-mirror
+git config --global url."$TEST_ROOT/remotes/local-mirror.git".insteadOf https://github.com/fixture/local-mirror
 # Values are consumed by name in greens_save_config.
 # shellcheck disable=SC2034
 CONFIG_FILE="$TEST_ROOT/local-config" WORK_DIRS="$TEST_ROOT/local-work" SCAN_MODE=in-root SOURCE_COUNT=1 \
@@ -523,3 +556,93 @@ bash "$(dirname "$CONFIG_FILE")/$unit-run"
 greens_systemd_remove
 [[ ! -e "$XDG_CONFIG_HOME/systemd/user/$unit.timer" ]] || fail "timer removal"
 echo "PASS: setup dialog, rerun defaults, configuration persistence, scheduler environment and lifecycle"
+
+# Saved URLs remain usable as defaults, but their credentials never appear in
+# summaries or prompts. Rerunning an indexed migration preserves legacy mode.
+masked_config="$TEST_ROOT/masked-config"
+cp "$dialog_config" "$masked_config"
+# Values are consumed by name in greens_save_config.
+# shellcheck disable=SC2034
+MIRROR_URL=https://fixture-secret@github.com/fixture/mirror GREENS_LEGACY_TIMESTAMPS=1
+greens_save_config "$masked_config" MIRROR_URL GREENS_LEGACY_TIMESTAMPS
+touch "$TEST_ROOT/pat-only"
+rm -f "$TEST_ROOT/destination-switches"
+{
+  printf 'y\n'
+  printf '\n%.0s' {1..14}
+  printf 'n\n'
+} | GH_TOKEN=fixture-token GH_HOST=github.example CONTRIB_MIRROR_CONFIG="$masked_config" bash "$ROOT/setup.sh" > "$TEST_ROOT/masked-output" 2>&1 || {
+  cat "$TEST_ROOT/masked-output"; fail "PAT-only setup with saved credentials";
+}
+rm "$TEST_ROOT/pat-only"
+[[ ! -e "$TEST_ROOT/destination-switches" ]] || fail "PAT-only setup switched an already active destination account"
+if grep -q fixture-secret "$TEST_ROOT/masked-output"; then fail "setup exposed mirror credentials"; fi
+grep -Fq 'Mirror: https://****@github.com/fixture/mirror' "$TEST_ROOT/masked-output" || fail "summary did not mask credentials"
+grep -Fq 'GitHub mirror URL [https://****@github.com/fixture/mirror]' "$TEST_ROOT/masked-output" || fail "prompt did not mask credentials"
+bash -c 'source "$1"; [[ "$MIRROR_URL" == https://fixture-secret@github.com/fixture/mirror && "$GREENS_LEGACY_TIMESTAMPS" == 1 ]]' bash "$masked_config" || fail "setup lost saved URL or legacy timestamp mode"
+
+# A reachable SSH GitLab source can collect remote commits without any API
+# authentication. Git transport access is represented by a local bare fixture.
+mkdir -p "$TEST_ROOT/ssh-only-work/repo"
+git init --quiet "$TEST_ROOT/ssh-only-work/repo"
+git -C "$TEST_ROOT/ssh-only-work/repo" remote add origin git@gitlab.com:ssh-only/repo.git
+git config --global --add url."$TEST_ROOT/remotes/source.git".insteadOf git@gitlab.com:ssh-only/repo.git
+touch "$TEST_ROOT/forbid-glab"
+rm -f "$TEST_ROOT/glab-called"
+{
+  printf '%s\n\nauthor@example.test\ncommits\n2021-01-01\n' "$TEST_ROOT/ssh-only-work"
+  printf '\n\n\nhttps://github.com/fixture/mirror\n%s\nmanual\n0\nn\n' "$TEST_ROOT/ssh-only-mirror"
+} | CONTRIB_MIRROR_CONFIG="$TEST_ROOT/ssh-only-config" bash "$ROOT/setup.sh" --in-root > "$TEST_ROOT/ssh-only-output" 2>&1 || {
+  cat "$TEST_ROOT/ssh-only-output"; fail "SSH-only commit setup";
+}
+rm "$TEST_ROOT/forbid-glab"
+[[ ! -e "$TEST_ROOT/glab-called" ]] || fail "SSH-only setup invoked GitLab API"
+bash -c 'source "$1"; [[ "$SOURCE_1_ACCESS_MODE" == remote && "$SOURCE_1_ACTIVITY_TYPES" == commits ]]' bash "$TEST_ROOT/ssh-only-config" || fail "SSH-only setup lost remote history mode"
+echo "PASS: credential masking, PAT-only destination, legacy rerun, and SSH-only sources"
+
+# Reset removes this configuration's launchd label and the legacy agent while
+# preserving a different configuration's agent. Also cover an unloaded plist.
+cat > "$TEST_ROOT/bin/launchctl" <<'MOCK'
+#!/bin/bash
+case "$1" in
+  list) exit 1 ;;
+  bootout) printf '%s\n' "$2" >> "$TEST_ROOT/launchctl-calls" ;;
+  *) exit 1 ;;
+esac
+MOCK
+chmod +x "$TEST_ROOT/bin/launchctl"
+CONFIG_FILE="$TEST_ROOT/reset-config"
+printf '# reset fixture\n' > "$CONFIG_FILE"
+label="$(greens_launchd_label)"
+mkdir -p "$HOME/Library/LaunchAgents"
+touch "$HOME/Library/LaunchAgents/$label.plist" "$HOME/Library/LaunchAgents/com.greens.plist" "$HOME/Library/LaunchAgents/com.greens.other.plist"
+printf 'y\ny\nn\nn\nn\nn\nn\n' | CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$ROOT/sync.sh" --reset > "$TEST_ROOT/reset-output" 2>&1 || {
+  cat "$TEST_ROOT/reset-output"; fail "launchd reset";
+}
+[[ ! -e "$HOME/Library/LaunchAgents/$label.plist" && ! -e "$HOME/Library/LaunchAgents/com.greens.plist" ]] || fail "reset left a launchd plist"
+[[ -f "$HOME/Library/LaunchAgents/com.greens.other.plist" ]] || fail "reset removed another configuration's launchd agent"
+grep -qx "gui/$(id -u)/$label" "$TEST_ROOT/launchctl-calls" || fail "reset did not boot out scoped launchd label"
+grep -qx "gui/$(id -u)/com.greens" "$TEST_ROOT/launchctl-calls" || fail "reset did not boot out legacy launchd label"
+echo "PASS: scoped and legacy launchd reset"
+
+# Exercise preflight with real terminal descriptors. Prompts must read stdin,
+# while repository rows use their own descriptor throughout the loop.
+cat > "$TEST_ROOT/terminal-preflight" <<'FIXTURE'
+set -euo pipefail
+source "$1/lib/common.sh"
+source "$1/lib/gitlab.sh"
+CONFIG_FILE="$TEST_ROOT/terminal-config"
+RUN_TMP="$TEST_ROOT"
+SOURCE_COUNT=2
+SOURCE_1_PROVIDER=gitlab SOURCE_1_API_HOST=offline.test SOURCE_1_ORGANIZATION=one SOURCE_1_ACCESS_MODE=remote SOURCE_1_ACTIVITY_TYPES=commits
+SOURCE_2_PROVIDER=gitlab SOURCE_2_API_HOST=offline.test SOURCE_2_ORGANIZATION=two SOURCE_2_ACCESS_MODE=remote SOURCE_2_ACTIVITY_TYPES=commits
+greens_save_config "$CONFIG_FILE" SOURCE_COUNT SOURCE_1_PROVIDER SOURCE_1_API_HOST SOURCE_1_ORGANIZATION SOURCE_1_ACCESS_MODE SOURCE_1_ACTIVITY_TYPES SOURCE_2_PROVIDER SOURCE_2_API_HOST SOURCE_2_ORGANIZATION SOURCE_2_ACCESS_MODE SOURCE_2_ACTIVITY_TYPES
+printf '1\toffline.test/one/repo\tmissing-one\n2\toffline.test/two/repo\tmissing-two\n' > "$TEST_ROOT/terminal-sources"
+log() { printf '%s\n' "$*"; }
+greens_run() { return 1; }
+greens_preflight_mixed_sources "$TEST_ROOT/terminal-sources"
+[[ "$SOURCE_1_ACCESS_MODE" == local && "$SOURCE_2_ACCESS_MODE" == local ]]
+echo TERMINAL_PREFLIGHT_PASSED
+FIXTURE
+python3 "$ROOT/tests/terminal-preflight.py" "$TEST_ROOT/terminal-preflight" "$ROOT"
+echo "PASS: terminal preflight fallback reads confirmations for every source"

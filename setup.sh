@@ -30,9 +30,9 @@ CONFIG_DIR="$(dirname "$CONFIG_FILE")"
 # ─────────────────────────────────────────────────────────────────────────────
 
 prompt() {
-  local msg="$1" default="${2:-}"
+  local msg="$1" default="${2:-}" display_default="${3:-${2:-}}"
   if [[ -n "$default" ]]; then
-    printf "%s [%s]: " "$msg" "$default" >&2
+    printf "%s [%s]: " "$msg" "$display_default" >&2
   else
     printf "%s: " "$msg" >&2
   fi

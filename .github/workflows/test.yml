@@ -9,10 +9,14 @@ on:
 
 jobs:
   provider-integration:
-    name: Mixed providers (${{ matrix.os }})
+    name: Mixed providers (${{ matrix.os }}, ${{ matrix.bash }})
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
+        bash: [bash]
+        include:
+          - os: macos-latest
+            bash: /bin/bash
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -22,7 +26,7 @@ jobs:
             bash -n "$script"
           done
       - name: GitHub and GitLab integration
-        run: bash tests/providers.sh
+        run: ${{ matrix.bash }} tests/providers.sh
       - name: ShellCheck
         if: runner.os == 'Linux'
         run: shellcheck -S warning -x lib/*.sh tests/*.sh setup.sh sync.sh install.sh

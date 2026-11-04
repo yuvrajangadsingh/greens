@@ -51,6 +51,13 @@ select the source account with `gh`, then restore the previously active account.
 The personal destination username and primary verified email are pre-filled
 from the authenticated personal `github.com` account.
 
+Choose activity types before account validation. A `commits`-only source uses
+Git transport authentication (including SSH) and does not require `gh` or `glab`
+authentication for that source. The destination still needs an authenticated
+GitHub.com account; an active `GH_TOKEN` or `GITHUB_TOKEN` works without a stored
+CLI account to switch to. Homebrew installs `git`, `jq`, and `gh`; install `glab`
+separately when selecting GitLab API activity.
+
 ## Configuration schema
 
 The configuration is an owner-only Bash environment file. Use setup to edit it;
