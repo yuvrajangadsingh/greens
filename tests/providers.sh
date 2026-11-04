@@ -186,7 +186,7 @@ chmod +x "$TEST_ROOT/bin/gh"
 git config --global url."$TEST_ROOT/remotes/mirror.git".insteadOf https://github.com/fixture/mirror
 dialog_config="$TEST_ROOT/dialog/config"
 {
-  printf '%s\n\nforge.example\nauthor@example.test\n\nfixture\n2021-01-01\n' "$WORK_DIR"
+  printf '%s\n\nforge.example\nauthor@example.test\ncommits, mrs, issues, prs, commits\nfixture\n2021-01-01\n' "$WORK_DIR"
   printf 'fixture\nmirror@example.test\ngreens\n'
   printf 'https://github.com/fixture/mirror\n%s\nmanual\n0\nn\n' "$TEST_ROOT/dialog-mirror"
 } | ACTIVITY_TYPES=commits,prs,issues CONTRIB_MIRROR_CONFIG="$dialog_config" bash "$ROOT/setup.sh" --in-root > "$TEST_ROOT/dialog-output" 2>&1 || {

@@ -1689,6 +1689,7 @@ else
   TIMEOUT_CMD=()
 fi
 
+git_transport_only=0; [[ "$ACTIVITY_TYPES" != commits ]] || git_transport_only=1
 repo_total="$(wc -l < "$tmp_sorted" | tr -d " ")"
 log ""
 log "Step 2/5: Caching $repo_total repos (read-only copies — your code stays untouched)"
@@ -1703,7 +1704,7 @@ while read -r remote_repo url; do
     log "Cloning $remote_repo"
     # ${arr[@]+...} guards the empty-array case — bash 3.2 + set -u aborts on
     # plain "${arr[@]}" when the array has no elements.
-    if ! err="$(greens_git_as github "${GH_HOST:-github.com}" "$GITHUB_USERNAME" "$url" clone --bare --filter=blob:none --no-tags "$url" "$bare" 2>&1)"; then
+    if ! err="$(GREENS_GIT_TRANSPORT_ONLY="$git_transport_only" greens_git_as github "${GH_HOST:-github.com}" "$GITHUB_USERNAME" "$url" clone --bare --filter=blob:none --no-tags "$url" "$bare" 2>&1)"; then
       log "WARN: clone failed for $remote_repo: $(echo "$err" | tail -n 3 | tr '\n' ' ')"
       failures=$((failures + 1))
       rm -rf "$bare" >/dev/null 2>&1 || true
@@ -1718,7 +1719,7 @@ while read -r remote_repo url; do
   fi
 
   log "Fetching $remote_repo"
-  if ! err="$(greens_git_as github "${GH_HOST:-github.com}" "$GITHUB_USERNAME" "$url" --git-dir="$bare" fetch --prune --no-tags --filter=blob:none origin "+refs/heads/*:refs/heads/*" 2>&1)"; then
+  if ! err="$(GREENS_GIT_TRANSPORT_ONLY="$git_transport_only" greens_git_as github "${GH_HOST:-github.com}" "$GITHUB_USERNAME" "$url" --git-dir="$bare" fetch --prune --no-tags --filter=blob:none origin "+refs/heads/*:refs/heads/*" 2>&1)"; then
     log "WARN: fetch failed for $remote_repo: $(echo "$err" | tail -n 3 | tr '\n' ' ')"
     failures=$((failures + 1))
     continue

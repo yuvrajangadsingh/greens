@@ -42,7 +42,9 @@ back to manual classification instead of being trusted from its HTML branding.
 
 Before saving, setup prints the selected directories and source groups. It
 writes the complete configuration atomically only after validation. Tokens stay
-in the normal `gh` and `glab` credential stores.
+in the normal `gh` and `glab` credential stores. A legacy `GITHUB_TOKEN` assignment
+is retained in the owner-only config during migration so initial and scheduled
+syncs keep access when it is the only saved source credential.
 
 Each GitHub owner has its own configured account, while the destination has a
 separate personal-account setting. There is no separate-account question: the
@@ -55,7 +57,13 @@ from the authenticated personal `github.com` account.
 
 Choose activity types before account validation. A `commits`-only source uses
 Git transport authentication (including SSH) and does not require `gh` or `glab`
-authentication for that source. The destination still needs an authenticated
+API authentication for that source. A saved username without a stored `gh` login
+does not replace existing Git credential helpers or credentials in the URL.
+If an HTTPS probe fails during setup, the wizard offers a retry with a stored
+GitHub account for that source group before offering local-only collection.
+Activity answers accept spaces around commas; setup removes duplicates and maps
+GitLab's legacy `prs` name to `mrs` before saving.
+The destination still needs an authenticated
 GitHub.com account; a matching `GH_TOKEN` or `GITHUB_TOKEN` also works without a
 stored CLI account. SSH destinations keep their original aliases and keys; setup
 resolves the alias hostname only when checking the destination identity.

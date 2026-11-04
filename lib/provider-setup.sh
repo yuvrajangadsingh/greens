@@ -56,6 +56,7 @@ greens_probe_provider() {
 
 greens_validate_activity_types() {
   local provider="$1" values="$2" item
+  [[ -n "$values" ]] || { fail "At least one activity type is required."; return 1; }
   for item in ${values//,/ }; do
     case "$provider:$item" in
       github:commits|github:prs|github:issues|github:reviews|\
@@ -102,19 +103,29 @@ greens_remove_work_dir() {
 }
 
 greens_group_git_access() {
-  local scan="$1" organization="$2" aliases="$3" provider="${4:-git}" api="${5:-}" username="${6:-}" identity repodir url checked=0
+  local scan="$1" organization="$2" aliases="$3" provider="${4:-git}" api="${5:-}" username="${6:-}" types="${7:-}" identity repodir url checked=0 transport_only=0
+  [[ "$types" != commits ]] || transport_only=1
   while IFS=$'\t' read -r identity repodir; do
     checked=1
     url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
     [[ -n "$url" ]] || return 1
     if ! GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=10}" \
-      GREENS_FETCH_TIMEOUT=15 greens_git_as "$provider" "$api" "$username" "$url" ls-remote "$url" HEAD >/dev/null 2>&1; then
+      GREENS_FETCH_TIMEOUT=15 GREENS_GIT_TRANSPORT_ONLY="$transport_only" greens_git_as "$provider" "$api" "$username" "$url" ls-remote "$url" HEAD >/dev/null 2>&1; then
       warn "Remote access failed for $identity"
       return 1
     fi
   done < <(awk -F '\t' -v o="$organization" -v aliases=",$aliases," '
     $2==o && index(aliases, "," $1 ",") && !seen[$3]++ {print $3 FS $4}' "$scan")
   [[ "$checked" == 1 ]]
+}
+
+greens_group_has_https() {
+  local scan="$1" organization="$2" aliases="$3" repodir url
+  while IFS= read -r repodir; do
+    url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
+    case "$url" in https://*|http://*) return 0 ;; esac
+  done < <(awk -F '\t' -v o="$organization" -v aliases=",$aliases," '$2==o && index(aliases, "," $1 ",") {print $4}' "$scan")
+  return 1
 }
 
 greens_group_gitlab_api_access() {
@@ -150,7 +161,7 @@ greens_sources_setup() {
   local had_config=0 legacy_schema=0 roots_removed=0 existing_dirs suggested_dir="" dirs="" path canonical answer setup_tmp choice index remove
   local scan hosts class groups gitpath repodir url identity host rest organization
   local record provider api domain detected choice ssh_domain existing_source_count existing_sources
-  local aliases saved_aliases alias username emails since types access_mode defaults meta i key owner branch default_email personal_default retry sync_path
+  local aliases saved_aliases alias username emails since types access_mode defaults meta i key owner branch default_email personal_default retry sync_path retry_username git_access account_selected
   local scheduler_prompt scheduler_default scheduler_values scheduler_error
   local -a save_keys
   for key in git jq gh; do command -v "$key" >/dev/null || { fail "Install $key, then rerun setup."; return 1; }; done
@@ -300,6 +311,7 @@ greens_sources_setup() {
   SOURCE_COUNT=0
   while IFS=$'\t' read -r provider api organization aliases _count <&4; do
     username=""; emails=""; since=""; types=""; access_mode=remote
+    account_selected=0
     record="$(awk -F '|' -v p="$provider" -v a="$api" -v o="$organization" '$1==p && $2==a && $3==o {print; exit}' "$existing_sources")"
     if [[ -n "$record" ]]; then
       IFS='|' read -r _ _ _ username emails since types access_mode saved_aliases <<< "$record"
@@ -339,18 +351,32 @@ greens_sources_setup() {
     if [[ "$access_mode" == local ]]; then
       retry="$(prompt "Retry remote access for $api/$organization? (y/N)" 'n')"
       if [[ "$retry" =~ ^[Yy]$ ]]; then
-        if greens_group_git_access "$scan" "$organization" "$aliases" "$provider" "$api" "$username"; then access_mode=remote; ok "Remote Git access restored for $api/$organization"
+        if greens_group_git_access "$scan" "$organization" "$aliases" "$provider" "$api" "$username" "$types"; then access_mode=remote; ok "Remote Git access restored for $api/$organization"
         else warn "Keeping $api/$organization in local-only mode."; fi
       fi
-    elif ! greens_group_git_access "$scan" "$organization" "$aliases" "$provider" "$api" "$username"; then
-      answer="$(prompt "Use local commit history only for all $api/$organization repositories? (y/N)" 'n')"
-      if [[ "$answer" =~ ^[Yy]$ ]]; then access_mode=local; types=commits; ok "$api/$organization will use local commit history only"
-      else info "Skipping $provider $api/$organization because remote access is unavailable."; continue; fi
+    elif ! greens_group_git_access "$scan" "$organization" "$aliases" "$provider" "$api" "$username" "$types"; then
+      git_access=0
+      if [[ "$provider" == github ]] && greens_group_has_https "$scan" "$organization" "$aliases"; then
+        retry_username="$(prompt "GitHub username to retry HTTPS access for $api/$organization (or - to skip retry)" "$username")" || return 1
+        if [[ -n "$retry_username" && "$retry_username" != - ]]; then
+          username="$retry_username"
+          if greens_group_git_access "$scan" "$organization" "$aliases" "$provider" "$api" "$username" "$types"; then
+            git_access=1; account_selected=1
+            ok "Remote Git access verified as $username for $api/$organization"
+          fi
+        fi
+      fi
+      if [[ "$git_access" == 0 ]]; then
+        answer="$(prompt "Use local commit history only for all $api/$organization repositories? (y/N)" 'n')"
+        if [[ "$answer" =~ ^[Yy]$ ]]; then access_mode=local; types=commits; ok "$api/$organization will use local commit history only"
+        else info "Skipping $provider $api/$organization because remote access is unavailable."; continue; fi
+      fi
     fi
 
     [[ "$access_mode" == local ]] && types=commits
     types="$(greens_normalize_activity_types "$provider" "$types")"
     if [[ "$access_mode" == local || "$provider" == git ]]; then types=commits; else types="$(greens_required "Activity types for $api/$organization" "${types:-$defaults}")"; fi
+    types="$(greens_normalize_activity_types "$provider" "$types")"
     greens_validate_activity_types "$provider" "$types" || return 1
 
     # Commit collection uses Git transport authentication, including SSH. Only
@@ -360,7 +386,7 @@ greens_sources_setup() {
         answer="$(prompt "GitHub API access failed. Use local commit history only for all $api/$organization repositories? (y/N)" 'n')"
         if [[ "$answer" =~ ^[Yy]$ ]]; then access_mode=local; types=commits; else info "Skipping github $api/$organization."; continue; fi
       else
-        username="$(greens_required "GitHub username for $api/$organization" "${username:-$(jq -r .login <<< "$meta")}")"
+        if [[ "$account_selected" == 0 ]]; then username="$(greens_required "GitHub username for $api/$organization" "${username:-$(jq -r .login <<< "$meta")}")"; fi
         if ! meta="$(GREENS_FETCH_TIMEOUT=15 greens_gh_api_as "$api" "$username" user)" || [[ "$username" != "$(jq -r .login <<< "$meta")" ]]; then
           answer="$(prompt "GitHub account validation failed. Use local commit history only for all $api/$organization repositories? (y/N)" 'n')"
           if [[ "$answer" =~ ^[Yy]$ ]]; then access_mode=local; types=commits; else info "Skipping github $api/$organization."; continue; fi
@@ -429,7 +455,9 @@ greens_sources_setup() {
   if [[ "$legacy_schema" == 1 && -d "$MIRROR_DIR/.git" ]] && git -C "$MIRROR_DIR" rev-parse --verify HEAD >/dev/null 2>&1 && ! git -C "$MIRROR_DIR" log --format=%B | grep -q '^Greens-Activity: '; then printf -v GREENS_LEGACY_TIMESTAMPS '%s' 1; fi
   save_keys=(WORK_DIRS SCAN_MODE SOURCE_COUNT PERSONAL_GH_USER MIRROR_EMAIL MIRROR_NAME MIRROR_URL MIRROR_DIR COPY_MESSAGES COPY_MESSAGES_ACK SCHEDULER SYNC_HOUR GREENS_LEGACY_TIMESTAMPS)
   for ((i=1; i<=SOURCE_COUNT; i++)); do for key in PROVIDER REMOTE_HOSTS API_HOST ORGANIZATION USERNAME EMAILS SINCE ACTIVITY_TYPES ACCESS_MODE; do save_keys+=("SOURCE_${i}_${key}"); done; done
-  greens_replace_config "$CONFIG_FILE" '^(WORK_DIRS?|SCAN_MODE|SOURCE_PROVIDER|SOURCE_COUNT|SOURCE_[0-9]+_.*|REMOTE_PREFIX|GITHUB_(ORG|USERNAME|TOKEN)|GITLAB_(HOST|REMOTE_HOST|USERNAME)|EMAILS|SINCE|ACTIVITY_TYPES|PERSONAL_GH_USER|MIRROR_(EMAIL|NAME|URL|DIR)|COPY_MESSAGES(_ACK)?|SCHEDULER|SYNC_HOUR|GREENS_LEGACY_TIMESTAMPS)$' "${save_keys[@]}"
+  # Retain legacy GITHUB_TOKEN: it may be the only saved source credential.
+  # Fresh sync processes load it from this owner-only config as before.
+  greens_replace_config "$CONFIG_FILE" '^(WORK_DIRS?|SCAN_MODE|SOURCE_PROVIDER|SOURCE_COUNT|SOURCE_[0-9]+_.*|REMOTE_PREFIX|GITHUB_(ORG|USERNAME)|GITLAB_(HOST|REMOTE_HOST|USERNAME)|EMAILS|SINCE|ACTIVITY_TYPES|PERSONAL_GH_USER|MIRROR_(EMAIL|NAME|URL|DIR)|COPY_MESSAGES(_ACK)?|SCHEDULER|SYNC_HOUR|GREENS_LEGACY_TIMESTAMPS)$' "${save_keys[@]}"
   ok "Saved configuration to $CONFIG_FILE"
   sync_path="$(greens_sync_path "$SCRIPT_DIR/sync.sh")"
   if confirm "Run the initial sync now?"; then FORCE=1 CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$sync_path"; fi

@@ -161,7 +161,7 @@ greens_validate_local_sources() {
 }
 
 greens_preflight_mixed_sources() {
-  local sources="$1" source_index identity url mode provider api username types key encoded api_user api_done
+  local sources="$1" source_index identity url mode provider api username types key encoded api_user api_done transport_only
   while IFS=$'\t' read -r source_index identity url <&4; do
     mode="$(greens_source_access_mode "$source_index")"
     types="$(greens_indexed_value "$source_index" ACTIVITY_TYPES)"
@@ -171,7 +171,8 @@ greens_preflight_mixed_sources() {
     fi
     [[ "$mode" == remote ]] || { log "ERROR: invalid access mode for source $source_index: $mode"; return 1; }
     provider="$(greens_indexed_value "$source_index" PROVIDER)"; api="$(greens_indexed_value "$source_index" API_HOST)"; username="$(greens_indexed_value "$source_index" USERNAME)"
-    if ! GIT_TERMINAL_PROMPT=0 GREENS_FETCH_TIMEOUT=15 greens_git_as "$provider" "$api" "$username" "$url" ls-remote "$url" HEAD >/dev/null 2>&1; then
+    transport_only=0; [[ "$types" != commits ]] || transport_only=1
+    if ! GIT_TERMINAL_PROMPT=0 GREENS_FETCH_TIMEOUT=15 GREENS_GIT_TRANSPORT_ONLY="$transport_only" greens_git_as "$provider" "$api" "$username" "$url" ls-remote "$url" HEAD >/dev/null 2>&1; then
       greens_offer_local_fallback "$source_index" "Git remote is unreachable" || return 1
       continue
     fi
@@ -265,7 +266,7 @@ greens_mixed_sync() {
   local sources checkouts source_index identity url key bare source_file state_scope state_dir checkpoint_file repodir
   local SOURCE_PROVIDER SOURCE_API_HOST SOURCE_ORGANIZATION SOURCE_USERNAME EMAILS SINCE ACTIVITY_TYPES ACCESS_MODE
   local GITLAB_HOST GITLAB_USERNAME project_path project_id project_features gitlab_user_id api_enabled
-  local since_epoch since_date run_epoch lower updated old_types checkpoint kind objects iid object_file pid failed count event_file owner_type
+  local since_epoch since_date run_epoch lower updated old_types checkpoint kind objects iid object_file pid failed count event_file owner_type transport_only
   local -a workers
   umask 077
   command -v jq >/dev/null || { log "ERROR: install jq"; return 1; }
@@ -282,6 +283,7 @@ greens_mixed_sync() {
     SOURCE_PROVIDER="$(greens_indexed_value "$source_index" PROVIDER)"; SOURCE_API_HOST="$(greens_indexed_value "$source_index" API_HOST)"
     SOURCE_ORGANIZATION="$(greens_indexed_value "$source_index" ORGANIZATION)"; SOURCE_USERNAME="$(greens_indexed_value "$source_index" USERNAME)"
     EMAILS="$(greens_indexed_value "$source_index" EMAILS)"; SINCE="$(greens_indexed_value "$source_index" SINCE)"; ACTIVITY_TYPES="$(greens_indexed_value "$source_index" ACTIVITY_TYPES)"; ACCESS_MODE="$(greens_source_access_mode "$source_index")"
+    transport_only=0; [[ "$ACTIVITY_TYPES" != commits ]] || transport_only=1
     since_epoch="$(greens_epoch "$SINCE")" || { log "ERROR: invalid SINCE for source $source_index"; return 1; }; since_date="${SINCE%% *}"
     project_path="${identity#*/}"; key="$(printf '%s' "$identity" | greens_hash)"; bare="$CACHE_DIR/$key.git"; source_file="$RUN_TMP/$key.records"; : > "$source_file"
     state_scope="$(printf '%s\n' "$SOURCE_PROVIDER" "$SOURCE_API_HOST" "$SOURCE_ORGANIZATION" "$SOURCE_USERNAME" "$EMAILS" "$SINCE" "$ACTIVITY_TYPES" "$ACCESS_MODE" | greens_hash)"
@@ -300,7 +302,7 @@ greens_mixed_sync() {
         git --git-dir="$bare" remote set-url origin "$url"
         if [[ "$SOURCE_PROVIDER" == gitlab ]]; then
           greens_run git --git-dir="$bare" fetch --quiet --prune --filter=blob:none origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' '+refs/merge-requests/*/head:refs/merge-requests/*/head'
-        else greens_git_as "$SOURCE_PROVIDER" "$SOURCE_API_HOST" "$SOURCE_USERNAME" "$url" --git-dir="$bare" fetch --quiet --prune --filter=blob:none origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'; fi
+        else GREENS_GIT_TRANSPORT_ONLY="$transport_only" greens_git_as "$SOURCE_PROVIDER" "$SOURCE_API_HOST" "$SOURCE_USERNAME" "$url" --git-dir="$bare" fetch --quiet --prune --filter=blob:none origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'; fi
         git --git-dir="$bare" log --all --format='%H%x09%at%x09%ai%x09%ae' |
           jq -Rrc --arg identity "$identity" --arg path "$project_path" --arg emails "$EMAILS" --argjson since "$since_epoch" --argjson until "$run_epoch" '
           split("\t")|select(length==4)|. as $r|($emails|ascii_downcase|split(",")|map(gsub("^\\s+|\\s+$";""))) as $e|select(($e|index($r[3]|ascii_downcase))!=null)|(.[1]|tonumber) as $t|select($t >= $since and $t <= $until)|{key:($identity+"/commit/"+.[0]),epoch:$t,date:.[2],kind:"commits",project:$path}' >> "$source_file"
