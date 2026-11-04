@@ -11,8 +11,7 @@ greens_required() {
 }
 
 greens_source_value() {
-  local key="SOURCE_${1}_${2}"
-  printf '%s' "${!key:-}"
+  greens_indexed_value "$1" "$2"
 }
 
 greens_existing_host_record() {
@@ -161,7 +160,7 @@ greens_sources_setup() {
   local had_config=0 legacy_schema=0 roots_removed=0 existing_dirs suggested_dir="" dirs="" path canonical answer setup_tmp choice index remove
   local scan hosts class groups gitpath repodir url identity host rest organization
   local record provider api domain detected choice ssh_domain existing_source_count existing_sources
-  local aliases saved_aliases alias username emails since types access_mode defaults meta i key owner branch default_email personal_default retry sync_path retry_username git_access account_selected
+  local aliases saved_aliases alias username emails since types access_mode defaults meta i key owner branch default_email personal_default retry sync_path retry_username git_access account_selected api_access
   local scheduler_prompt scheduler_default scheduler_values scheduler_error
   local -a save_keys
   for key in git jq gh; do command -v "$key" >/dev/null || { fail "Install $key, then rerun setup."; return 1; }; done
@@ -286,6 +285,12 @@ greens_sources_setup() {
     printf '%s\t%s\t%s\n' "$host" "$provider" "$api" >> "$class"
   done 4< "$hosts"
 
+  # Classification establishes whether owner/repository paths are insensitive
+  # to case. Keep all original transport URLs in the checkouts themselves.
+  LC_ALL=C awk -F '\t' 'BEGIN {OFS=FS} NR==FNR {p[$1]=$2; next} {if(p[$1]=="github") {$2=tolower($2); $3=tolower($3)} print}' \
+    "$class" "$scan" > "$scan.normalized"
+  mv "$scan.normalized" "$scan"
+
   awk -F '\t' 'NR==FNR {p[$1]=$2; a[$1]=$3; next} ($1 in p) {key=p[$1] FS a[$1] FS $2; repo=a[$1] "/" substr($3,index($3,"/")+1); unique=key SUBSEP repo; if(!(unique in seen)){seen[unique]=1; count[key]++} if(hosts[key]=="")hosts[key]=$1; else if("," hosts[key] "," !~ "," $1 ",")hosts[key]=hosts[key] "," $1} END {for(key in count)print key FS hosts[key] FS count[key]}' "$class" "$scan" | LC_ALL=C sort > "$groups"
 
   # A disconnected drive or temporarily missing clone must not silently erase
@@ -382,7 +387,19 @@ greens_sources_setup() {
     # Commit collection uses Git transport authentication, including SSH. Only
     # API activity needs a provider session and a validated account.
     if [[ "$access_mode" == remote && "$types" != commits && "$provider" == github ]]; then
-      if ! meta="$(GREENS_FETCH_TIMEOUT=15 greens_gh_api_as "$api" "$username" user)"; then
+      api_access=0
+      if meta="$(GREENS_FETCH_TIMEOUT=15 greens_gh_api_as "$api" "$username" user)"; then
+        api_access=1
+      else
+        retry_username="$(prompt "GitHub username to retry API access for $api/$organization (or - to skip retry)" "$username")" || return 1
+        if [[ -n "$retry_username" && "$retry_username" != - ]]; then
+          username="$retry_username"
+          if meta="$(GREENS_FETCH_TIMEOUT=15 greens_gh_api_as "$api" "$username" user)"; then
+            api_access=1; account_selected=1
+          fi
+        fi
+      fi
+      if [[ "$api_access" == 0 ]]; then
         answer="$(prompt "GitHub API access failed. Use local commit history only for all $api/$organization repositories? (y/N)" 'n')"
         if [[ "$answer" =~ ^[Yy]$ ]]; then access_mode=local; types=commits; else info "Skipping github $api/$organization."; continue; fi
       else
@@ -419,7 +436,7 @@ greens_sources_setup() {
   for ((i=1; i<=SOURCE_COUNT; i++)); do info "  $(greens_source_value "$i" PROVIDER) $(greens_source_value "$i" API_HOST)/$(greens_source_value "$i" ORGANIZATION): access=$(greens_source_value "$i" ACCESS_MODE), activity=$(greens_source_value "$i" ACTIVITY_TYPES)"; done
   personal_default="${PERSONAL_GH_USER:-}"
   if [[ -z "$personal_default" ]]; then
-    personal_default="$(greens_gh_api_as github.com "" user --jq .login)" || { fail "Authenticate gh for github.com, then rerun setup."; return 1; }
+    personal_default="$(greens_gh_api_as github.com "" user --jq .login 2>/dev/null || true)"
   fi
   PERSONAL_GH_USER="$(greens_required 'Personal GitHub username' "$personal_default")"
   [[ "$(greens_gh_api_as github.com "$PERSONAL_GH_USER" user --jq .login)" == "$PERSONAL_GH_USER" ]] || { fail "GitHub account does not match $PERSONAL_GH_USER."; return 1; }

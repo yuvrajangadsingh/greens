@@ -29,6 +29,7 @@ jobs:
         run: |
           ${{ matrix.bash }} tests/providers.sh
           ${{ matrix.bash }} tests/accounts.sh
+          ${{ matrix.bash }} tests/identities.sh
       - name: ShellCheck
         if: runner.os == 'Linux'
         run: shellcheck -S warning -x lib/*.sh tests/*.sh setup.sh sync.sh install.sh

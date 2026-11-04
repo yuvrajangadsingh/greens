@@ -855,4 +855,26 @@ bash "$brew_runner"
 [[ "$(greens_sync_path "$ROOT/sync.sh")" == "$ROOT/sync.sh" ]] || fail "changed a non-Homebrew install path"
 echo "PASS: Homebrew setup and schedulers survive version cleanup and upgrade"
 
+# A cron environment may have no jq (or even no usable PATH). The generated
+# command must retain the setup PATH, including spaces and cron's '%' syntax.
+mkdir -p "$TEST_ROOT/cron deps %" "$TEST_ROOT/empty-path"
+ln -s "$(command -v jq)" "$TEST_ROOT/cron deps %/jq"
+cat > "$TEST_ROOT/cron program" <<'FIXTURE'
+#!/bin/bash
+printf '%s\n' "$PATH" > "$TEST_ROOT/cron-used-path"
+printf '%s\n' "$CONTRIB_MIRROR_CONFIG" > "$TEST_ROOT/cron-used-config"
+command -v jq > "$TEST_ROOT/cron-used-jq"
+jq -n '{ready:true}' > "$TEST_ROOT/cron-result"
+FIXTURE
+CONFIG_FILE="$TEST_ROOT/cron config with spaces"
+setup_path="$TEST_ROOT/cron deps %:$PATH"
+PATH="$setup_path" greens_install_cron "$TEST_ROOT/cron program" 6
+cron_command="$(crontab -l | grep "# $(greens_scheduler_id)$" | cut -d ' ' -f6-)"
+PATH="$TEST_ROOT/empty-path" /bin/sh -c "$cron_command" || fail "cron could not use setup dependencies"
+[[ "$(cat "$TEST_ROOT/cron-used-path")" == "$setup_path" ]] || fail "cron lost setup PATH"
+[[ "$(cat "$TEST_ROOT/cron-used-config")" == "$CONFIG_FILE" ]] || fail "cron lost selected config"
+[[ "$(cat "$TEST_ROOT/cron-used-jq")" == "$TEST_ROOT/cron deps %/jq" ]] || fail "cron selected a different jq"
+jq -e .ready "$TEST_ROOT/cron-result" > /dev/null || fail "cron dependency did not execute"
+echo "PASS: cron preserves setup PATH with spaces and percent signs"
+
 [[ ! -f "$TEST_ROOT/forbidden-switches" ]] || fail "provider commands changed shared gh authentication"
