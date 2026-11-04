@@ -60,7 +60,7 @@ greens_discover_sources() {
 }
 
 greens_mixed_discover_checkouts() {
-  local dir gitpath repodir url identity host rest organization i aliases api canonical
+  local dir gitpath repodir url identity host rest organization i aliases api canonical provider source_identity
   while IFS= read -r dir; do
     [[ -d "$dir" ]] || { log "WARN: work directory is unavailable: $dir" >&2; continue; }
     while IFS= read -r -d '' gitpath; do
@@ -68,13 +68,16 @@ greens_mixed_discover_checkouts() {
       case "$repodir/" in "$CACHE_DIR/"*|"$MIRROR_DIR/"*) continue ;; esac
       url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
       identity="$(greens_remote_identity "$url")" || continue
-      host="${identity%%/*}"; rest="${identity#*/}"; organization="${rest%%/*}"
+      host="${identity%%/*}"
       for ((i=1; i<=SOURCE_COUNT; i++)); do
+        provider="$(greens_indexed_value "$i" PROVIDER)"
+        source_identity="$(greens_provider_identity "$provider" "$identity")"
+        rest="${source_identity#*/}"; organization="${rest%%/*}"
         [[ "$(greens_indexed_value "$i" ORGANIZATION)" == "$organization" ]] || continue
         aliases="$(greens_indexed_value "$i" REMOTE_HOSTS)"
         case ",$aliases," in *",$host,"*) ;; *) continue ;; esac
         api="$(greens_indexed_value "$i" API_HOST)"
-        canonical="$api/${identity#*/}"
+        canonical="$(greens_provider_identity "$provider" "$api/${source_identity#*/}")"
         printf '%s\t%s\t%s\t%s\n' "$i" "$canonical" "$url" "$repodir"
         break
       done

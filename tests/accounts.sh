@@ -36,6 +36,7 @@ case "$*" in
   'api --hostname '*' users/team --jq .type') echo Organization ;;
   'api --hostname '*' users/otherteam --jq .type') echo Organization ;;
   'api --hostname '*' --paginate -X GET search/issues'*)
+    printf '%s\n' "$*" >> "$ACCOUNT_TEST/github-queries"
     if [[ "$*" == *org:otherteam* ]]; then
       echo '{"items":[{"id":99,"created_at":"2021-01-02T12:00:00Z","repository_url":"https://api.github.com/repos/otherteam/repo"}]}'
     else echo '{"items":[]}'; fi ;;
@@ -201,7 +202,7 @@ if [[ "$operation" == fetch && -z "$url" && -n "$gitdir" ]]; then
 fi
 if [[ -n "$operation" ]]; then
   case "$url" in
-    https://github.com/team/repo) [[ "${GH_TOKEN:-}" == fixture-alice ]] || exit 1 ;;
+    https://github.com/team/repo|https://github.com/TeAm/RePo) [[ "${GH_TOKEN:-}" == fixture-alice ]] || exit 1 ;;
     https://github.com/otherteam/repo) [[ "${GH_TOKEN:-}" == fixture-carol ]] || exit 1 ;;
   esac
 fi
@@ -210,10 +211,13 @@ MOCK
 chmod +x "$ACCOUNT_TEST/bin/git"
 mkdir -p "$ACCOUNT_TEST/setup-work"
 "$REAL_GIT" clone --quiet "$ACCOUNT_TEST/source.git" "$ACCOUNT_TEST/setup-work/team"
+"$REAL_GIT" clone --quiet "$ACCOUNT_TEST/source.git" "$ACCOUNT_TEST/setup-work/team-copy"
 "$REAL_GIT" clone --quiet "$ACCOUNT_TEST/source.git" "$ACCOUNT_TEST/setup-work/otherteam"
-"$REAL_GIT" -C "$ACCOUNT_TEST/setup-work/team" remote set-url origin https://github.com/team/repo
+"$REAL_GIT" -C "$ACCOUNT_TEST/setup-work/team" remote set-url origin https://github.com/TeAm/RePo
+"$REAL_GIT" -C "$ACCOUNT_TEST/setup-work/team-copy" remote set-url origin https://github.com/team/repo
 "$REAL_GIT" -C "$ACCOUNT_TEST/setup-work/otherteam" remote set-url origin https://github.com/otherteam/repo
 "$REAL_GIT" config --global --add url."$ACCOUNT_TEST/source.git".insteadOf https://github.com/otherteam/repo
+"$REAL_GIT" config --global --add url."$ACCOUNT_TEST/source.git".insteadOf https://github.com/TeAm/RePo
 "$REAL_GIT" init --bare --quiet "$ACCOUNT_TEST/select-mirror.git"
 "$REAL_GIT" --git-dir="$ACCOUNT_TEST/select-mirror.git" symbolic-ref HEAD refs/heads/main
 "$REAL_GIT" config --global url."$ACCOUNT_TEST/select-mirror.git".insteadOf https://github.com/bob/select-mirror
@@ -228,11 +232,40 @@ touch "$ACCOUNT_TEST/setup-active"
 }
 bash -c 'source "$1"; [[ "$SOURCE_1_USERNAME" == carol && "$SOURCE_2_USERNAME" == alice && "$SOURCE_1_ACCESS_MODE" == remote && "$SOURCE_2_ACCESS_MODE" == remote && "$SOURCE_1_ACTIVITY_TYPES" == commits,issues ]]' bash "$ACCOUNT_TEST/select-config" || fail "setup did not retain selected accounts and normalized activity"
 [[ "$("$REAL_GIT" -C "$ACCOUNT_TEST/select-mirror" rev-list --count HEAD)" == 3 ]] || fail "initial sync omitted a selected source or API activity"
+[[ "$("$REAL_GIT" -C "$ACCOUNT_TEST/setup-work/team" config remote.origin.url)" == https://github.com/TeAm/RePo ]] || fail "setup rewrote source transport casing"
+bash -c 'source "$1/lib/common.sh"; source "$1/lib/gitlab.sh"; source "$2"; CACHE_DIR="$ACCOUNT_TEST/unused-cache"; greens_mixed_discover_checkouts' bash "$ROOT" "$ACCOUNT_TEST/select-config" > "$ACCOUNT_TEST/case-checkouts"
+[[ "$(wc -l < "$ACCOUNT_TEST/case-checkouts" | tr -d ' ')" == 3 ]] || fail "case normalization omitted a checkout"
 rm "$ACCOUNT_TEST/setup-active"
 FORCE=1 CONTRIB_MIRROR_CONFIG="$ACCOUNT_TEST/select-config" bash "$ROOT/sync.sh" > "$ACCOUNT_TEST/select-fresh-output" 2>&1 || {
   cat "$ACCOUNT_TEST/select-fresh-output"; fail "fresh sync lost selected HTTPS accounts";
 }
 [[ "$("$REAL_GIT" -C "$ACCOUNT_TEST/select-mirror" rev-list --count HEAD)" == 3 ]] || fail "fresh sync duplicated selected activities"
 [[ ! -e "$ACCOUNT_TEST/switched" ]] || fail "account retry changed the active gh account"
+
+# SSH transport succeeds independently of gh. An expired active API session
+# must still allow selecting a stored source account during a fresh setup.
+mkdir -p "$ACCOUNT_TEST/ssh-work"
+"$REAL_GIT" clone --quiet "$ACCOUNT_TEST/source.git" "$ACCOUNT_TEST/ssh-work/repo"
+"$REAL_GIT" -C "$ACCOUNT_TEST/ssh-work/repo" remote set-url origin git@github.com:team/repo.git
+"$REAL_GIT" config --global --add url."$ACCOUNT_TEST/source.git".insteadOf git@github.com:team/repo.git
+"$REAL_GIT" init --bare --quiet "$ACCOUNT_TEST/ssh-mirror.git"
+"$REAL_GIT" --git-dir="$ACCOUNT_TEST/ssh-mirror.git" symbolic-ref HEAD refs/heads/main
+"$REAL_GIT" config --global url."$ACCOUNT_TEST/ssh-mirror.git".insteadOf https://github.com/bob/ssh-mirror
+rm -f "$ACCOUNT_TEST/github-queries"
+{
+  printf '%s\n\n' "$ACCOUNT_TEST/ssh-work"
+  printf 'author@example.test\ncommits, issues\nalice\n2021-01-01\n'
+  printf 'bob\nmirror@example.test\ngreens\nhttps://github.com/bob/ssh-mirror\n%s\nmanual\n0\ny\n' "$ACCOUNT_TEST/ssh-mirror"
+} | CONTRIB_MIRROR_CONFIG="$ACCOUNT_TEST/ssh-config" bash "$ROOT/setup.sh" > "$ACCOUNT_TEST/ssh-output" 2>&1 || {
+  cat "$ACCOUNT_TEST/ssh-output"; fail "fresh SSH setup could not select a valid API account";
+}
+grep -q 'username to retry API access' "$ACCOUNT_TEST/ssh-output" || fail "SSH setup did not offer API account selection"
+bash -c 'source "$1"; [[ "$SOURCE_1_USERNAME" == alice && "$SOURCE_1_ACTIVITY_TYPES" == commits,issues && "$SOURCE_1_ACCESS_MODE" == remote ]]' bash "$ACCOUNT_TEST/ssh-config" || fail "SSH setup discarded requested API activity"
+grep -q 'org:team' "$ACCOUNT_TEST/github-queries" || fail "selected SSH source API was not queried"
+FORCE=1 CONTRIB_MIRROR_CONFIG="$ACCOUNT_TEST/ssh-config" bash "$ROOT/sync.sh" > "$ACCOUNT_TEST/ssh-fresh-output" 2>&1 || {
+  cat "$ACCOUNT_TEST/ssh-fresh-output"; fail "fresh SSH sync lost selected API account";
+}
+[[ ! -e "$ACCOUNT_TEST/switched" ]] || fail "SSH API retry changed the active account"
 echo "PASS: concurrent API accounts, isolated Git helpers, expired active session, and PAT identity"
 echo "PASS: PAT migration, transport-only credentials, and clean HTTPS account selection"
+echo "PASS: case-insensitive GitHub setup and fresh SSH API account selection"

@@ -6,6 +6,9 @@
 stored in `WORK_DIRS`, and scanned in the configured mode for Git repositories and
 worktrees. Checkouts whose normalized `origin` identifies the same repository,
 including SSH/HTTPS forms and overlapping roots, are counted and processed once.
+GitHub and GitHub Enterprise owner/repository identities ignore casing, so
+`Team/Repo` and `team/repo` share activity IDs. Other providers retain path casing.
+The original clone URLs remain unchanged for Git authentication.
 Setup asks for one
 root at a time and repeats the prompt until an empty answer is submitted.
 On a rerun, saved roots are retained automatically and the first directory
@@ -61,6 +64,8 @@ API authentication for that source. A saved username without a stored `gh` login
 does not replace existing Git credential helpers or credentials in the URL.
 If an HTTPS probe fails during setup, the wizard offers a retry with a stored
 GitHub account for that source group before offering local-only collection.
+If Git works over SSH but the active API session is unavailable, setup also
+offers an API account retry before dropping the requested provider activity.
 Activity answers accept spaces around commas; setup removes duplicates and maps
 GitLab's legacy `prs` name to `mrs` before saving.
 The destination still needs an authenticated
@@ -69,6 +74,10 @@ stored CLI account. SSH destinations keep their original aliases and keys; setup
 resolves the alias hostname only when checking the destination identity.
 Homebrew installs `git`, `jq`, and `gh`; install `glab` separately when selecting
 GitLab API activity.
+
+Cron jobs retain the PATH from setup so scheduled runs can find dependencies
+installed outside the scheduler's default PATH, including Homebrew's `jq` and
+`gh`. Rerun setup to refresh the saved PATH after changing installation locations.
 
 ## Configuration schema
 

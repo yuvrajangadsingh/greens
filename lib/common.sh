@@ -53,8 +53,22 @@ greens_hash() {
 }
 
 greens_indexed_value() {
-  local key="SOURCE_${1}_${2}"
-  printf '%s' "${!key:-}"
+  local key="SOURCE_${1}_${2}" provider_key="SOURCE_${1}_PROVIDER"
+  if [[ "$2" == ORGANIZATION ]]; then
+    greens_provider_identity "${!provider_key:-git}" "${!key:-}"
+  else
+    printf '%s' "${!key:-}"
+  fi
+}
+
+# Apply path rules after provider classification. GitHub owners/repositories
+# are insensitive to case; GitLab and generic Git retain their original paths.
+greens_provider_identity() {
+  if [[ "$1" == github ]]; then
+    printf '%s' "$2" | LC_ALL=C tr '[:upper:]' '[:lower:]'
+  else
+    printf '%s' "$2"
+  fi
 }
 
 greens_validate_scan_mode() {
@@ -470,8 +484,8 @@ greens_install_cron() {
   local script="$1" hour="$2" id line
   script="$(greens_sync_path "$script")"
   id="$(greens_scheduler_id)"
-  printf -v line '0 %s * * * CONTRIB_MIRROR_CONFIG=%q /bin/bash %q >> %q 2>&1 # %s' \
-    "$hour" "$CONFIG_FILE" "$script" "${LOG_DIR:-$HOME/.contrib-mirror/logs}/sync.log" "$id"
+  printf -v line '0 %s * * * PATH=%q CONTRIB_MIRROR_CONFIG=%q /bin/bash %q >> %q 2>&1 # %s' \
+    "$hour" "$PATH" "$CONFIG_FILE" "$script" "${LOG_DIR:-$HOME/.contrib-mirror/logs}/sync.log" "$id"
   line="${line//%/\\%}"
   mkdir -p "${LOG_DIR:-$HOME/.contrib-mirror/logs}"
   { crontab -l 2>/dev/null | grep -v "# $id$" || true; echo "$line"; } | crontab -
