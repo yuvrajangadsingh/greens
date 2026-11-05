@@ -49,6 +49,7 @@ greens_discover_sources() {
     url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
     identity="$(greens_remote_identity "$url")" || continue
     if [[ "$SOURCE_PROVIDER" == gitlab ]]; then
+      [[ "${identity#*/}" == */* ]] || continue
       host="$(greens_remote_host "$identity")"
       [[ "$host" == "${GITLAB_REMOTE_HOST:-${GITLAB_HOST%%:*}}" || "$host" == "${GITLAB_HOST%%:*}" ]] || continue
       identity="$GITLAB_HOST/${identity#*/}"
@@ -72,7 +73,9 @@ greens_mixed_discover_checkouts() {
       for ((i=1; i<=SOURCE_COUNT; i++)); do
         provider="$(greens_indexed_value "$i" PROVIDER)"
         source_identity="$(greens_provider_identity "$provider" "$identity")"
-        rest="${source_identity#*/}"; organization="${rest%%/*}"
+        rest="${source_identity#*/}"
+        [[ "$provider" == git || "$rest" == */* ]] || continue
+        organization="${rest%%/*}"
         [[ "$(greens_indexed_value "$i" ORGANIZATION)" == "$organization" ]] || continue
         aliases="$(greens_indexed_value "$i" REMOTE_HOSTS)"
         case ",$aliases," in *",$host,"*) ;; *) continue ;; esac

@@ -221,6 +221,7 @@ greens_mirror_git() {
 greens_destination_identity() {
   local url="$1" identity host resolved
   identity="$(greens_remote_identity "$url")" || return 1
+  [[ "${identity#*/}" == */* ]] || return 1
   host="$(greens_remote_host "$identity")"
   identity="$host/${identity#*/}"
   if [[ "$host" != github.com && ( "$url" == ssh://* || "$url" != *://* ) ]]; then
@@ -357,6 +358,7 @@ greens_remote_identity() {
   case "$url" in
     *://*)
       url="${url#*://}"
+      [[ "$url" == */* ]] || return 1
       authority="${url%%/*}"
       path="${url#*/}"
       authority="${authority##*@}"
@@ -369,7 +371,7 @@ greens_remote_identity() {
     *) return 1 ;;
   esac
   path="${path#/}"; path="${path%/}"; path="${path%.git}"
-  [[ -n "$authority" && "$path" == */* && "$path" != *$'\t'* && "$path" != *$'\n'* ]] || return 1
+  [[ -n "$authority" && -n "$path" && "$path" != *$'\t'* && "$path" != *$'\n'* ]] || return 1
   printf '%s/%s\n' "$(printf '%s' "$authority" | tr '[:upper:]' '[:lower:]')" "$path"
 }
 
@@ -420,24 +422,33 @@ greens_remove_launchd() {
   rm -f "$plist"
 }
 
+greens_xml_escape() {
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
+    -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
+}
+
 greens_install_launchd() {
-  local script="$1" hour="$2" label plist log_dir
+  local script="$1" hour="$2" label plist log_dir label_xml script_xml log_dir_xml config_xml
   script="$(greens_sync_path "$script")"
   command -v launchctl >/dev/null || { echo "launchctl is unavailable; choose cron or manual." >&2; return 1; }
   label="$(greens_launchd_label)"
   plist="$HOME/Library/LaunchAgents/$label.plist"
   log_dir="${LOG_DIR:-$(dirname "$CONFIG_FILE")/logs}"
   mkdir -p "$(dirname "$plist")" "$log_dir"
+  label_xml="$(greens_xml_escape "$label")"
+  script_xml="$(greens_xml_escape "$script")"
+  log_dir_xml="$(greens_xml_escape "$log_dir")"
+  config_xml="$(greens_xml_escape "$CONFIG_FILE")"
   cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>Label</key><string>$label</string>
-<key>ProgramArguments</key><array><string>/bin/bash</string><string>$script</string></array>
+<key>Label</key><string>$label_xml</string>
+<key>ProgramArguments</key><array><string>/bin/bash</string><string>$script_xml</string></array>
 <key>StartCalendarInterval</key><dict><key>Hour</key><integer>$hour</integer><key>Minute</key><integer>0</integer></dict>
-<key>StandardOutPath</key><string>$log_dir/sync.out.log</string>
-<key>StandardErrorPath</key><string>$log_dir/sync.err.log</string>
-<key>EnvironmentVariables</key><dict><key>CONTRIB_MIRROR_CONFIG</key><string>$CONFIG_FILE</string><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+<key>StandardOutPath</key><string>$log_dir_xml/sync.out.log</string>
+<key>StandardErrorPath</key><string>$log_dir_xml/sync.err.log</string>
+<key>EnvironmentVariables</key><dict><key>CONTRIB_MIRROR_CONFIG</key><string>$config_xml</string><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
 </dict></plist>
 EOF
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
