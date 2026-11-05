@@ -247,8 +247,10 @@ actor, author emails, history start, and activity types. See the
 Known public hosts are recognized immediately. For an unfamiliar host, setup
 asks for its web/API domain and performs bounded, TLS-verified GitHub and GitLab
 checks. It asks for manual classification only when those checks are inconclusive.
-SSH aliases and duplicate clones are recognized but counted and processed once
-by canonical host and repository path.
+GitHub and GitLab aliases and duplicate clones are counted and processed once
+by their configured API host and repository path. Generic Git identities retain
+the remote endpoint, including explicit ports, so separate servers on the same
+host are collected independently.
 
 Enter one work directory at a time; setup keeps asking for another until you
 press Enter. Every detected GitHub owner becomes its own source record, so no
@@ -258,7 +260,9 @@ Use `greens --setup --in-root` when each work directory directly contains its
 repositories. This persists `SCAN_MODE=in-root`, so setup, status, and sync only
 inspect `.git` files or directories in immediate child folders. The root itself
 and deeper descendants are ignored. `greens --setup --recursive` restores the
-default recursive behavior.
+default recursive behavior. When explicitly switching to `--in-root`, setup
+removes saved source groups found only outside the immediate child folders.
+Sources whose checkouts are genuinely unavailable remain saved.
 
 At each host/organization email prompt, enter `-` to skip that entire source
 group. This can exclude multiple repositories when they share a host and

@@ -37,7 +37,7 @@ VALUE=override
 source "$TEST_ROOT/config-roundtrip"
 [[ "$VALUE" == override ]] || fail "environment precedence"
 [[ ! -f SHOULD_NOT_EXIST ]] || fail "configuration executed input"
-[[ "$(greens_remote_identity 'ssh://git@forge.example:2222/group/sub/repo.git')" == forge.example/group/sub/repo ]] || fail "SSH URL normalization"
+[[ "$(greens_remote_identity 'ssh://git@forge.example:2222/group/sub/repo.git')" == forge.example:2222/group/sub/repo ]] || fail "SSH URL normalization"
 [[ "$(greens_remote_identity 'https://forge.example/group/sub/repo')" == forge.example/group/sub/repo ]] || fail "HTTPS normalization"
 
 mkdir -p "$TEST_ROOT/scan-root/immediate/.git" "$TEST_ROOT/scan-root/worktree" "$TEST_ROOT/scan-root/nested/deep/.git" "$TEST_ROOT/scan-root/.git"
@@ -930,5 +930,48 @@ echo "PASS: cron preserves setup PATH with spaces and percent signs"
   rm "$TEST_ROOT/remotes/mirror.git/hooks/pre-receive"
 ) || fail "literal aliases and scheduling after initial sync failure"
 echo "PASS: literal hostname aliases and scheduler installation/replacement after failed initial pushes"
+
+# Narrowing a recursive scan removes groups which still exist only deeper in
+# an available root, while preserving a genuinely unavailable saved source.
+(
+  depth_work="$TEST_ROOT/depth-work" depth_config="$TEST_ROOT/depth-config"
+  mkdir -p "$depth_work/nested"
+  for checkout in first second nested/repo; do
+    git clone --quiet --branch main "$TEST_ROOT/remotes/source.git" "$depth_work/$checkout"
+  done
+  for pair in first:2222 second:2223; do
+    url="ssh://git@forge.example:${pair#*:}/visible/repo.git"
+    git -C "$depth_work/${pair%%:*}" remote set-url origin "$url"
+    git config --global --add url."$TEST_ROOT/remotes/source.git".insteadOf "$url"
+  done
+  git -C "$depth_work/nested/repo" remote set-url origin git@forge.example:nested-only/repo.git
+  cp "$TEST_ROOT/ssh-only-config" "$depth_config"
+  # Config values are consumed by name in greens_save_config.
+  # shellcheck disable=SC2034
+  WORK_DIRS="$depth_work" SCAN_MODE=recursive SOURCE_COUNT=3 MIRROR_DIR="$TEST_ROOT/depth-mirror" \
+    SOURCE_1_PROVIDER=git SOURCE_1_API_HOST=forge.example SOURCE_1_REMOTE_HOSTS=forge.example SOURCE_1_ORGANIZATION=visible SOURCE_1_ACCESS_MODE=remote \
+    SOURCE_2_PROVIDER=git SOURCE_2_API_HOST=forge.example SOURCE_2_REMOTE_HOSTS=forge.example SOURCE_2_ORGANIZATION=nested-only \
+    SOURCE_2_USERNAME='' SOURCE_2_EMAILS=author@example.test SOURCE_2_SINCE=2021-01-01 SOURCE_2_ACTIVITY_TYPES=commits SOURCE_2_ACCESS_MODE=local \
+    SOURCE_3_PROVIDER=git SOURCE_3_API_HOST=forge.example SOURCE_3_REMOTE_HOSTS=forge.example SOURCE_3_ORGANIZATION=unavailable \
+    SOURCE_3_USERNAME='' SOURCE_3_EMAILS=author@example.test SOURCE_3_SINCE=2021-01-01 SOURCE_3_ACTIVITY_TYPES=commits SOURCE_3_ACCESS_MODE=remote
+  greens_save_config "$depth_config" WORK_DIRS SCAN_MODE SOURCE_COUNT MIRROR_DIR \
+    SOURCE_1_PROVIDER SOURCE_1_API_HOST SOURCE_1_REMOTE_HOSTS SOURCE_1_ORGANIZATION SOURCE_1_ACCESS_MODE \
+    SOURCE_2_PROVIDER SOURCE_2_API_HOST SOURCE_2_REMOTE_HOSTS SOURCE_2_ORGANIZATION SOURCE_2_USERNAME SOURCE_2_EMAILS SOURCE_2_SINCE SOURCE_2_ACTIVITY_TYPES SOURCE_2_ACCESS_MODE \
+    SOURCE_3_PROVIDER SOURCE_3_API_HOST SOURCE_3_REMOTE_HOSTS SOURCE_3_ORGANIZATION SOURCE_3_USERNAME SOURCE_3_EMAILS SOURCE_3_SINCE SOURCE_3_ACTIVITY_TYPES SOURCE_3_ACCESS_MODE
+  {
+    printf 'y\n'
+    printf '\n%.0s' {1..11}
+    printf 'n\n'
+  } | CONTRIB_MIRROR_CONFIG="$depth_config" bash "$ROOT/setup.sh" --in-root > "$TEST_ROOT/depth-output" 2>&1 || {
+    cat "$TEST_ROOT/depth-output"; fail "setup scan-depth change";
+  }
+  bash -c 'source "$1"; [[ "$SCAN_MODE" == in-root && "$SOURCE_COUNT" == 2 && "$SOURCE_1_ORGANIZATION" == visible && "$SOURCE_2_ORGANIZATION" == unavailable && "$SOURCE_2_ACCESS_MODE" == remote && -z "${SOURCE_3_PROVIDER:-}" ]]' bash "$depth_config" || fail "scan-depth change retained an excluded group or lost an offline group"
+  grep -q 'outside the immediate child folders' "$TEST_ROOT/depth-output" || fail "scan-depth removal was not explained"
+  grep -q 'skip all 2 repositories' "$TEST_ROOT/depth-output" || fail "setup merged distinct generic endpoints in its count"
+  FORCE=1 CONTRIB_MIRROR_CONFIG="$depth_config" bash "$ROOT/sync.sh" > "$TEST_ROOT/depth-sync-output" 2>&1 || {
+    cat "$TEST_ROOT/depth-sync-output"; fail "fresh sync failed after narrowing scan depth";
+  }
+) || fail "scan-depth source regeneration regression"
+echo "PASS: explicit in-root scan drops excluded local groups, retains unavailable sources, and syncs successfully"
 
 [[ ! -f "$TEST_ROOT/forbidden-switches" ]] || fail "provider commands changed shared gh authentication"

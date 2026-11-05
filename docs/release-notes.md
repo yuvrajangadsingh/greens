@@ -38,3 +38,14 @@ cache. Keep that cache during the upgrade if URLs have also changed casing.
 An opaque old hash cannot recover spelling when both sources of that spelling
 have been removed; this affects development builds predating normalization,
 not released v1.8.2 configurations.
+
+## Generic Git endpoints and scan depth
+
+Generic Git repository identities now retain explicit transport ports instead
+of merging different servers on the same host/path. Earlier development builds
+used a portless identity, so endpoint activities from those builds may be emitted
+again after this correction; released v1.8.2 configurations are unaffected.
+
+Explicit `--in-root` setup removes saved groups that still have checkouts in
+excluded nested folders. It retains genuinely unavailable groups, and a fresh
+sync no longer fails because of a local group excluded by the requested depth.
