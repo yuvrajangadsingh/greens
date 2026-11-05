@@ -28,6 +28,27 @@ greens_existing_host_record() {
   return 1
 }
 
+# Called for an absent group when --in-root was explicitly requested. A group
+# still present recursively was excluded by scan depth, rather than going offline.
+greens_source_has_recursive_checkouts() {
+  local source_index="$1" provider aliases organization root gitpath url identity rest host
+  provider="$(greens_source_value "$source_index" PROVIDER)"
+  aliases="$(greens_source_value "$source_index" REMOTE_HOSTS)"
+  organization="$(greens_source_value "$source_index" ORGANIZATION)"
+  while IFS= read -r root; do
+    [[ -d "$root" ]] || continue
+    while IFS= read -r -d '' gitpath; do
+      url="$(git -C "$(dirname "$gitpath")" config remote.origin.url 2>/dev/null || true)"
+      identity="$(greens_remote_identity "$url")" || continue
+      host="$(greens_remote_host "$identity")"
+      case ",$aliases," in *",$host,"*) ;; *) continue ;; esac
+      rest="${identity#*/}"
+      if [[ "$(greens_provider_identity "$provider" "${rest%%/*}")" == "$organization" ]]; then return 0; fi
+    done < <(greens_find_git_entries "$root" recursive)
+  done <<< "$WORK_DIRS"
+  return 1
+}
+
 greens_probe_provider() {
   local domain="$1" body
   case "$domain" in github.com) printf 'github\n'; return ;; gitlab.com) printf 'gitlab\n'; return ;; esac
@@ -249,7 +270,7 @@ greens_sources_setup() {
     while IFS= read -r -d '' gitpath; do
       repodir="$(dirname "$gitpath")"; url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
       identity="$(greens_remote_identity "$url")" || continue
-      host="${identity%%/*}"; rest="${identity#*/}"; organization="${rest%%/*}"
+      host="$(greens_remote_host "$identity")"; rest="${identity#*/}"; organization="${rest%%/*}"
       printf '%s\t%s\t%s\t%s\n' "$host" "$organization" "$identity" "$repodir" >> "$scan"
     done < <(greens_find_git_entries "$path" "$SCAN_MODE")
   done <<< "$WORK_DIRS"
@@ -291,7 +312,7 @@ greens_sources_setup() {
     "$class" "$scan" > "$scan.normalized"
   mv "$scan.normalized" "$scan"
 
-  awk -F '\t' 'NR==FNR {p[$1]=$2; a[$1]=$3; next} ($1 in p) {key=p[$1] FS a[$1] FS $2; repo=a[$1] "/" substr($3,index($3,"/")+1); unique=key SUBSEP repo; if(!(unique in seen)){seen[unique]=1; count[key]++} if(hosts[key]=="")hosts[key]=$1; else if(index("," hosts[key] ",", "," $1 ",")==0)hosts[key]=hosts[key] "," $1} END {for(key in count)print key FS hosts[key] FS count[key]}' "$class" "$scan" | LC_ALL=C sort > "$groups"
+  awk -F '\t' 'NR==FNR {p[$1]=$2; a[$1]=$3; next} ($1 in p) {key=p[$1] FS a[$1] FS $2; repo=(p[$1]=="git" ? $3 : a[$1] "/" substr($3,index($3,"/")+1)); unique=key SUBSEP repo; if(!(unique in seen)){seen[unique]=1; count[key]++} if(hosts[key]=="")hosts[key]=$1; else if(index("," hosts[key] ",", "," $1 ",")==0)hosts[key]=hosts[key] "," $1} END {for(key in count)print key FS hosts[key] FS count[key]}' "$class" "$scan" | LC_ALL=C sort > "$groups"
 
   # A disconnected drive or temporarily missing clone must not silently erase
   # a previously configured source during setup.
@@ -299,6 +320,10 @@ greens_sources_setup() {
     for ((i=1; i<=${SOURCE_COUNT:-0}; i++)); do
       provider="$(greens_source_value "$i" PROVIDER)"; api="$(greens_source_value "$i" API_HOST)"; organization="$(greens_source_value "$i" ORGANIZATION)"
       if ! awk -F '\t' -v p="$provider" -v a="$api" -v o="$organization" '$1==p && $2==a && $3==o {found=1} END {exit !found}' "$groups"; then
+        if [[ "${setup_scan_mode:-}" == in-root ]] && greens_source_has_recursive_checkouts "$i"; then
+          info "Removed $provider $api/$organization from the source list: its checkouts are outside the immediate child folders."
+          continue
+        fi
         warn "Configured source is not currently detected; retaining $provider $api/$organization."
         printf '%s\t%s\t%s\t%s\t0\n' "$provider" "$api" "$organization" "$(greens_source_value "$i" REMOTE_HOSTS)" >> "$groups"
       fi

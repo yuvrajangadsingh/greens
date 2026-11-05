@@ -221,7 +221,8 @@ greens_mirror_git() {
 greens_destination_identity() {
   local url="$1" identity host resolved
   identity="$(greens_remote_identity "$url")" || return 1
-  host="${identity%%/*}"
+  host="$(greens_remote_host "$identity")"
+  identity="$host/${identity#*/}"
   if [[ "$host" != github.com && ( "$url" == ssh://* || "$url" != *://* ) ]]; then
     resolved="$(ssh -G -- "$host" 2>/dev/null | awk 'tolower($1)=="hostname" {print tolower($2); exit}' || true)"
     [[ -z "$resolved" ]] || identity="$resolved/${identity#*/}"
@@ -349,8 +350,8 @@ greens_utc_date() {
     date -u -r "$1" '+%Y-%m-%dT%H:%M:%SZ'
 }
 
-# Canonical host/path, without credentials, transport, or a trailing .git.
-# The original URL is retained for Git operations (including SSH aliases/ports).
+# Endpoint/path without credentials, scheme, or a trailing .git. Keep explicit
+# ports until provider-aware classification can establish repository identity.
 greens_remote_identity() {
   local url="$1" authority path
   case "$url" in
@@ -359,7 +360,6 @@ greens_remote_identity() {
       authority="${url%%/*}"
       path="${url#*/}"
       authority="${authority##*@}"
-      authority="${authority%%:*}"
       ;;
     *:*)
       authority="${url%%:*}"
@@ -371,6 +371,15 @@ greens_remote_identity() {
   path="${path#/}"; path="${path%/}"; path="${path%.git}"
   [[ -n "$authority" && "$path" == */* && "$path" != *$'\t'* && "$path" != *$'\n'* ]] || return 1
   printf '%s/%s\n' "$(printf '%s' "$authority" | tr '[:upper:]' '[:lower:]')" "$path"
+}
+
+# Host classification and alias membership are independent of transport ports.
+greens_remote_host() {
+  local authority="${1%%/*}"
+  case "$authority" in
+    \[*\]*) printf '%s]\n' "${authority%%]*}" ;;
+    *) printf '%s\n' "${authority%%:*}" ;;
+  esac
 }
 
 # Configuration locks protect this namespace, including bare-repo init/fetch.

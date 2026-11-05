@@ -85,4 +85,41 @@ greens_mirror_mixed_records "$RUN_TMP/review-records" "$RUN_TMP/review-publish" 
 jq '.key |= sub("2021-01-02T";"2021-01-03T") | .date="2021-01-03 12:00:00 +0000" | .epoch=1609675200' "$RUN_TMP/review-records" > "$RUN_TMP/later-review-records"
 greens_mirror_mixed_records "$RUN_TMP/later-review-records" "$RUN_TMP/review-publish" >> "$IDENTITY_TEST/output" 2>&1 || { cat "$IDENTITY_TEST/output"; fail "later review marker"; }
 [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 6 ]] || fail "dropped later review observation"
+# Generic endpoints on the same host/path must be fetched independently. Both
+# SSH and HTTPS use real Git transports rewritten to separate local bare repos.
+(
+  WORK_DIRS="$IDENTITY_TEST/port-work" CONFIG_FILE="$IDENTITY_TEST/port-config"
+  CACHE_DIR="$IDENTITY_TEST/port-cache" RUN_TMP="$IDENTITY_TEST/port-run"
+  MIRROR_DIR="$IDENTITY_TEST/port-mirror" SUCCESS_STAMP_FILE="$IDENTITY_TEST/port-stamp"
+  # Values are consumed dynamically by the indexed collector.
+  # shellcheck disable=SC2034
+  SOURCE_COUNT=1 SOURCE_1_PROVIDER=git SOURCE_1_API_HOST=forge.example SOURCE_1_REMOTE_HOSTS=forge.example \
+    SOURCE_1_ORGANIZATION=team SOURCE_1_ACCESS_MODE=remote
+  mkdir -p "$WORK_DIRS" "$CACHE_DIR" "$RUN_TMP"
+  for port in 2222 2223 8443 9443; do
+    case "$port" in 222*) scheme=ssh ;; *) scheme=https ;; esac
+    url="$scheme://git@forge.example:$port/team/repo.git"
+    git init --quiet "$WORK_DIRS/$port"
+    GIT_AUTHOR_DATE="2021-01-01T12:00:${port: -2}Z" GIT_COMMITTER_DATE="2021-01-01T12:00:${port: -2}Z" \
+      git -C "$WORK_DIRS/$port" commit --quiet --allow-empty -m "endpoint $port"
+    git clone --bare --quiet "$WORK_DIRS/$port" "$IDENTITY_TEST/remote-$port.git"
+    git -C "$WORK_DIRS/$port" remote add origin "$url"
+    git config --global url."$IDENTITY_TEST/remote-$port.git".insteadOf "$url"
+  done
+  git init --bare --quiet "$IDENTITY_TEST/port-mirror.git"
+  git init --quiet "$MIRROR_DIR"
+  git -C "$MIRROR_DIR" symbolic-ref HEAD refs/heads/main
+  git -C "$MIRROR_DIR" remote add origin "$IDENTITY_TEST/port-mirror.git"
+  greens_mixed_discover_sources > "$IDENTITY_TEST/port-sources"
+  [[ "$(wc -l < "$IDENTITY_TEST/port-sources" | tr -d ' ')" == 4 ]] || fail "generic endpoint ports were merged"
+  for port in 2222 2223 8443 9443; do
+    grep -Fq "forge.example:$port/team/repo" "$IDENTITY_TEST/port-sources" || fail "lost generic port $port"
+  done
+  greens_mixed_sync > "$IDENTITY_TEST/port-output" 2>&1 || { cat "$IDENTITY_TEST/port-output"; fail "generic port sync"; }
+  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 4 ]] || fail "one generic endpoint's commits were omitted"
+  greens_mixed_sync >> "$IDENTITY_TEST/port-output" 2>&1 || { cat "$IDENTITY_TEST/port-output"; fail "generic port rerun"; }
+  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 4 ]] || fail "generic endpoint rerun duplicated activities"
+) || fail "generic Git endpoint port regression"
 echo "PASS: GitHub and Enterprise casing, historical markers, aliases, and case-sensitive generic Git paths"
+
+echo "PASS: independent SSH/HTTPS Git ports, complete remote collection, and idempotent reruns"
