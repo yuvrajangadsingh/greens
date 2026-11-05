@@ -47,7 +47,7 @@ greens_discover_sources() {
     repodir="$(dirname "$gitpath")"
     case "$repodir/" in "$CACHE_DIR/"*|"$MIRROR_DIR/"*) continue ;; esac
     url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
-    identity="$(greens_remote_identity "$url")" || continue
+    identity="$(greens_remote_identity "$url" 1)" || continue
     if [[ "$SOURCE_PROVIDER" == gitlab ]]; then
       [[ "${identity#*/}" == */* ]] || continue
       host="$(greens_remote_host "$identity")"
@@ -68,7 +68,7 @@ greens_mixed_discover_checkouts() {
       repodir="$(dirname "$gitpath")"
       case "$repodir/" in "$CACHE_DIR/"*|"$MIRROR_DIR/"*) continue ;; esac
       url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
-      identity="$(greens_remote_identity "$url")" || continue
+      identity="$(greens_remote_identity "$url" 1)" || continue
       host="$(greens_remote_host "$identity")"
       for ((i=1; i<=SOURCE_COUNT; i++)); do
         provider="$(greens_indexed_value "$i" PROVIDER)"
@@ -230,7 +230,7 @@ greens_recognize_github_case_markers() {
   if [[ -f "$RUN_TMP/mixed-checkouts" ]]; then
     while IFS=$'\t' read -r source_index identity url repodir; do
       [[ "$(greens_indexed_value "$source_index" PROVIDER)" == github ]] || continue
-      raw_identity="$(greens_remote_identity "$url")" || continue
+      raw_identity="$(greens_remote_identity "$url" 1)" || continue
       api="$(greens_indexed_value "$source_index" API_HOST)"
       printf '%s/%s\t%s\n' "$api" "${raw_identity#*/}" "$identity" >> "$RUN_TMP/github-case-aliases"
     done < "$RUN_TMP/mixed-checkouts"
@@ -355,7 +355,11 @@ greens_mixed_sync() {
           jq -Rrc --arg identity "$identity" --arg path "$project_path" --arg emails "$EMAILS" --argjson since "$since_epoch" --argjson until "$run_epoch" '
           split("\t")|select(length==4)|. as $r|($emails|ascii_downcase|split(",")|map(gsub("^\\s+|\\s+$";""))) as $e|select(($e|index($r[3]|ascii_downcase))!=null)|(.[1]|tonumber) as $t|select($t >= $since and $t <= $until)|{key:($identity+"/commit/"+.[0]),epoch:$t,date:.[2],kind:"commits",project:$path}' >> "$source_file"
       else
-        if [[ ! -d "$bare" ]]; then mkdir -p "$(dirname "$bare")"; git init --bare --quiet "$bare"; git --git-dir="$bare" remote add origin "$url"; fi
+        if [[ ! -d "$bare" ]]; then
+          greens_seed_bare_cache "$bare" "$CACHE_DIR/$key.git" || return 1
+          [[ -d "$bare" ]] || { mkdir -p "$(dirname "$bare")"; git init --bare --quiet "$bare"; }
+          git --git-dir="$bare" remote add origin "$url"
+        fi
         git --git-dir="$bare" remote set-url origin "$url"
         if [[ "$SOURCE_PROVIDER" == gitlab ]]; then
           greens_run git --git-dir="$bare" fetch --quiet --prune --filter=blob:none origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' '+refs/merge-requests/*/head:refs/merge-requests/*/head'
@@ -466,7 +470,11 @@ greens_provider_sync() {
     fi
     log "Collecting $project_path"
     if [[ ",$ACTIVITY_TYPES," == *,commits,* ]]; then
-      if [[ ! -d "$bare" ]]; then mkdir -p "$(dirname "$bare")"; git init --bare --quiet "$bare"; git --git-dir="$bare" remote add origin "$url"; fi
+      if [[ ! -d "$bare" ]]; then
+          greens_seed_bare_cache "$bare" "$CACHE_DIR/$key.git" || return 1
+          [[ -d "$bare" ]] || { mkdir -p "$(dirname "$bare")"; git init --bare --quiet "$bare"; }
+          git --git-dir="$bare" remote add origin "$url"
+        fi
       git --git-dir="$bare" remote set-url origin "$url"
       # MR refs retain commits from deleted source branches when GitLab retains them.
       if [[ "$SOURCE_PROVIDER" == gitlab ]]; then

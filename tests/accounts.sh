@@ -135,6 +135,15 @@ printf 'protocol=https\nhost=github.com\nusername=url-user\npassword=fixture-per
 grep -qx password=fixture-personal "$ACCOUNT_TEST/pat-mirror-credentials" || fail "mirror URL credentials required personal gh login"
 git -C "$MIRROR_DIR" remote set-url origin https://github.com/bob/mirror
 PERSONAL_GH_USER=bob
+# A username-only personal URL still asks a credential helper for a password.
+# Ambient work tokens must never become that password, even in commits-only runs.
+git config --global credential.https://github.com.helper '!gh auth git-credential'
+git -C "$MIRROR_DIR" remote set-url origin https://bob@github.com/bob/mirror
+printf 'protocol=https\nhost=github.com\nusername=bob\n\n' |
+  GH_TOKEN=fixture-alice GITHUB_TOKEN=fixture-alice GH_ENTERPRISE_TOKEN=fixture-alice GITHUB_ENTERPRISE_TOKEN=fixture-alice \
+  greens_mirror_git credential fill > "$ACCOUNT_TEST/username-mirror-credentials"
+grep -qx password=fixture-bob "$ACCOUNT_TEST/username-mirror-credentials" || fail "destination helper inherited a work PAT"
+git -C "$MIRROR_DIR" remote set-url origin https://github.com/bob/mirror
 
 # Exercise the complete indexed collector while gh auth status fails. The Git
 # transports are local bare repositories, with the original HTTPS identities.
@@ -239,10 +248,14 @@ grep -qx username=url-user "$ACCOUNT_TEST/url-credentials" || fail "commit-only 
     ACTIVITY_TYPES=commits,issues EMAILS=author@example.test SINCE='2021-01-01 00:00:00'
   greens_save_config "$CONFIG_FILE" WORK_DIR REMOTE_PREFIX GITHUB_USERNAME GITHUB_ORG ACTIVITY_TYPES EMAILS SINCE \
     MIRROR_DIR CACHE_DIR LOG_DIR MIRROR_EMAIL PERSONAL_GH_USER
+  mkdir -p "$CACHE_DIR"
+  git clone --bare --quiet "$ACCOUNT_TEST/source.git" "$CACHE_DIR/source.git"
   FORCE=1 CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$ROOT/sync.sh" > "$ACCOUNT_TEST/legacy-output" 2>&1 || {
     cat "$ACCOUNT_TEST/legacy-output"; fail "legacy account isolation";
   }
   [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 2 ]] || fail "legacy source API activity was skipped"
+  if grep -q 'Cloning source.git' "$ACCOUNT_TEST/legacy-output"; then fail "upgrade did not reuse its existing bare cache"; fi
+  [[ -d "$CACHE_DIR/bare/$(greens_scheduler_id)/source.git" ]] || fail "upgrade cache was not namespaced"
 )
 [[ ! -e "$ACCOUNT_TEST/switched" ]] || fail "legacy sync changed the shared account"
 

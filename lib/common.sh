@@ -210,11 +210,29 @@ greens_git_as() {
   fi
 }
 
-greens_mirror_git() {
-  local url
+greens_mirror_git() (
+  local url authority userinfo="" token="" user identity
   url="$(git -C "$MIRROR_DIR" config remote.origin.url)" || return 1
+  if [[ "$url" == https://* || "$url" == http://* ]]; then
+    authority="${url#*://}"; authority="${authority%%/*}"
+    [[ "$authority" != *@* ]] || userinfo="${authority%@*}"
+    # URL passwords need no CLI login. Other helpers may use gh: select the
+    # personal actor before removing all ambient work-provider tokens.
+    if [[ "$url" == https://* && "$userinfo" != *:* ]]; then
+      user="${PERSONAL_GH_USER:-}"
+      if [[ -z "$user" ]]; then
+        identity="$(greens_remote_identity "$url")" || return 1
+        user="${identity#*/}"; user="${user%%/*}"
+      fi
+      token="$(greens_gh_token github.com "$user" 2>/dev/null)" || token=""
+    fi
+    unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+    if [[ -n "$token" ]]; then
+      export GH_TOKEN="$token" GITHUB_TOKEN="$token" GH_ENTERPRISE_TOKEN="$token" GITHUB_ENTERPRISE_TOKEN="$token"
+    fi
+  fi
   greens_git_as github github.com "${PERSONAL_GH_USER:-}" "$url" "$@"
-}
+)
 
 # Resolve destination SSH aliases for identity checks without rewriting the
 # transport URL, which may select a different SSH key or port.
@@ -354,17 +372,19 @@ greens_utc_date() {
 # Endpoint/path without credentials, scheme, or a trailing .git. Keep explicit
 # ports until provider-aware classification can establish repository identity.
 greens_remote_identity() {
-  local url="$1" authority path
+  local url="$1" preserve_login="${2:-0}" authority path login="" scheme="${1%%://*}"
   case "$url" in
     *://*)
       url="${url#*://}"
       [[ "$url" == */* ]] || return 1
       authority="${url%%/*}"
       path="${url#*/}"
+      if [[ "$preserve_login" == 1 && ( "$scheme" == ssh || "$scheme" == git+ssh || "$scheme" == ssh+git ) && "$authority" == *@* ]]; then login="${authority%@*}"; [[ "$login" != *:* ]] || return 1; fi
       authority="${authority##*@}"
       ;;
     *:*)
       authority="${url%%:*}"
+      if [[ "$preserve_login" == 1 && "$authority" == *@* ]]; then login="${authority%@*}"; fi
       authority="${authority##*@}"
       path="${url#*:}"
       ;;
@@ -372,12 +392,13 @@ greens_remote_identity() {
   esac
   path="${path#/}"; path="${path%/}"; path="${path%.git}"
   [[ -n "$authority" && -n "$path" && "$path" != *$'\t'* && "$path" != *$'\n'* ]] || return 1
-  printf '%s/%s\n' "$(printf '%s' "$authority" | tr '[:upper:]' '[:lower:]')" "$path"
+  printf '%s%s/%s\n' "${login:+$login@}" "$(printf '%s' "$authority" | tr '[:upper:]' '[:lower:]')" "$path"
 }
 
 # Host classification and alias membership are independent of transport ports.
 greens_remote_host() {
   local authority="${1%%/*}"
+  authority="${authority##*@}"
   case "$authority" in
     \[*\]*) printf '%s]\n' "${authority%%]*}" ;;
     *) printf '%s\n' "${authority%%:*}" ;;
@@ -388,6 +409,21 @@ greens_remote_host() {
 # Different configs may intentionally share CACHE_DIR and use different actors.
 greens_bare_cache_dir() {
   printf '%s/bare/%s\n' "$CACHE_DIR" "$(greens_scheduler_id)"
+}
+
+greens_seed_bare_cache() {
+  local target="$1" old="$2" tmp
+  [[ ! -e "$target" && -d "$old" && ! -L "$old" ]] || return 0
+  [[ "$(git --git-dir="$old" rev-parse --is-bare-repository 2>/dev/null)" == true ]] || return 0
+  # Preserve independent storage and avoid external object dependencies.
+  [[ ! -f "$old/objects/info/alternates" ]] || return 0
+  mkdir -p "$(dirname "$target")"
+  tmp="$(mktemp -d "$target.seed.XXXXXX")" || return 1
+  if ! git clone --mirror --local --no-hardlinks --quiet "$old" "$tmp"; then rm -rf "$tmp"; return 0; fi
+  # Keep only the newly generated core config; source credentials/helpers and
+  # the temporary local origin must not become this configuration's transport.
+  git --git-dir="$tmp" config --remove-section remote.origin || { rm -rf "$tmp"; return 1; }
+  mv "$tmp" "$target"
 }
 
 greens_scheduler_id() {
@@ -428,7 +464,7 @@ greens_xml_escape() {
 }
 
 greens_install_launchd() {
-  local script="$1" hour="$2" label plist log_dir label_xml script_xml log_dir_xml config_xml
+  local script="$1" hour="$2" label plist log_dir label_xml script_xml log_dir_xml config_xml path_xml
   script="$(greens_sync_path "$script")"
   command -v launchctl >/dev/null || { echo "launchctl is unavailable; choose cron or manual." >&2; return 1; }
   label="$(greens_launchd_label)"
@@ -439,6 +475,7 @@ greens_install_launchd() {
   script_xml="$(greens_xml_escape "$script")"
   log_dir_xml="$(greens_xml_escape "$log_dir")"
   config_xml="$(greens_xml_escape "$CONFIG_FILE")"
+  path_xml="$(greens_xml_escape "$PATH")"
   cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -448,7 +485,7 @@ greens_install_launchd() {
 <key>StartCalendarInterval</key><dict><key>Hour</key><integer>$hour</integer><key>Minute</key><integer>0</integer></dict>
 <key>StandardOutPath</key><string>$log_dir_xml/sync.out.log</string>
 <key>StandardErrorPath</key><string>$log_dir_xml/sync.err.log</string>
-<key>EnvironmentVariables</key><dict><key>CONTRIB_MIRROR_CONFIG</key><string>$config_xml</string><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+<key>EnvironmentVariables</key><dict><key>CONTRIB_MIRROR_CONFIG</key><string>$config_xml</string><key>PATH</key><string>$path_xml</string></dict>
 </dict></plist>
 EOF
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true

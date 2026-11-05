@@ -67,7 +67,7 @@ grep -q 'github.enterprise.example/team/repo' "$IDENTITY_TEST/sources" || fail "
 mv "$IDENTITY_TEST/work/github-lower" "$IDENTITY_TEST/not-yet-discovered"
 greens_mixed_sync > "$IDENTITY_TEST/output" 2>&1 || { cat "$IDENTITY_TEST/output"; fail "identity sync"; }
 [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 4 ]] || fail "one SHA mirrored more than once per repository identity"
-[[ "$(jq -s '[.[] | select(.key|startswith("forge.example/team/"))] | length' "$RUN_TMP/records")" == 2 ]] || fail "merged case-sensitive generic Git paths"
+[[ "$(jq -s '[.[] | select(.key|startswith("git@forge.example/team/"))] | length' "$RUN_TMP/records")" == 2 ]] || fail "merged case-sensitive generic Git paths"
 mv "$IDENTITY_TEST/not-yet-discovered" "$IDENTITY_TEST/work/github-lower"
 greens_mixed_sync >> "$IDENTITY_TEST/output" 2>&1 || { cat "$IDENTITY_TEST/output"; fail "identity rerun"; }
 [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 4 ]] || fail "a newly discovered case variant duplicated activities"
@@ -120,6 +120,41 @@ greens_mirror_mixed_records "$RUN_TMP/later-review-records" "$RUN_TMP/review-pub
   greens_mixed_sync >> "$IDENTITY_TEST/port-output" 2>&1 || { cat "$IDENTITY_TEST/port-output"; fail "generic port rerun"; }
   [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 4 ]] || fail "generic endpoint rerun duplicated activities"
 ) || fail "generic Git endpoint port regression"
+# SSH login homes are separate generic endpoints. Preserve login casing, while
+# recognizing SCP and ssh:// forms of the same login/repository as one source.
+(
+  WORK_DIRS="$IDENTITY_TEST/login-work" CONFIG_FILE="$IDENTITY_TEST/login-config"
+  CACHE_DIR="$IDENTITY_TEST/login-cache" RUN_TMP="$IDENTITY_TEST/login-run"
+  MIRROR_DIR="$IDENTITY_TEST/login-mirror" SUCCESS_STAMP_FILE="$IDENTITY_TEST/login-stamp"
+  # Values are consumed dynamically by the indexed collector.
+  # shellcheck disable=SC2034
+  SOURCE_COUNT=1 SOURCE_1_PROVIDER=git SOURCE_1_API_HOST=forge.example SOURCE_1_REMOTE_HOSTS=forge.example \
+    SOURCE_1_ORGANIZATION=project SOURCE_1_ACCESS_MODE=remote
+  mkdir -p "$WORK_DIRS" "$CACHE_DIR" "$RUN_TMP"
+  for login in alice bob Alice; do
+    git init --quiet "$WORK_DIRS/$login"
+    GIT_AUTHOR_DATE=2021-01-01T12:00:00Z GIT_COMMITTER_DATE=2021-01-01T12:00:00Z \
+      git -C "$WORK_DIRS/$login" commit --quiet --allow-empty -m "login home $login"
+    git clone --bare --quiet "$WORK_DIRS/$login" "$IDENTITY_TEST/login-$login.git"
+    url="$login@forge.example:project.git"
+    git -C "$WORK_DIRS/$login" remote add origin "$url"
+    git config --global url."$IDENTITY_TEST/login-$login.git".insteadOf "$url"
+  done
+  git clone --quiet "$IDENTITY_TEST/login-bob.git" "$WORK_DIRS/bob-uri"
+  git -C "$WORK_DIRS/bob-uri" remote set-url origin ssh://bob@forge.example/project.git
+  git config --global --add url."$IDENTITY_TEST/login-bob.git".insteadOf ssh://bob@forge.example/project.git
+  git init --bare --quiet "$IDENTITY_TEST/login-mirror.git"
+  git init --quiet "$MIRROR_DIR"
+  git -C "$MIRROR_DIR" symbolic-ref HEAD refs/heads/main
+  git -C "$MIRROR_DIR" remote add origin "$IDENTITY_TEST/login-mirror.git"
+  greens_mixed_discover_sources > "$IDENTITY_TEST/login-sources"
+  [[ "$(wc -l < "$IDENTITY_TEST/login-sources" | tr -d ' ')" == 3 ]] || fail "SSH login homes were merged or equivalent URLs were duplicated"
+  greens_mixed_sync > "$IDENTITY_TEST/login-output" 2>&1 || { cat "$IDENTITY_TEST/login-output"; fail "SSH login sync"; }
+  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 3 ]] || fail "SSH login source activity omitted"
+  greens_mixed_sync >> "$IDENTITY_TEST/login-output" 2>&1 || { cat "$IDENTITY_TEST/login-output"; fail "SSH login rerun"; }
+  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 3 ]] || fail "SSH login rerun duplicated activities"
+) || fail "generic Git SSH login regression"
+echo "PASS: distinct SSH login homes and casing, equivalent URL forms, and idempotent collection"
 echo "PASS: GitHub and Enterprise casing, historical markers, aliases, and case-sensitive generic Git paths"
 
 echo "PASS: independent SSH/HTTPS Git ports, complete remote collection, and idempotent reruns"

@@ -8,7 +8,9 @@ worktrees. Checkouts whose normalized `origin` identifies the same repository,
 including SSH/HTTPS forms and overlapping roots, are counted and processed once.
 GitHub and GitHub Enterprise owner/repository identities ignore casing, so
 `Team/Repo` and `team/repo` share activity IDs. Other providers retain path casing.
-The original clone URLs remain unchanged for Git authentication.
+Generic SSH identities also retain the login name: separate login homes on the
+same host remain separate repositories. The original clone URLs remain unchanged
+for Git authentication.
 Setup asks for one
 root at a time and repeats the prompt until an empty answer is submitted.
 On a rerun, saved roots are retained automatically and the first directory
