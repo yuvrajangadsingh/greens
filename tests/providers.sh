@@ -780,7 +780,7 @@ echo "PASS: legacy scheduler migration, custom-config isolation, and manual clea
 cat > "$TEST_ROOT/bin/ssh" <<'MOCK'
 #!/bin/bash
 case "$*" in
-  '-G -- github-personal') echo 'hostname github.com' ;;
+  '-G -- github-personal'|'-G github-com') echo 'hostname github.com' ;;
   '-G -- not-github') echo 'hostname other.example' ;;
   *) exit 1 ;;
 esac
@@ -876,5 +876,59 @@ PATH="$TEST_ROOT/empty-path" /bin/sh -c "$cron_command" || fail "cron could not 
 [[ "$(cat "$TEST_ROOT/cron-used-jq")" == "$TEST_ROOT/cron deps %/jq" ]] || fail "cron selected a different jq"
 jq -e .ready "$TEST_ROOT/cron-result" > /dev/null || fail "cron dependency did not execute"
 echo "PASS: cron preserves setup PATH with spaces and percent signs"
+
+# Fresh grouping must retain aliases literally: github.com is not a regex
+# matching github-com. Reject actual mirror pushes to exercise optional initial
+# sync failures while installing/replacing the selected daily cron job.
+(
+  alias_work="$TEST_ROOT/literal-alias-work"
+  alias_failure_config="$TEST_ROOT/literal-alias-config"
+  mkdir -p "$alias_work"
+  for checkout in alias public; do
+    git clone --quiet --branch main "$TEST_ROOT/remotes/source.git" "$alias_work/$checkout"
+  done
+  git -C "$alias_work/alias" remote set-url origin git@github-com:team/a.git
+  git -C "$alias_work/public" remote set-url origin https://github.com/team/b.git
+  git config --global --add url."$TEST_ROOT/remotes/source.git".insteadOf git@github-com:team/a.git
+  git config --global --add url."$TEST_ROOT/remotes/source.git".insteadOf https://github.com/team/b.git
+  git config --global --add url."$TEST_ROOT/remotes/mirror.git".insteadOf https://github.com/fixture/mirror
+  printf '#!/bin/sh\nexit 1\n' > "$TEST_ROOT/remotes/mirror.git/hooks/pre-receive"
+  chmod +x "$TEST_ROOT/remotes/mirror.git/hooks/pre-receive"
+  {
+    printf '%s\n\n\nauthor@example.test\ncommits\n2021-01-01\n' "$alias_work"
+    printf 'fixture\nmirror@example.test\ngreens\nhttps://github.com/fixture/mirror\n%s\ncron\n6\ny\n' "$TEST_ROOT/literal-alias-mirror"
+  } | CONTRIB_MIRROR_CONFIG="$alias_failure_config" bash "$ROOT/setup.sh" > "$TEST_ROOT/initial-failure-output" 2>&1 || {
+    cat "$TEST_ROOT/initial-failure-output"; fail "fresh setup aborted on optional sync failure";
+  }
+  bash -c 'source "$1"; [[ "$SOURCE_COUNT" == 1 && "$SOURCE_1_REMOTE_HOSTS" == github-com,github.com && "$SCHEDULER" == cron && "$SYNC_HOUR" == 6 ]]' bash "$alias_failure_config" || fail "fresh setup lost literal aliases or selected schedule"
+  bash -c 'source "$1/lib/common.sh"; source "$1/lib/gitlab.sh"; source "$2"; CACHE_DIR="$HOME/.contrib-mirror/cache"; greens_mixed_discover_checkouts' bash "$ROOT" "$alias_failure_config" > "$TEST_ROOT/literal-alias-checkouts"
+  [[ "$(wc -l < "$TEST_ROOT/literal-alias-checkouts" | tr -d ' ')" == 2 ]] || fail "literal alias grouping omitted a counted checkout"
+  grep -q 'Collecting github team/a' "$TEST_ROOT/initial-failure-output" || fail "initial sync omitted dashed alias"
+  grep -q 'Collecting github team/b' "$TEST_ROOT/initial-failure-output" || fail "initial sync omitted dotted hostname"
+  grep -q 'remote rejected' "$TEST_ROOT/initial-failure-output" || fail "initial sync did not exercise a real push failure"
+  grep -q 'Initial sync failed' "$TEST_ROOT/initial-failure-output" || fail "initial sync failure was hidden"
+  grep -q 'Setup complete' "$TEST_ROOT/initial-failure-output" || fail "fresh setup did not finish"
+  CONFIG_FILE="$alias_failure_config"
+  schedule_id="$(greens_scheduler_id)"
+  crontab -l | grep "# $schedule_id$" > "$TEST_ROOT/failure-schedule"
+  grep -q '^0 6 ' "$TEST_ROOT/failure-schedule" || fail "failed initial sync left fresh setup unscheduled"
+  [[ "$(wc -l < "$TEST_ROOT/failure-schedule" | tr -d ' ')" == 1 ]] || fail "fresh setup installed duplicate jobs"
+  {
+    printf 'y\n'
+    printf '\n%.0s' {1..11}
+    printf '17\ny\n'
+  } | CONTRIB_MIRROR_CONFIG="$alias_failure_config" bash "$ROOT/setup.sh" > "$TEST_ROOT/rerun-failure-output" 2>&1 || {
+    cat "$TEST_ROOT/rerun-failure-output"; fail "rerun setup aborted on optional sync failure";
+  }
+  grep -q 'remote rejected' "$TEST_ROOT/rerun-failure-output" || fail "rerun did not retry the failed push"
+  grep -q 'Initial sync failed' "$TEST_ROOT/rerun-failure-output" || fail "rerun hid the sync failure"
+  grep -q 'Setup complete' "$TEST_ROOT/rerun-failure-output" || fail "rerun setup did not finish"
+  crontab -l | grep "# $schedule_id$" > "$TEST_ROOT/failure-schedule"
+  grep -q '^0 17 ' "$TEST_ROOT/failure-schedule" || fail "failed initial sync retained the old schedule"
+  [[ "$(wc -l < "$TEST_ROOT/failure-schedule" | tr -d ' ')" == 1 ]] || fail "rerun retained duplicate schedules"
+  bash -c 'source "$1"; [[ "$SOURCE_1_REMOTE_HOSTS" == github-com,github.com && "$SYNC_HOUR" == 17 ]]' bash "$alias_failure_config" || fail "rerun lost aliases or changed hour"
+  rm "$TEST_ROOT/remotes/mirror.git/hooks/pre-receive"
+) || fail "literal aliases and scheduling after initial sync failure"
+echo "PASS: literal hostname aliases and scheduler installation/replacement after failed initial pushes"
 
 [[ ! -f "$TEST_ROOT/forbidden-switches" ]] || fail "provider commands changed shared gh authentication"

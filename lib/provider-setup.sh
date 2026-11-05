@@ -291,7 +291,7 @@ greens_sources_setup() {
     "$class" "$scan" > "$scan.normalized"
   mv "$scan.normalized" "$scan"
 
-  awk -F '\t' 'NR==FNR {p[$1]=$2; a[$1]=$3; next} ($1 in p) {key=p[$1] FS a[$1] FS $2; repo=a[$1] "/" substr($3,index($3,"/")+1); unique=key SUBSEP repo; if(!(unique in seen)){seen[unique]=1; count[key]++} if(hosts[key]=="")hosts[key]=$1; else if("," hosts[key] "," !~ "," $1 ",")hosts[key]=hosts[key] "," $1} END {for(key in count)print key FS hosts[key] FS count[key]}' "$class" "$scan" | LC_ALL=C sort > "$groups"
+  awk -F '\t' 'NR==FNR {p[$1]=$2; a[$1]=$3; next} ($1 in p) {key=p[$1] FS a[$1] FS $2; repo=a[$1] "/" substr($3,index($3,"/")+1); unique=key SUBSEP repo; if(!(unique in seen)){seen[unique]=1; count[key]++} if(hosts[key]=="")hosts[key]=$1; else if(index("," hosts[key] ",", "," $1 ",")==0)hosts[key]=hosts[key] "," $1} END {for(key in count)print key FS hosts[key] FS count[key]}' "$class" "$scan" | LC_ALL=C sort > "$groups"
 
   # A disconnected drive or temporarily missing clone must not silently erase
   # a previously configured source during setup.
@@ -479,7 +479,11 @@ greens_sources_setup() {
   greens_replace_config "$CONFIG_FILE" '^(WORK_DIRS?|SCAN_MODE|SOURCE_PROVIDER|SOURCE_COUNT|SOURCE_[0-9]+_.*|REMOTE_PREFIX|GITHUB_(ORG|USERNAME)|GITLAB_(HOST|REMOTE_HOST|USERNAME)|EMAILS|SINCE|ACTIVITY_TYPES|PERSONAL_GH_USER|MIRROR_(EMAIL|NAME|URL|DIR)|COPY_MESSAGES(_ACK)?|SCHEDULER|SYNC_HOUR|GREENS_LEGACY_TIMESTAMPS)$' "${save_keys[@]}"
   ok "Saved configuration to $CONFIG_FILE"
   sync_path="$(greens_sync_path "$SCRIPT_DIR/sync.sh")"
-  if confirm "Run the initial sync now?"; then FORCE=1 CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$sync_path"; fi
+  if confirm "Run the initial sync now?"; then
+    if ! FORCE=1 CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$sync_path"; then
+      warn "Initial sync failed. Continuing setup; run greens to retry."
+    fi
+  fi
   greens_remove_all_schedulers "$sync_path"
   case "$SCHEDULER" in
     systemd) greens_install_systemd "$sync_path" "$SYNC_HOUR" ;;
