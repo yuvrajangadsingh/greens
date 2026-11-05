@@ -49,10 +49,10 @@ greens_discover_sources() {
     url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
     identity="$(greens_remote_identity "$url" 1)" || continue
     if [[ "$SOURCE_PROVIDER" == gitlab ]]; then
-      [[ "${identity#*/}" == */* ]] || continue
+      [[ "$(greens_remote_path "$identity")" == */* ]] || continue
       host="$(greens_remote_host "$identity")"
       [[ "$host" == "${GITLAB_REMOTE_HOST:-${GITLAB_HOST%%:*}}" || "$host" == "${GITLAB_HOST%%:*}" ]] || continue
-      identity="$GITLAB_HOST/${identity#*/}"
+      identity="$GITLAB_HOST/$(greens_remote_path "$identity")"
     else
       [[ "$url" == "$REMOTE_PREFIX"* ]] || continue
     fi
@@ -73,7 +73,7 @@ greens_mixed_discover_checkouts() {
       for ((i=1; i<=SOURCE_COUNT; i++)); do
         provider="$(greens_indexed_value "$i" PROVIDER)"
         source_identity="$(greens_provider_identity "$provider" "$identity")"
-        rest="${source_identity#*/}"
+        rest="$(greens_remote_path "$source_identity")"
         [[ "$provider" == git || "$rest" == */* ]] || continue
         organization="${rest%%/*}"
         [[ "$(greens_indexed_value "$i" ORGANIZATION)" == "$organization" ]] || continue
@@ -81,7 +81,7 @@ greens_mixed_discover_checkouts() {
         case ",$aliases," in *",$host,"*) ;; *) continue ;; esac
         api="$(greens_indexed_value "$i" API_HOST)"
         if [[ "$provider" == git ]]; then canonical="$source_identity"
-        else canonical="$(greens_provider_identity "$provider" "$api/${source_identity#*/}")"; fi
+        else canonical="$(greens_provider_identity "$provider" "$api/$rest")"; fi
         printf '%s\t%s\t%s\t%s\n' "$i" "$canonical" "$url" "$repodir"
         break
       done
@@ -230,7 +230,7 @@ greens_recognize_github_case_markers() {
   if [[ -f "$RUN_TMP/mixed-checkouts" ]]; then
     while IFS=$'\t' read -r source_index identity url repodir; do
       [[ "$(greens_indexed_value "$source_index" PROVIDER)" == github ]] || continue
-      raw_identity="$(greens_remote_identity "$url" 1)" || continue
+      raw_identity="$(greens_remote_identity "$url")" || continue
       api="$(greens_indexed_value "$source_index" API_HOST)"
       printf '%s/%s\t%s\n' "$api" "${raw_identity#*/}" "$identity" >> "$RUN_TMP/github-case-aliases"
     done < "$RUN_TMP/mixed-checkouts"
@@ -342,7 +342,7 @@ greens_mixed_sync() {
     EMAILS="$(greens_indexed_value "$source_index" EMAILS)"; SINCE="$(greens_indexed_value "$source_index" SINCE)"; ACTIVITY_TYPES="$(greens_indexed_value "$source_index" ACTIVITY_TYPES)"; ACCESS_MODE="$(greens_source_access_mode "$source_index")"
     transport_only=0; [[ "$ACTIVITY_TYPES" != commits ]] || transport_only=1
     since_epoch="$(greens_epoch "$SINCE")" || { log "ERROR: invalid SINCE for source $source_index"; return 1; }; since_date="${SINCE%% *}"
-    project_path="${identity#*/}"; key="$(printf '%s' "$identity" | greens_hash)"; bare="$(greens_bare_cache_dir)/$key.git"; source_file="$RUN_TMP/$key.records"; : > "$source_file"
+    project_path="$(greens_remote_path "$identity")"; key="$(printf '%s' "$identity" | greens_hash)"; bare="$(greens_bare_cache_dir)/$key.git"; source_file="$RUN_TMP/$key.records"; : > "$source_file"
     state_scope="$(printf '%s\n' "$SOURCE_PROVIDER" "$SOURCE_API_HOST" "$SOURCE_ORGANIZATION" "$SOURCE_USERNAME" "$EMAILS" "$SINCE" "$ACTIVITY_TYPES" "$ACCESS_MODE" | greens_hash)"
     state_dir="$CACHE_DIR/activity-state/$(greens_scheduler_id)-$state_scope"; checkpoint_file="$state_dir/$key.checkpoint"
     [[ ! -f "$state_dir/$key.jsonl" ]] || cat "$state_dir/$key.jsonl" >> "$source_file"
@@ -456,7 +456,7 @@ greens_provider_sync() {
   : > "$RUN_TMP/collected"
   while IFS=$'\t' read -r identity url; do
     key="$(printf '%s' "$identity" | greens_hash)"
-    project_path="${identity#*/}"
+    project_path="$(greens_remote_path "$identity")"
     bare="$(greens_bare_cache_dir)/$key.git"
     source_file="$RUN_TMP/$key.records"
     : > "$source_file"

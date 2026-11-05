@@ -42,7 +42,7 @@ greens_source_has_recursive_checkouts() {
       identity="$(greens_remote_identity "$url" 1)" || continue
       host="$(greens_remote_host "$identity")"
       case ",$aliases," in *",$host,"*) ;; *) continue ;; esac
-      rest="${identity#*/}"
+      rest="$(greens_remote_path "$identity")"
       [[ "$provider" == git || "$rest" == */* ]] || continue
       if [[ "$(greens_provider_identity "$provider" "${rest%%/*}")" == "$organization" ]]; then return 0; fi
     done < <(greens_find_git_entries "$root" recursive)
@@ -271,7 +271,7 @@ greens_sources_setup() {
     while IFS= read -r -d '' gitpath; do
       repodir="$(dirname "$gitpath")"; url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
       identity="$(greens_remote_identity "$url" 1)" || continue
-      host="$(greens_remote_host "$identity")"; rest="${identity#*/}"; organization="${rest%%/*}"
+      host="$(greens_remote_host "$identity")"; rest="$(greens_remote_path "$identity")"; organization="${rest%%/*}"
       printf '%s\t%s\t%s\t%s\n' "$host" "$organization" "$identity" "$repodir" >> "$scan"
     done < <(greens_find_git_entries "$path" "$SCAN_MODE")
   done <<< "$WORK_DIRS"
@@ -309,7 +309,20 @@ greens_sources_setup() {
 
   # Classification establishes whether owner/repository paths are insensitive
   # to case. Keep all original transport URLs in the checkouts themselves.
-  LC_ALL=C awk -F '\t' 'BEGIN {OFS=FS} NR==FNR {p[$1]=$2; next} ($1 in p) && (p[$1]=="git" || index(substr($3,index($3,"/")+1),"/")>0) {if(p[$1]=="github") {$2=tolower($2); $3=tolower($3)} print}' \
+  LC_ALL=C awk -F '\t' '
+    BEGIN {OFS=FS}
+    NR==FNR {p[$1]=$2; a[$1]=$3; next}
+    ($1 in p) {
+      path=$3; sub(/^[^:]+:\/\//,"",path); sub(/^[^/]*\//,"",path)
+      if($3 ~ /^ssh:/) sub(/^~\//,"",path)
+      sub(/\.git$/,"",path)
+      if(p[$1]!="git") {
+        if(index(path,"/")==0) next
+        $3=a[$1] "/" path
+      }
+      if(p[$1]=="github") {$2=tolower($2); $3=tolower($3)}
+      print
+    }' \
     "$class" "$scan" > "$scan.normalized"
   mv "$scan.normalized" "$scan"
 
@@ -478,7 +491,7 @@ greens_sources_setup() {
   branch="$(jq -er .default_branch <<< "$meta")"; MIRROR_DIR="$(greens_required 'Local mirror directory' "${MIRROR_DIR:-$CONFIG_DIR/mirror}")"; MIRROR_DIR="${MIRROR_DIR/#\~/$HOME}"
   mkdir -p "$(dirname "$MIRROR_DIR")"; MIRROR_DIR="$(cd "$(dirname "$MIRROR_DIR")" && pwd)/$(basename "$MIRROR_DIR")"
   while IFS= read -r path; do case "$MIRROR_DIR/" in "$path/"*) fail "Choose a mirror directory outside every work directory."; return 1 ;; esac; done <<< "$WORK_DIRS"
-  if [[ ! -d "$MIRROR_DIR/.git" ]]; then greens_git_as github github.com "$PERSONAL_GH_USER" "$MIRROR_URL" clone "$MIRROR_URL" "$MIRROR_DIR"; elif [[ "$(greens_destination_identity "$(git -C "$MIRROR_DIR" config remote.origin.url)")" != "github.com/$owner" ]]; then fail "Existing mirror has a different origin."; return 1; fi
+  if [[ ! -d "$MIRROR_DIR/.git" ]]; then greens_destination_git "$MIRROR_URL" clone "$MIRROR_URL" "$MIRROR_DIR"; elif [[ "$(greens_destination_identity "$(git -C "$MIRROR_DIR" config remote.origin.url)")" != "github.com/$owner" ]]; then fail "Existing mirror has a different origin."; return 1; fi
   if ! git -C "$MIRROR_DIR" rev-parse --verify HEAD >/dev/null 2>&1; then git -C "$MIRROR_DIR" symbolic-ref HEAD "refs/heads/$branch"; fi
   # Passed by variable name to greens_replace_config.
   # shellcheck disable=SC2034

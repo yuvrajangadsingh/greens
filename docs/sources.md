@@ -9,7 +9,9 @@ including SSH/HTTPS forms and overlapping roots, are counted and processed once.
 GitHub and GitHub Enterprise owner/repository identities ignore casing, so
 `Team/Repo` and `team/repo` share activity IDs. Other providers retain path casing.
 Generic SSH identities also retain the login name: separate login homes on the
-same host remain separate repositories. The original clone URLs remain unchanged
+same host remain separate repositories. Generic endpoint keys retain their scheme,
+repository suffix, and SSH absolute/home-relative path semantics; provider-specific
+normalization applies only after GitHub/GitLab classification. The original clone URLs remain unchanged
 for Git authentication.
 Setup asks for one
 root at a time and repeats the prompt until an empty answer is submitted.

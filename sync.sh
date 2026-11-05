@@ -907,7 +907,7 @@ privacy_migrate() {
 replace_mirror_with_clean_clone() {
   local url="$1" branch="$2" tmp_clone
   tmp_clone="$(mktemp -d)/mirror"
-  if ! greens_git_as github github.com "${PERSONAL_GH_USER:-}" "$url" clone --quiet --branch "$branch" "$url" "$tmp_clone" 2>/dev/null; then
+  if ! greens_destination_git "$url" clone --quiet --branch "$branch" "$url" "$tmp_clone" 2>/dev/null; then
     echo "  [!] Couldn't re-clone the migrated remote; local mirror left as-is."
     return 1
   fi
@@ -996,9 +996,9 @@ case "${1:-}" in
     # GitHub counts contributions. No main/master guessing: symref first,
     # then the remote's only branch; a truly unborn remote keeps git's own
     # init default (the first push defines the branch).
-    default_branch="$(greens_git_as github github.com "${PERSONAL_GH_USER:-}" "$remote_url" ls-remote --symref "$remote_url" HEAD 2>/dev/null | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2; exit}')"
+    default_branch="$(greens_destination_git "$remote_url" ls-remote --symref "$remote_url" HEAD 2>/dev/null | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2; exit}')"
     if [[ -z "$default_branch" ]]; then
-      default_branch="$(greens_git_as github github.com "${PERSONAL_GH_USER:-}" "$remote_url" ls-remote --heads "$remote_url" 2>/dev/null | awk 'NR==1 {sub("refs/heads/", "", $2); print $2}')"
+      default_branch="$(greens_destination_git "$remote_url" ls-remote --heads "$remote_url" 2>/dev/null | awk 'NR==1 {sub("refs/heads/", "", $2); print $2}')"
     fi
     # Wipe and re-init mirror. No init commit — the first mirrored activity
     # commit becomes the new root.
