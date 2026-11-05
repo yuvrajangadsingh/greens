@@ -25,6 +25,9 @@ Repositories are grouped by provider, API host, and organization. A GitHub
 organization is the repository owner. A GitLab organization is the top-level
 namespace, so `group/platform/service` belongs to `group`. Every group has its
 own username, commit emails, history start, and activity selection.
+Generic Git also accepts single-component paths: `git@forge.example:project.git`
+belongs to the `project` group. GitHub and GitLab still require an owner or
+namespace followed by a repository name.
 Entering `-` at its author-email prompt skips the complete group before account
 or activity configuration. All repositories represented by that group are
 omitted from sync. The group is offered again on a later setup run.

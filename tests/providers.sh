@@ -39,6 +39,9 @@ source "$TEST_ROOT/config-roundtrip"
 [[ ! -f SHOULD_NOT_EXIST ]] || fail "configuration executed input"
 [[ "$(greens_remote_identity 'ssh://git@forge.example:2222/group/sub/repo.git')" == forge.example:2222/group/sub/repo ]] || fail "SSH URL normalization"
 [[ "$(greens_remote_identity 'https://forge.example/group/sub/repo')" == forge.example/group/sub/repo ]] || fail "HTTPS normalization"
+[[ "$(greens_remote_identity 'git@forge.example:project.git')" == forge.example/project ]] || fail "single-component Git path"
+if greens_remote_identity 'https://forge.example' >/dev/null; then fail "accepted a URL with no repository path"; fi
+if greens_destination_identity 'https://github.com/fixture' >/dev/null; then fail "accepted a mirror without owner/repo"; fi
 
 mkdir -p "$TEST_ROOT/scan-root/immediate/.git" "$TEST_ROOT/scan-root/worktree" "$TEST_ROOT/scan-root/nested/deep/.git" "$TEST_ROOT/scan-root/.git"
 : > "$TEST_ROOT/scan-root/worktree/.git"
@@ -973,5 +976,73 @@ echo "PASS: literal hostname aliases and scheduler installation/replacement afte
   }
 ) || fail "scan-depth source regeneration regression"
 echo "PASS: explicit in-root scan drops excluded local groups, retains unavailable sources, and syncs successfully"
+
+# A fresh generic setup may contain only unnamespaced repository paths. Keep
+# known-provider owner/repo validation after classifying the raw origins.
+(
+  root_work="$TEST_ROOT/root-path-work" root_config="$TEST_ROOT/root-path-config"
+  mkdir -p "$root_work" "$TEST_ROOT/root-path-bin"
+  for tool in glab curl; do
+    printf '#!/bin/bash\nexit 1\n' > "$TEST_ROOT/root-path-bin/$tool"
+    chmod +x "$TEST_ROOT/root-path-bin/$tool"
+  done
+  for transport in scp ssh https; do
+    case "$transport" in
+      scp) url=git@flat.example:project.git ;;
+      ssh) url=ssh://git@flat.example:2222/project.git ;;
+      https) url=https://flat.example:8443/project.git ;;
+    esac
+    git clone --quiet --branch main "$TEST_ROOT/remotes/source.git" "$root_work/$transport"
+    git -C "$root_work/$transport" remote set-url origin "$url"
+    git config --global --add url."$TEST_ROOT/remotes/source.git".insteadOf "$url"
+  done
+  git init --quiet "$root_work/invalid-github"
+  git -C "$root_work/invalid-github" remote add origin git@github.com:project.git
+  {
+    printf '%s\n\n\n3\nauthor@example.test\n2021-01-01\n' "$root_work"
+    printf 'fixture\nmirror@example.test\ngreens\nhttps://github.com/fixture/mirror\n%s\nmanual\n0\ny\n' "$TEST_ROOT/root-path-mirror"
+  } | PATH="$TEST_ROOT/root-path-bin:$PATH" CONTRIB_MIRROR_CONFIG="$root_config" bash "$ROOT/setup.sh" > "$TEST_ROOT/root-path-output" 2>&1 || {
+    cat "$TEST_ROOT/root-path-output"; fail "fresh generic root-path setup";
+  }
+  bash -c 'source "$1"; [[ "$SOURCE_COUNT" == 1 && "$SOURCE_1_PROVIDER" == git && "$SOURCE_1_ORGANIZATION" == project && "$SOURCE_1_ACCESS_MODE" == remote ]]' bash "$root_config" || fail "root-path setup did not preserve generic sources or validated an invalid GitHub path"
+  grep -q 'skip all 3 repositories' "$TEST_ROOT/root-path-output" || fail "setup omitted a root-level origin"
+  [[ "$(grep -c 'Collecting git project' "$TEST_ROOT/root-path-output")" == 3 ]] || fail "root-level sources were not collected"
+  if grep -q 'Initial sync failed' "$TEST_ROOT/root-path-output"; then cat "$TEST_ROOT/root-path-output"; fail "initial root-path sync failed"; fi
+  CONFIG_FILE="$root_config"
+  jq -s 'map(.key|split("/")[0])|unique|length' "$HOME/.contrib-mirror/cache/activity-state/$(greens_scheduler_id)-"*/*.jsonl > "$TEST_ROOT/root-path-endpoints"
+  [[ "$(cat "$TEST_ROOT/root-path-endpoints")" == 3 ]] || fail "root-level endpoints merged in activity state"
+  before="$(git -C "$TEST_ROOT/root-path-mirror" log --format=%B | grep -c '^Greens-Activity: ')"
+  FORCE=1 CONTRIB_MIRROR_CONFIG="$root_config" bash "$ROOT/sync.sh" > "$TEST_ROOT/root-path-fresh-output" 2>&1 || {
+    cat "$TEST_ROOT/root-path-fresh-output"; fail "fresh generic root-path sync";
+  }
+  [[ "$(git -C "$TEST_ROOT/root-path-mirror" log --format=%B | grep -c '^Greens-Activity: ')" == "$before" ]] || fail "root-path rerun duplicated activities"
+) || fail "generic root-level repository regression"
+echo "PASS: fresh generic root-path setup, SSH/HTTPS collection, provider validation, and idempotent sync"
+
+# Parse the actual generated XML and verify every interpolated filesystem path
+# round-trips literally, including entity-like text and all XML metacharacters.
+(
+  CONFIG_FILE="$TEST_ROOT/Work & Personal <config> \"quoted\" 'single' &amp;/config"
+  LOG_DIR="$TEST_ROOT/logs & <output> \"quoted\" 'single'"
+  xml_script="$TEST_ROOT/runtime & <tools>/sync \"quoted\" 'single'.sh"
+  mkdir -p "$(dirname "$xml_script")"
+  printf '#!/bin/bash\nexit 0\n' > "$xml_script"
+  greens_install_launchd "$xml_script" 7
+  python3 - "$HOME/Library/LaunchAgents/$(greens_launchd_label).plist" "$CONFIG_FILE" "$xml_script" "$LOG_DIR" "$(greens_launchd_label)" <<'CHECK'
+import pathlib
+import plistlib
+import sys
+plist, config, script, logs, label = sys.argv[1:]
+with open(plist, "rb") as stream:
+    agent = plistlib.load(stream)
+assert agent["Label"] == label
+assert agent["ProgramArguments"] == ["/bin/bash", script]
+assert agent["EnvironmentVariables"]["CONTRIB_MIRROR_CONFIG"] == config
+assert agent["StandardOutPath"] == str(pathlib.Path(logs) / "sync.out.log")
+assert agent["StandardErrorPath"] == str(pathlib.Path(logs) / "sync.err.log")
+assert agent["StartCalendarInterval"] == {"Hour": 7, "Minute": 0}
+CHECK
+) || fail "launchd XML path escaping regression"
+echo "PASS: launchd plist preserves config, executable and log paths containing XML metacharacters"
 
 [[ ! -f "$TEST_ROOT/forbidden-switches" ]] || fail "provider commands changed shared gh authentication"

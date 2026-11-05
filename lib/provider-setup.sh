@@ -43,6 +43,7 @@ greens_source_has_recursive_checkouts() {
       host="$(greens_remote_host "$identity")"
       case ",$aliases," in *",$host,"*) ;; *) continue ;; esac
       rest="${identity#*/}"
+      [[ "$provider" == git || "$rest" == */* ]] || continue
       if [[ "$(greens_provider_identity "$provider" "${rest%%/*}")" == "$organization" ]]; then return 0; fi
     done < <(greens_find_git_entries "$root" recursive)
   done <<< "$WORK_DIRS"
@@ -308,7 +309,7 @@ greens_sources_setup() {
 
   # Classification establishes whether owner/repository paths are insensitive
   # to case. Keep all original transport URLs in the checkouts themselves.
-  LC_ALL=C awk -F '\t' 'BEGIN {OFS=FS} NR==FNR {p[$1]=$2; next} {if(p[$1]=="github") {$2=tolower($2); $3=tolower($3)} print}' \
+  LC_ALL=C awk -F '\t' 'BEGIN {OFS=FS} NR==FNR {p[$1]=$2; next} ($1 in p) && (p[$1]=="git" || index(substr($3,index($3,"/")+1),"/")>0) {if(p[$1]=="github") {$2=tolower($2); $3=tolower($3)} print}' \
     "$class" "$scan" > "$scan.normalized"
   mv "$scan.normalized" "$scan"
 
