@@ -143,6 +143,9 @@ printf 'protocol=https\nhost=github.com\nusername=bob\n\n' |
   GH_TOKEN=fixture-alice GITHUB_TOKEN=fixture-alice GH_ENTERPRISE_TOKEN=fixture-alice GITHUB_ENTERPRISE_TOKEN=fixture-alice \
   greens_mirror_git credential fill > "$ACCOUNT_TEST/username-mirror-credentials"
 grep -qx password=fixture-bob "$ACCOUNT_TEST/username-mirror-credentials" || fail "destination helper inherited a work PAT"
+printf 'protocol=https\nhost=github.com\nusername=bob\n\n' |
+  GH_TOKEN=fixture-alice GITHUB_TOKEN=fixture-alice greens_destination_git https://bob@github.com/bob/mirror credential fill > "$ACCOUNT_TEST/initial-clone-credentials"
+grep -qx password=fixture-bob "$ACCOUNT_TEST/initial-clone-credentials" || fail "initial destination credentials inherited the work actor"
 git -C "$MIRROR_DIR" remote set-url origin https://github.com/bob/mirror
 
 # Exercise the complete indexed collector while gh auth status fails. The Git
@@ -299,7 +302,7 @@ cat > "$ACCOUNT_TEST/bin/git" <<'MOCK'
 set -eu
 url="" operation="" gitdir=""
 for arg in "$@"; do
-  case "$arg" in ls-remote|fetch|clone) operation="$arg" ;; --git-dir=*) gitdir="$arg" ;; https://github.com/*) url="$arg" ;; esac
+  case "$arg" in ls-remote|fetch|clone) operation="$arg" ;; --git-dir=*) gitdir="$arg" ;; https://github.com/*|https://bob@github.com/*) url="$arg" ;; esac
 done
 if [[ "$operation" == fetch && -z "$url" && -n "$gitdir" ]]; then
   url="$("$REAL_GIT" "$gitdir" config remote.origin.url)"
@@ -308,6 +311,7 @@ if [[ -n "$operation" ]]; then
   case "$url" in
     https://github.com/team/repo|https://github.com/TeAm/RePo) [[ "${GH_TOKEN:-}" == fixture-alice ]] || exit 1 ;;
     https://github.com/otherteam/repo) [[ "${GH_TOKEN:-}" == fixture-carol ]] || exit 1 ;;
+    https://bob@github.com/bob/select-mirror) [[ "${GH_TOKEN:-}" == fixture-bob ]] || exit 1 ;;
   esac
 fi
 exec "$REAL_GIT" "$@"
@@ -324,13 +328,13 @@ mkdir -p "$ACCOUNT_TEST/setup-work"
 "$REAL_GIT" config --global --add url."$ACCOUNT_TEST/source.git".insteadOf https://github.com/TeAm/RePo
 "$REAL_GIT" init --bare --quiet "$ACCOUNT_TEST/select-mirror.git"
 "$REAL_GIT" --git-dir="$ACCOUNT_TEST/select-mirror.git" symbolic-ref HEAD refs/heads/main
-"$REAL_GIT" config --global url."$ACCOUNT_TEST/select-mirror.git".insteadOf https://github.com/bob/select-mirror
+"$REAL_GIT" config --global url."$ACCOUNT_TEST/select-mirror.git".insteadOf https://bob@github.com/bob/select-mirror
 touch "$ACCOUNT_TEST/setup-active"
 {
   printf '%s\n\n' "$ACCOUNT_TEST/setup-work"
   printf 'author@example.test\ncarol\ncommits, issues, commits\n2021-01-01\n'
   printf 'author@example.test\nalice\ncommits\n2021-01-01\n'
-  printf 'bob\nmirror@example.test\ngreens\nhttps://github.com/bob/select-mirror\n%s\nmanual\n0\ny\n' "$ACCOUNT_TEST/select-mirror"
+  printf 'bob\nmirror@example.test\ngreens\nhttps://bob@github.com/bob/select-mirror\n%s\nmanual\n0\ny\n' "$ACCOUNT_TEST/select-mirror"
 } | CONTRIB_MIRROR_CONFIG="$ACCOUNT_TEST/select-config" bash "$ROOT/setup.sh" > "$ACCOUNT_TEST/select-output" 2>&1 || {
   cat "$ACCOUNT_TEST/select-output"; fail "clean HTTPS setup could not select work accounts";
 }

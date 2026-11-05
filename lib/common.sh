@@ -210,9 +210,9 @@ greens_git_as() {
   fi
 }
 
-greens_mirror_git() (
-  local url authority userinfo="" token="" user identity
-  url="$(git -C "$MIRROR_DIR" config remote.origin.url)" || return 1
+greens_destination_git() (
+  local url="$1" authority userinfo="" token="" user identity
+  shift
   if [[ "$url" == https://* || "$url" == http://* ]]; then
     authority="${url#*://}"; authority="${authority%%/*}"
     [[ "$authority" != *@* ]] || userinfo="${authority%@*}"
@@ -233,6 +233,12 @@ greens_mirror_git() (
   fi
   greens_git_as github github.com "${PERSONAL_GH_USER:-}" "$url" "$@"
 )
+
+greens_mirror_git() {
+  local url
+  url="$(git -C "$MIRROR_DIR" config remote.origin.url)" || return 1
+  greens_destination_git "$url" "$@"
+}
 
 # Resolve destination SSH aliases for identity checks without rewriting the
 # transport URL, which may select a different SSH key or port.
@@ -369,36 +375,55 @@ greens_utc_date() {
     date -u -r "$1" '+%Y-%m-%dT%H:%M:%SZ'
 }
 
-# Endpoint/path without credentials, scheme, or a trailing .git. Keep explicit
-# ports until provider-aware classification can establish repository identity.
+# The default projects a host/path for compatibility. Collection passes 1 to
+# retain a sanitized transport endpoint; only known providers canonicalize it.
 greens_remote_identity() {
-  local url="$1" preserve_login="${2:-0}" authority path login="" scheme="${1%%://*}"
+  local url="$1" preserve_transport="${2:-0}" authority path login="" scheme="${1%%://*}"
   case "$url" in
     *://*)
       url="${url#*://}"
       [[ "$url" == */* ]] || return 1
-      authority="${url%%/*}"
-      path="${url#*/}"
-      if [[ "$preserve_login" == 1 && ( "$scheme" == ssh || "$scheme" == git+ssh || "$scheme" == ssh+git ) && "$authority" == *@* ]]; then login="${authority%@*}"; [[ "$login" != *:* ]] || return 1; fi
+      authority="${url%%/*}"; path="${url#*/}"
+      case "$scheme" in git+ssh|ssh+git) scheme=ssh ;; esac
+      if [[ "$preserve_transport" == 1 && "$scheme" == ssh && "$authority" == *@* ]]; then
+        login="${authority%@*}"; [[ "$login" != *:* ]] || return 1
+      fi
       authority="${authority##*@}"
       ;;
     *:*)
-      authority="${url%%:*}"
-      if [[ "$preserve_login" == 1 && "$authority" == *@* ]]; then login="${authority%@*}"; fi
+      authority="${url%%:*}"; path="${url#*:}"; scheme=ssh
+      [[ -n "$path" ]] || return 1
+      if [[ "$preserve_transport" == 1 ]]; then
+        [[ "$authority" != *@* ]] || login="${authority%@*}"
+        # The tilde marks the remote SSH home, never this machine's HOME.
+        # shellcheck disable=SC2088
+        case "$path" in /*) path="${path#/}" ;; '~'*) ;; *) path="~/$path" ;; esac
+      fi
       authority="${authority##*@}"
-      path="${url#*:}"
       ;;
     *) return 1 ;;
   esac
-  path="${path#/}"; path="${path%/}"; path="${path%.git}"
+  path="${path%/}"
+  if [[ "$preserve_transport" != 1 ]]; then path="${path#/}"; path="${path%.git}"; fi
   [[ -n "$authority" && -n "$path" && "$path" != *$'\t'* && "$path" != *$'\n'* ]] || return 1
-  printf '%s%s/%s\n' "${login:+$login@}" "$(printf '%s' "$authority" | tr '[:upper:]' '[:lower:]')" "$path"
+  authority="$(printf '%s' "$authority" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$preserve_transport" == 1 ]]; then
+    printf '%s://%s%s/%s\n' "$scheme" "${login:+$login@}" "$authority" "$path"
+  else printf '%s/%s\n' "$authority" "$path"; fi
 }
 
-# Host classification and alias membership are independent of transport ports.
+# Project grouping is independent of generic endpoint/SSH path semantics.
+greens_remote_path() {
+  local identity="$1" path
+  identity="${identity#*://}"
+  path="${identity#*/}"; path="${path#/}"
+  [[ "$1" != ssh://* ]] || path="${path#\~/}"
+  printf '%s\n' "${path%.git}"
+}
+
 greens_remote_host() {
-  local authority="${1%%/*}"
-  authority="${authority##*@}"
+  local authority="${1#*://}"
+  authority="${authority%%/*}"; authority="${authority##*@}"
   case "$authority" in
     \[*\]*) printf '%s]\n' "${authority%%]*}" ;;
     *) printf '%s\n' "${authority%%:*}" ;;

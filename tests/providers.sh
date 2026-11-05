@@ -1009,7 +1009,7 @@ echo "PASS: explicit in-root scan drops excluded local groups, retains unavailab
   [[ "$(grep -c 'Collecting git project' "$TEST_ROOT/root-path-output")" == 3 ]] || fail "root-level sources were not collected"
   if grep -q 'Initial sync failed' "$TEST_ROOT/root-path-output"; then cat "$TEST_ROOT/root-path-output"; fail "initial root-path sync failed"; fi
   CONFIG_FILE="$root_config"
-  jq -s 'map(.key|split("/")[0])|unique|length' "$HOME/.contrib-mirror/cache/activity-state/$(greens_scheduler_id)-"*/*.jsonl > "$TEST_ROOT/root-path-endpoints"
+  jq -s 'map(.key|split("/commit/")[0])|unique|length' "$HOME/.contrib-mirror/cache/activity-state/$(greens_scheduler_id)-"*/*.jsonl > "$TEST_ROOT/root-path-endpoints"
   [[ "$(cat "$TEST_ROOT/root-path-endpoints")" == 3 ]] || fail "root-level endpoints merged in activity state"
   before="$(git -C "$TEST_ROOT/root-path-mirror" log --format=%B | grep -c '^Greens-Activity: ')"
   FORCE=1 CONTRIB_MIRROR_CONFIG="$root_config" bash "$ROOT/sync.sh" > "$TEST_ROOT/root-path-fresh-output" 2>&1 || {
