@@ -49,3 +49,14 @@ again after this correction; released v1.8.2 configurations are unaffected.
 Explicit `--in-root` setup removes saved groups that still have checkouts in
 excluded nested folders. It retains genuinely unavailable groups, and a fresh
 sync no longer fails because of a local group excluded by the requested depth.
+
+## Scheduled dependencies and cache reuse
+
+Launchd saves the setup PATH with XML escaping, matching cron and systemd.
+Destination Git commands isolate personal credentials even when a mirror URL
+contains only a username and an ambient work token is exported.
+
+Upgrades can seed each configuration's private bare cache from a self-contained
+old cache using a local copy with independent objects/refs and fresh transport
+configuration. This avoids repeating a full network clone for large histories.
+Generic SSH repository identities also distinguish login homes and login casing.

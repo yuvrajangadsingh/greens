@@ -1680,6 +1680,10 @@ while read -r remote_repo url; do
   bare="$(greens_bare_cache_dir)/$remote_repo"
 
   if [[ ! -d "$bare" ]]; then
+    greens_seed_bare_cache "$bare" "$CACHE_DIR/$remote_repo"
+    if [[ -d "$bare" ]]; then git --git-dir="$bare" remote add origin "$url"; fi
+  fi
+  if [[ ! -d "$bare" ]]; then
     log "Cloning $remote_repo"
     # ${arr[@]+...} guards the empty-array case — bash 3.2 + set -u aborts on
     # plain "${arr[@]}" when the array has no elements.

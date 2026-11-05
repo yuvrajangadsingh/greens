@@ -39,7 +39,7 @@ greens_source_has_recursive_checkouts() {
     [[ -d "$root" ]] || continue
     while IFS= read -r -d '' gitpath; do
       url="$(git -C "$(dirname "$gitpath")" config remote.origin.url 2>/dev/null || true)"
-      identity="$(greens_remote_identity "$url")" || continue
+      identity="$(greens_remote_identity "$url" 1)" || continue
       host="$(greens_remote_host "$identity")"
       case ",$aliases," in *",$host,"*) ;; *) continue ;; esac
       rest="${identity#*/}"
@@ -270,7 +270,7 @@ greens_sources_setup() {
     [[ -d "$path" ]] || { warn "Configured work directory is unavailable: $path"; continue; }
     while IFS= read -r -d '' gitpath; do
       repodir="$(dirname "$gitpath")"; url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
-      identity="$(greens_remote_identity "$url")" || continue
+      identity="$(greens_remote_identity "$url" 1)" || continue
       host="$(greens_remote_host "$identity")"; rest="${identity#*/}"; organization="${rest%%/*}"
       printf '%s\t%s\t%s\t%s\n' "$host" "$organization" "$identity" "$repodir" >> "$scan"
     done < <(greens_find_git_entries "$path" "$SCAN_MODE")

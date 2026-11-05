@@ -1026,8 +1026,11 @@ echo "PASS: fresh generic root-path setup, SSH/HTTPS collection, provider valida
   LOG_DIR="$TEST_ROOT/logs & <output> \"quoted\" 'single'"
   xml_script="$TEST_ROOT/runtime & <tools>/sync \"quoted\" 'single'.sh"
   mkdir -p "$(dirname "$xml_script")"
-  printf '#!/bin/bash\nexit 0\n' > "$xml_script"
-  greens_install_launchd "$xml_script" 7
+  mkdir -p "$TEST_ROOT/launchd deps & <tools>"
+  printf '#!/bin/bash\nprintf "ready"\n' > "$TEST_ROOT/launchd deps & <tools>/glab"
+  chmod +x "$TEST_ROOT/launchd deps & <tools>/glab"
+  printf '#!/bin/bash\ncommand -v glab > "$TEST_ROOT/launchd-used-glab"\nglab > "$TEST_ROOT/launchd-result"\n' > "$xml_script"
+  PATH="$TEST_ROOT/launchd deps & <tools>:$PATH" greens_install_launchd "$xml_script" 7
   python3 - "$HOME/Library/LaunchAgents/$(greens_launchd_label).plist" "$CONFIG_FILE" "$xml_script" "$LOG_DIR" "$(greens_launchd_label)" <<'CHECK'
 import pathlib
 import plistlib
@@ -1041,8 +1044,29 @@ assert agent["EnvironmentVariables"]["CONTRIB_MIRROR_CONFIG"] == config
 assert agent["StandardOutPath"] == str(pathlib.Path(logs) / "sync.out.log")
 assert agent["StandardErrorPath"] == str(pathlib.Path(logs) / "sync.err.log")
 assert agent["StartCalendarInterval"] == {"Hour": 7, "Minute": 0}
+import os
+import subprocess
+env = dict(os.environ)
+env.update(agent["EnvironmentVariables"])
+subprocess.run(agent["ProgramArguments"], env=env, check=True)
+assert pathlib.Path(os.environ["TEST_ROOT"], "launchd-used-glab").read_text().strip() == str(pathlib.Path(os.environ["TEST_ROOT"], "launchd deps & <tools>", "glab"))
+assert pathlib.Path(os.environ["TEST_ROOT"], "launchd-result").read_text() == "ready"
 CHECK
 ) || fail "launchd XML path escaping regression"
 echo "PASS: launchd plist preserves config, executable and log paths containing XML metacharacters"
+
+# Upgrade seeding is local, independent, and does not copy old transport auth.
+(
+  old="$TEST_ROOT/old-cache.git" seeded="$TEST_ROOT/new-cache/seed.git"
+  git clone --bare --quiet "$TEST_ROOT/remotes/source.git" "$old"
+  git --git-dir="$old" config credential.helper '!echo old-private-helper'
+  git --git-dir="$old" config http.extraHeader 'Authorization: fixture-old'
+  greens_seed_bare_cache "$seeded" "$old"
+  [[ "$(git --git-dir="$seeded" rev-parse HEAD)" == "$(git --git-dir="$old" rev-parse HEAD)" ]] || fail "cache seed lost repository history"
+  if git --git-dir="$seeded" config --get credential.helper >/dev/null || git --git-dir="$seeded" config --get http.extraHeader >/dev/null || git --git-dir="$seeded" remote get-url origin >/dev/null 2>&1; then fail "cache seed copied old transport credentials"; fi
+  git --git-dir="$seeded" update-ref refs/heads/seed-only HEAD
+  if git --git-dir="$old" rev-parse --verify refs/heads/seed-only >/dev/null 2>&1; then fail "cache seed shares mutable refs"; fi
+) || fail "upgrade bare-cache seeding regression"
+echo "PASS: local cache migration retains history without copying transport credentials or sharing refs"
 
 [[ ! -f "$TEST_ROOT/forbidden-switches" ]] || fail "provider commands changed shared gh authentication"
