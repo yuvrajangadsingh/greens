@@ -667,26 +667,39 @@ echo "PASS: terminal preflight fallback reads confirmations for every source"
   git init --quiet "$MIRROR_DIR"
   git -C "$MIRROR_DIR" symbolic-ref HEAD refs/heads/main
   git -C "$MIRROR_DIR" remote add origin "$TEST_ROOT/remotes/legacy-epoch-mirror.git"
+  # Initialization/status epochs are not activities, even with the current
+  # mirror email. The legacy sync used an email that has since changed.
+  GIT_AUTHOR_DATE=2021-01-01T10:00:00Z GIT_COMMITTER_DATE=2021-01-01T10:00:00Z \
+    git -C "$MIRROR_DIR" -c user.email="$MIRROR_EMAIL" commit --quiet --allow-empty -m init
+  init_epoch="$(git -C "$MIRROR_DIR" log -1 --format=%at)"
   GIT_AUTHOR_DATE=2021-01-01T12:00:00Z GIT_COMMITTER_DATE=2021-01-01T12:00:00Z \
-    git -C "$MIRROR_DIR" -c user.email="$MIRROR_EMAIL" commit --quiet --allow-empty -m sync
+    git -C "$MIRROR_DIR" -c user.email=previous-mirror@example.test commit --quiet --allow-empty -m sync
   mirror_visibility() { echo public; }
   : > "$RUN_TMP/publish"
   legacy_epoch="$(git -C "$MIRROR_DIR" log -1 --format=%at)"
+  GIT_AUTHOR_DATE=2021-01-02T12:00:00Z GIT_COMMITTER_DATE=2021-01-02T12:00:00Z \
+    git -C "$MIRROR_DIR" -c user.email="$MIRROR_EMAIL" commit --quiet --allow-empty -m 'Update sync status'
+  status_epoch="$(git -C "$MIRROR_DIR" log -1 --format=%at)"
   new_epoch=1612353600 # 2021-02-03T12:00:00Z, independent of the test host timezone.
-  jq -nc --argjson legacy "$legacy_epoch" --argjson epoch "$new_epoch" '
+  jq -nc --argjson legacy "$legacy_epoch" --argjson epoch "$new_epoch" \
+    --argjson init "$init_epoch" --argjson status "$status_epoch" '
     {key:"legacy",epoch:$legacy,date:"2021-01-01T12:00:00Z",kind:"commits",project:"one"},
+    {key:"init-coincidence",epoch:$init,date:"2021-01-01T10:00:00Z",kind:"commits",project:"one"},
+    {key:"status-coincidence",epoch:$status,date:"2021-01-02T12:00:00Z",kind:"commits",project:"one"},
     {key:"first",epoch:$epoch,date:"2021-02-03T12:00:00Z",kind:"commits",project:"one"}' > "$RUN_TMP/input"
   greens_mirror_mixed_records "$RUN_TMP/input" "$RUN_TMP/publish" > "$TEST_ROOT/legacy-epoch-output" 2>&1
-  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 2 ]] || fail "legacy timestamp was duplicated"
+  [[ "$(git -C "$MIRROR_DIR" log --format=%at --author='<previous-mirror@example.test>')" == "$legacy_epoch" ]] || fail "legacy attribution changed"
+  [[ "$(git -C "$MIRROR_DIR" log --format=%at | grep -cx "$legacy_epoch")" == 1 ]] || fail "legacy timestamp was duplicated after changing mirror email"
+  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 6 ]] || fail "metadata timestamps suppressed real activity"
   jq -nc --argjson epoch "$new_epoch" '{key:"second",epoch:$epoch,date:"2021-02-03T12:00:00Z",kind:"commits",project:"two"}' >> "$RUN_TMP/input"
   greens_mirror_mixed_records "$RUN_TMP/input" "$RUN_TMP/publish" >> "$TEST_ROOT/legacy-epoch-output" 2>&1
-  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 3 ]] || fail "new activity at a marked commit timestamp was skipped"
+  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 7 ]] || fail "new activity at a marked commit timestamp was skipped"
   [[ "$(cat "$RUN_TMP/legacy-epochs")" == "$legacy_epoch" ]] || fail "marked commits entered legacy timestamp baseline"
   mirrored_head="$(git -C "$MIRROR_DIR" rev-parse HEAD)"
   greens_mirror_mixed_records "$RUN_TMP/input" "$RUN_TMP/publish" >> "$TEST_ROOT/legacy-epoch-output" 2>&1
   [[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$mirrored_head" ]] || fail "legacy-mode rerun duplicated activity IDs"
 )
-echo "PASS: legacy timestamps exclude marked activities across repeated syncs"
+echo "PASS: legacy timestamps survive mirror email changes and exclude metadata/marked activities"
 
 # The following configs each have one remote commit-only source and one root:
 # accept saved defaults, then decline the initial sync.
