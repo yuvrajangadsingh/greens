@@ -1069,4 +1069,83 @@ echo "PASS: launchd plist preserves config, executable and log paths containing 
 ) || fail "upgrade bare-cache seeding regression"
 echo "PASS: local cache migration retains history without copying transport credentials or sharing refs"
 
+# Migrate working filesystem-origin repositories without losing either source.
+# URI/absolute aliases deduplicate; relative paths resolve from their checkout,
+# and URL escapes preserve spaces, UTF-8 and literal percent characters.
+(
+  fs_remotes="$TEST_ROOT/filesystem remotes %"
+  fs_work="$TEST_ROOT/filesystem-work" fs_config="$TEST_ROOT/filesystem-config"
+  mkdir -p "$fs_remotes" "$fs_work"
+  for number in 1 2 3; do
+    git init --quiet "$TEST_ROOT/fs-source-$number"
+    git -C "$TEST_ROOT/fs-source-$number" symbolic-ref HEAD refs/heads/main
+    GIT_AUTHOR_DATE="2021-01-0${number}T12:00:00Z" GIT_COMMITTER_DATE="2021-01-0${number}T12:00:00Z" \
+      git -C "$TEST_ROOT/fs-source-$number" commit --quiet --allow-empty -m "filesystem source $number"
+    git clone --bare --quiet "$TEST_ROOT/fs-source-$number" "$fs_remotes/source-$number.git"
+    [[ "$number" != 3 ]] || continue
+    git clone --quiet "$fs_remotes/source-$number.git" "$fs_work/source-$number"
+  done
+  git init --bare --quiet "$TEST_ROOT/filesystem-mirror.git"
+  git --git-dir="$TEST_ROOT/filesystem-mirror.git" symbolic-ref HEAD refs/heads/main
+  git init --quiet "$TEST_ROOT/filesystem-mirror"
+  git -C "$TEST_ROOT/filesystem-mirror" symbolic-ref HEAD refs/heads/main
+  git -C "$TEST_ROOT/filesystem-mirror" remote add origin https://github.com/fixture/mirror.git
+  git config --global url."$TEST_ROOT/filesystem-mirror.git".insteadOf https://github.com/fixture/mirror.git
+  # Values are consumed by name by greens_save_config.
+  # shellcheck disable=SC2034
+  SOURCE_PROVIDER=github WORK_DIR="$fs_work" REMOTE_PREFIX="$fs_remotes/" \
+    MIRROR_DIR="$TEST_ROOT/filesystem-mirror" MIRROR_URL=https://github.com/fixture/mirror.git \
+    CACHE_DIR="$TEST_ROOT/filesystem-cache" LOG_DIR="$TEST_ROOT/filesystem-logs" \
+    EMAILS=author@example.test MIRROR_EMAIL=mirror@example.test MIRROR_NAME=greens \
+    PERSONAL_GH_USER=fixture GITHUB_USERNAME=fixture ACTIVITY_TYPES=commits \
+    SINCE='2021-01-01 00:00:00' SCHEDULER=manual SYNC_HOUR=0
+  greens_save_config "$fs_config" SOURCE_PROVIDER WORK_DIR REMOTE_PREFIX MIRROR_DIR MIRROR_URL CACHE_DIR LOG_DIR \
+    EMAILS MIRROR_EMAIL MIRROR_NAME PERSONAL_GH_USER GITHUB_USERNAME ACTIVITY_TYPES SINCE SCHEDULER SYNC_HOUR
+  FORCE=1 CONTRIB_MIRROR_CONFIG="$fs_config" bash "$ROOT/sync.sh" > "$TEST_ROOT/fs-legacy-output" 2>&1 || {
+    cat "$TEST_ROOT/fs-legacy-output"; fail "legacy filesystem sync";
+  }
+  [[ "$(git -C "$MIRROR_DIR" log --format=%H --author='<mirror@example.test>' | wc -l | tr -d ' ')" == 2 ]] || fail "legacy filesystem sync omitted a source"
+  git clone --quiet "$fs_remotes/source-1.git" "$fs_work/source-1-uri"
+  first_uri="$(greens_remote_identity "$fs_remotes/source-1.git" 1)"
+  second_uri="$(greens_remote_identity "$fs_remotes/source-2.git" 1)"
+  git -C "$fs_work/source-1-uri" remote set-url origin "$first_uri"
+  git -C "$fs_work/source-2" remote set-url origin "file://localhost${second_uri#file://}"
+  git clone --quiet "$fs_remotes/source-3.git" "$fs_work/relative"
+  git -C "$fs_work/relative" remote set-url origin '../../filesystem remotes %/source-3.git'
+  git clone --quiet "$fs_remotes/source-1.git" "$fs_work/source-1-relative"
+  git -C "$fs_work/source-1-relative" remote set-url origin '../../filesystem remotes %/source-1.git'
+  [[ "$(greens_remote_identity "$first_uri" 1)" == "$first_uri" ]] || fail "file URI escaping did not round-trip"
+  [[ "$(greens_uri_path_decode "$(greens_uri_path_encode 'space % é')")" == 'space % é' ]] || fail "filesystem URI byte encoding"
+  {
+    printf 'y\n'
+    printf '\n%.0s' {1..11}
+    printf 'y\n'
+  } | CONTRIB_MIRROR_CONFIG="$fs_config" bash "$ROOT/setup.sh" > "$TEST_ROOT/fs-setup-output" 2>&1 || {
+    cat "$TEST_ROOT/fs-setup-output"; fail "filesystem migration setup";
+  }
+  bash -c 'source "$1"; [[ "$SOURCE_COUNT" == 1 && "$SOURCE_1_PROVIDER" == git && "$SOURCE_1_REMOTE_HOSTS" == file://localhost && "$SOURCE_1_ACCESS_MODE" == remote && "$GREENS_LEGACY_TIMESTAMPS" == 1 && -z "${SOURCE_PROVIDER:-}" ]]' bash "$fs_config" || fail "filesystem migration did not retain its complete source group"
+  grep -q 'skip all 3 repositories' "$TEST_ROOT/fs-setup-output" || fail "filesystem origin alias deduplication or discovery failed"
+  if grep -q 'Initial sync failed' "$TEST_ROOT/fs-setup-output"; then cat "$TEST_ROOT/fs-setup-output"; fail "initial filesystem sync after migration"; fi
+  [[ "$(git -C "$MIRROR_DIR" log --format=%H --author='<mirror@example.test>' | wc -l | tr -d ' ')" == 3 ]] || fail "migration lost a filesystem source or duplicated legacy timestamps"
+  FORCE=1 CONTRIB_MIRROR_CONFIG="$fs_config" bash "$ROOT/sync.sh" > "$TEST_ROOT/fs-fresh-output" 2>&1 || {
+    cat "$TEST_ROOT/fs-fresh-output"; fail "fresh indexed filesystem sync";
+  }
+  [[ "$(git -C "$MIRROR_DIR" log --format=%H --author='<mirror@example.test>' | wc -l | tr -d ' ')" == 3 ]] || fail "filesystem rerun duplicated activity"
+) || fail "filesystem origins and legacy migration regression"
+echo "PASS: filesystem origin migration, file URI aliases, relative remotes, escaping and fresh sync"
+
+# Keep native Windows drive/UNC identities compatible with their file URIs.
+(
+  cygpath() {
+    case "$2" in
+      C:/*) printf '%s\n' "$2" ;;
+      //SERVER/share/*) printf '%s\n' "$2" ;;
+      *) return 1 ;;
+    esac
+  }
+  [[ "$(greens_remote_identity 'C:/Users/Work/repo.git' 1)" == 'file:///C:/Users/Work/repo.git' ]] || fail "Windows drive file identity"
+  [[ "$(greens_remote_identity 'file:///C:/Users/Work/repo.git' 1)" == 'file:///C:/Users/Work/repo.git' ]] || fail "Windows file URI was converted as a POSIX mount"
+  [[ "$(greens_remote_identity '//SERVER/share/repo.git' 1)" == 'file://server/share/repo.git' ]] || fail "Windows UNC file identity"
+) || fail "Windows filesystem identity normalization"
+
 [[ ! -f "$TEST_ROOT/forbidden-switches" ]] || fail "provider commands changed shared gh authentication"

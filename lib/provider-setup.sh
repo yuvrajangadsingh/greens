@@ -39,7 +39,7 @@ greens_source_has_recursive_checkouts() {
     [[ -d "$root" ]] || continue
     while IFS= read -r -d '' gitpath; do
       url="$(git -C "$(dirname "$gitpath")" config remote.origin.url 2>/dev/null || true)"
-      identity="$(greens_remote_identity "$url" 1)" || continue
+      identity="$(greens_remote_identity "$url" 1 "$(dirname "$gitpath")")" || continue
       host="$(greens_remote_host "$identity")"
       case ",$aliases," in *",$host,"*) ;; *) continue ;; esac
       rest="$(greens_remote_path "$identity")"
@@ -130,6 +130,7 @@ greens_group_git_access() {
     checked=1
     url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
     [[ -n "$url" ]] || return 1
+    url="$(greens_source_url "$url" "$repodir")" || return 1
     if ! GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=10}" \
       GREENS_FETCH_TIMEOUT=15 GREENS_GIT_TRANSPORT_ONLY="$transport_only" greens_git_as "$provider" "$api" "$username" "$url" ls-remote "$url" HEAD >/dev/null 2>&1; then
       warn "Remote access failed for $identity"
@@ -270,7 +271,7 @@ greens_sources_setup() {
     [[ -d "$path" ]] || { warn "Configured work directory is unavailable: $path"; continue; }
     while IFS= read -r -d '' gitpath; do
       repodir="$(dirname "$gitpath")"; url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
-      identity="$(greens_remote_identity "$url" 1)" || continue
+      identity="$(greens_remote_identity "$url" 1 "$repodir")" || continue
       host="$(greens_remote_host "$identity")"; rest="$(greens_remote_path "$identity")"; organization="${rest%%/*}"
       printf '%s\t%s\t%s\t%s\n' "$host" "$organization" "$identity" "$repodir" >> "$scan"
     done < <(greens_find_git_entries "$path" "$SCAN_MODE")
@@ -292,7 +293,7 @@ greens_sources_setup() {
       printf '%s\tgit\t%s\n' "$host" "$host" >> "$class"
       continue
     fi
-    case "$host" in github.com) provider=github; api=github.com ;; gitlab.com) provider=gitlab; api=gitlab.com ;;
+    case "$host" in file://*) provider=git; api="$host" ;; github.com) provider=github; api=github.com ;; gitlab.com) provider=gitlab; api=gitlab.com ;;
       *)
         ssh_domain="$(ssh -G "$host" 2>/dev/null | awk 'tolower($1)=="hostname" {print $2; exit}' || true)"
         domain="$(greens_required "Web/API domain for remote host $host" "${ssh_domain:-$host}")"
