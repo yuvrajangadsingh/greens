@@ -74,6 +74,8 @@ Choose activity types before account validation. A `commits`-only source uses
 Git transport authentication (including SSH) and does not require `gh` or `glab`
 API authentication for that source. A saved username without a stored `gh` login
 does not replace existing Git credential helpers or credentials in the URL.
+During sync, groups selecting only API activity validate API access without
+probing Git transport, so a Git outage does not interrupt issue or PR collection.
 If an HTTPS probe fails during setup, the wizard offers a retry with a stored
 GitHub account for that source group before offering local-only collection.
 If Git works over SSH but the active API session is unavailable, setup also
@@ -90,6 +92,9 @@ GitLab API activity.
 Cron jobs retain the PATH from setup so scheduled runs can find dependencies
 installed outside the scheduler's default PATH, including Homebrew's `jq` and
 `gh`. Rerun setup to refresh the saved PATH after changing installation locations.
+Setup validates the selected scheduler before saving its configuration and
+retires old jobs after successfully installing the replacement. An unavailable
+systemd user manager therefore leaves an existing cron schedule intact.
 
 ## Configuration schema
 
