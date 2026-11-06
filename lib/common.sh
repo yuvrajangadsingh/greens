@@ -181,6 +181,14 @@ greens_gh_api_as() {
   greens_gh_as "$host" "$user" greens_run gh api --hostname "$host" "$@"
 }
 
+# Legacy setup wrote PATs in URL userinfo without a password separator. These
+# documented token forms cannot be GitHub login names and remain URL credentials.
+greens_is_github_url_token() {
+  [[ "$1" != *:* ]] || return 1
+  case "$1" in ghp_*|gho_*|ghu_*|ghs_*|ghr_*|github_pat_*) return 0 ;; esac
+  [[ "$1" =~ ^[[:xdigit:]]{40}$ ]]
+}
+
 # Git's gh credential helper inherits the command-local account as well. SSH
 # keeps its existing key/alias selection; other providers keep their helpers.
 greens_git_as() {
@@ -191,6 +199,14 @@ greens_git_as() {
     userinfo="${authority%@*}"
     [[ "$userinfo" != *:* ]] || url_password=1
     authority="${authority##*@}"
+  fi
+  if [[ "$provider" == github && "$url" == https://* ]] && greens_is_github_url_token "$userinfo"; then
+    # Bind the explicit URL token for helpers too, without requiring a CLI login.
+    (
+      export GH_TOKEN="$userinfo" GITHUB_TOKEN="$userinfo" GH_ENTERPRISE_TOKEN="$userinfo" GITHUB_ENTERPRISE_TOKEN="$userinfo"
+      greens_run git "$@"
+    )
+    return
   fi
   # A URL password wins; username-only URLs still need the configured actor.
   # gh's helper supports HTTPS only; leave HTTP to its existing Git helpers.
@@ -223,7 +239,9 @@ greens_destination_git() (
     [[ "$authority" != *@* ]] || userinfo="${authority%@*}"
     # URL passwords need no CLI login. Other helpers may use gh: select the
     # personal actor before removing all ambient work-provider tokens.
-    if [[ "$url" == https://* && "$userinfo" != *:* ]]; then
+    if [[ "$url" == https://* ]] && greens_is_github_url_token "$userinfo"; then
+      token="$userinfo"
+    elif [[ "$url" == https://* && "$userinfo" != *:* ]]; then
       user="${PERSONAL_GH_USER:-}"
       if [[ -z "$user" ]]; then
         identity="$(greens_remote_identity "$url")" || return 1
