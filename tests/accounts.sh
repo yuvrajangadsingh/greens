@@ -149,6 +149,53 @@ printf 'protocol=https\nhost=clone.example:8443\n\n' |
   GH_TOKEN=fixture-alice greens_destination_git https://rewritten.example/team/repo -C "$ACCOUNT_TEST/source" credential fill > "$ACCOUNT_TEST/rewrite-destination"
 grep -qx password=fixture-bob "$ACCOUNT_TEST/rewrite-destination" || fail "rewritten destination inherited source actor"
 echo "PASS: rewritten source/destination transport helpers honor repository context, protocol and URL passwords"
+
+# Use actual Git remote/push URL resolution and credential matching, replacing
+# only the network push with a credential request for its destination host.
+(
+  MIRROR_DIR="$ACCOUNT_TEST/mirror" PERSONAL_GH_USER=bob
+  git -C "$MIRROR_DIR" remote set-url --push origin https://push-alias.example/bob/mirror
+  git -C "$MIRROR_DIR" config url.https://push.example:9443/.insteadOf https://push-alias.example/
+  git config --global credential.https://push.example:9443.helper '!printf "username=wrong\npassword=wrong\n"'
+  git config --global credential.https://other-push.example.helper '!printf "username=native\npassword=fixture-native\n"'
+  greens_run() {
+    local executable="$1"; shift
+    if [[ "$executable" == git ]]; then
+      local -a prefix
+      prefix=()
+      while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+          -C|-c) prefix+=("$1" "$2"); shift 2 ;;
+          -*) prefix+=("$1"); shift ;;
+          *) break ;;
+        esac
+      done
+      if [[ "${1:-}" == push ]]; then
+        printf 'protocol=https\nhost=%s\n\n' "$push_host" | command git "${prefix[@]}" credential fill
+        printf 'protocol=https\nhost=other-push.example\n\n' | command git "${prefix[@]}" credential fill > "$ACCOUNT_TEST/unrelated-push-credentials"
+        return
+      fi
+    fi
+    command "$executable" "$@"
+  }
+  push_host=push.example:9443
+  [[ "$(greens_git_transport_url origin -C "$MIRROR_DIR" push origin HEAD)" == https://push.example:9443/bob/mirror ]] || fail "explicit pushurl was not expanded"
+  GH_TOKEN=fixture-alice greens_mirror_git push origin HEAD > "$ACCOUNT_TEST/push-url-credentials"
+  grep -qx password=fixture-bob "$ACCOUNT_TEST/push-url-credentials" || fail "push used fetch-host credentials"
+  grep -qx password=fixture-native "$ACCOUNT_TEST/unrelated-push-credentials" || fail "push cleared unrelated native helper"
+  git -C "$MIRROR_DIR" config --unset-all remote.origin.pushurl
+  git -C "$MIRROR_DIR" config url.https://push-rewrite.example:8443/bob/.pushInsteadOf https://github.com/bob/
+  push_host=push-rewrite.example:8443
+  [[ "$(greens_git_transport_url origin -C "$MIRROR_DIR" push origin HEAD)" == https://push-rewrite.example:8443/bob/mirror ]] || fail "pushInsteadOf was not applied"
+  [[ "$(greens_git_transport_url origin -C "$MIRROR_DIR" fetch origin)" == https://github.com/bob/mirror ]] || fail "fetch used pushInsteadOf"
+  GH_TOKEN=fixture-alice greens_mirror_git push origin HEAD > "$ACCOUNT_TEST/push-rewrite-credentials"
+  grep -qx password=fixture-bob "$ACCOUNT_TEST/push-rewrite-credentials" || fail "pushInsteadOf helper was scoped to fetch authority"
+  GH_TOKEN=fixture-alice greens_destination_git https://github.com/bob/mirror -C "$MIRROR_DIR" push https://github.com/bob/mirror HEAD > "$ACCOUNT_TEST/direct-push-credentials"
+  grep -qx password=fixture-bob "$ACCOUNT_TEST/direct-push-credentials" || fail "direct URL push ignored pushInsteadOf"
+  git -C "$MIRROR_DIR" config --unset-all url.https://push-rewrite.example:8443/bob/.pushInsteadOf
+  git -C "$MIRROR_DIR" config --unset-all url.https://push.example:9443/.insteadOf
+) || fail "push URL credential regression"
+echo "PASS: explicit and rewritten destination push URLs use personal credentials and preserve unrelated helpers"
 [[ "$(greens_gh_api_as github.com ALICE user --jq .login)" == alice ]] || fail "case-sensitive stored account lookup"
 touch "$ACCOUNT_TEST/no-json-status"
 [[ "$(greens_gh_api_as github.com ALICE user --jq .login)" == alice ]] || fail "older gh account spelling lookup"
@@ -359,13 +406,18 @@ REAL_GIT="$(command -v git)"
 cat > "$ACCOUNT_TEST/bin/git" <<'MOCK'
 #!/bin/bash
 set -eu
-url="" operation="" gitdir="" get_url=0
+url="" operation="" gitdir="" get_url=0 directory="" previous=""
 for arg in "$@"; do
+  [[ "$previous" != -C ]] || directory="$arg"
   case "$arg" in ls-remote|fetch|clone) operation="$arg" ;; --get-url) get_url=1 ;; --git-dir=*) gitdir="$arg" ;; https://github.com/*|https://*@github.com/*) url="$arg" ;; esac
+  previous="$arg"
 done
 # These local rewrite rules route fixture traffic. Keep simulating an HTTPS
 # endpoint for account selection; the real transport is tested separately.
-if [[ "$get_url" == 1 && -n "$url" ]]; then printf '%s\n' "$url"; exit 0; fi
+if [[ "$get_url" == 1 ]]; then
+  if [[ -z "$url" && -n "$directory" ]]; then url="$("$REAL_GIT" -C "$directory" config remote.origin.url)"; fi
+  if [[ -n "$url" ]]; then printf '%s\n' "$url"; exit 0; fi
+fi
 if [[ "$operation" == fetch && -z "$url" && -n "$gitdir" ]]; then
   url="$("$REAL_GIT" "$gitdir" config remote.origin.url)"
 fi

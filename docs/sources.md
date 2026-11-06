@@ -79,6 +79,10 @@ Git `url.*.insteadOf` rules are resolved in the command's repository context;
 account helpers are scoped to the resulting transport host and port, while API
 requests still use the configured API host. Rewritten URL passwords retain
 priority, and non-HTTPS transports keep their native authentication.
+Discovery resolves checkout-local rewrite rules before handing transports to
+the cache, while keeping the original provider/repository activity identity.
+Mirror pushes use the effective push address, including `remote.origin.pushurl`
+and `pushInsteadOf`; fetches continue to use the fetch address.
 During sync, groups selecting only API activity validate API access without
 probing Git transport, so a Git outage does not interrupt issue or PR collection.
 If an HTTPS probe fails during setup, the wizard offers a retry with a stored

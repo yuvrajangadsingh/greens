@@ -192,7 +192,7 @@ greens_is_github_url_token() {
 # Git's gh credential helper inherits the command-local account as well. SSH
 # keeps its existing key/alias selection; other providers keep their helpers.
 greens_git_transport_url() {
-  local url="$1"
+  local url="$1" record prefix base matched="" longest=0
   local -a options
   options=(); shift
   # Preserve command-level configuration and repository context when reading
@@ -206,6 +206,19 @@ greens_git_transport_url() {
       *) break ;;
     esac
   done
+  if [[ "${1:-}" == push ]]; then
+    if git ${options[@]+"${options[@]}"} remote get-url --push "$url" 2>/dev/null; then return; fi
+    # Anonymous push URLs have no remote record for get-url. Match the longest
+    # pushInsteadOf prefix in Git's config order; Git expands this only once.
+    while IFS= read -r -d '' record; do
+      prefix="${record#*$'\n'}"; base="${record%%$'\n'*}"
+      if [[ "$url" == "$prefix"* && "${#prefix}" -gt "$longest" ]]; then
+        longest="${#prefix}"; base="${base#url.}"; base="${base%.pushinsteadof}"
+        matched="$base${url#"$prefix"}"
+      fi
+    done < <(git ${options[@]+"${options[@]}"} config --null --get-regexp '^url\..*\.pushinsteadof$' 2>/dev/null)
+    if [[ "$longest" -gt 0 ]]; then printf '%s\n' "$matched"; return; fi
+  fi
   git ${options[@]+"${options[@]}"} ls-remote --get-url -- "$url"
 }
 
@@ -250,17 +263,23 @@ greens_git_as_transport() {
       verify_actor=0
     fi
     GREENS_COMMAND_GH_TOKEN="$token" GREENS_GH_VERIFY_ACTOR="$verify_actor" \
-      greens_gh_as "$host" "$user" greens_run git -c credential.helper= \
+      greens_gh_as "$host" "$user" greens_run git \
       -c "credential.https://$authority.helper=" -c "credential.https://$authority.helper=!gh auth git-credential" "$@"
   else
     GITHUB_TOKEN="${GITHUB_TOKEN:-}" greens_run git "$@"
   fi
 }
 
-greens_destination_git() (
-  local url="$1" logical_url="$1" authority userinfo="" token="" user identity
+greens_destination_git() {
+  local logical_url="$1" url
   shift
-  url="$(greens_git_transport_url "$url" "$@")" || return 1
+  url="$(greens_git_transport_url "$logical_url" "$@")" || return 1
+  greens_destination_git_transport "$logical_url" "$url" "$@"
+}
+
+greens_destination_git_transport() (
+  local logical_url="$1" url="$2" authority userinfo="" token="" user identity
+  shift 2
   if [[ "$url" == https://* || "$url" == http://* ]]; then
     authority="${url#*://}"; authority="${authority%%/*}"
     [[ "$authority" != *@* ]] || userinfo="${authority%@*}"
@@ -290,9 +309,10 @@ greens_destination_git() (
 )
 
 greens_mirror_git() {
-  local url
-  url="$(git -C "$MIRROR_DIR" config remote.origin.url)" || return 1
-  greens_destination_git "$url" "$@"
+  local logical_url url
+  logical_url="$(git -C "$MIRROR_DIR" config remote.origin.url)" || return 1
+  url="$(greens_git_transport_url origin -C "$MIRROR_DIR" "$@")" || return 1
+  greens_destination_git_transport "$logical_url" "$url" -C "$MIRROR_DIR" "$@"
 }
 
 # Resolve destination SSH aliases for identity checks without rewriting the
@@ -469,6 +489,12 @@ greens_source_url() {
     esac
   fi
   printf '%s\n' "$url"
+}
+
+greens_source_transport() {
+  local url="$1" repodir="$2"
+  url="$(greens_git_transport_url "$url" -C "$repodir")" || return 1
+  greens_source_url "$url" "$repodir"
 }
 
 greens_uri_path_encode() (
