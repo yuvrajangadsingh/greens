@@ -191,7 +191,33 @@ greens_is_github_url_token() {
 
 # Git's gh credential helper inherits the command-local account as well. SSH
 # keeps its existing key/alias selection; other providers keep their helpers.
+greens_git_transport_url() {
+  local url="$1"
+  local -a options
+  options=(); shift
+  # Preserve command-level configuration and repository context when reading
+  # insteadOf rules. --get-url expands the URL without contacting the remote.
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -C|-c|--git-dir|--work-tree|--namespace|--config-env)
+        [[ "$#" -ge 2 ]] || return 1
+        options+=("$1" "$2"); shift 2 ;;
+      -*) options+=("$1"); shift ;;
+      *) break ;;
+    esac
+  done
+  git ${options[@]+"${options[@]}"} ls-remote --get-url -- "$url"
+}
+
 greens_git_as() {
+  local provider="$1" host="$2" user="$3" url="$4"
+  shift 4
+  url="$(greens_git_transport_url "$url" "$@")" || return 1
+  greens_git_as_transport "$provider" "$host" "$user" "$url" "$@"
+}
+
+# The URL here has already been expanded once, just as Git expands it.
+greens_git_as_transport() {
   local provider="$1" host="$2" user="$3" url="$4" token="" verify_actor=1 authority userinfo="" url_password=0
   shift 4
   authority="${url#*://}"; authority="${authority%%/*}"
@@ -232,8 +258,9 @@ greens_git_as() {
 }
 
 greens_destination_git() (
-  local url="$1" authority userinfo="" token="" user identity
+  local url="$1" logical_url="$1" authority userinfo="" token="" user identity
   shift
+  url="$(greens_git_transport_url "$url" "$@")" || return 1
   if [[ "$url" == https://* || "$url" == http://* ]]; then
     authority="${url#*://}"; authority="${authority%%/*}"
     [[ "$authority" != *@* ]] || userinfo="${authority%@*}"
@@ -244,7 +271,7 @@ greens_destination_git() (
     elif [[ "$url" == https://* && "$userinfo" != *:* ]]; then
       user="${PERSONAL_GH_USER:-}"
       if [[ -z "$user" ]]; then
-        identity="$(greens_remote_identity "$url")" || return 1
+        identity="$(greens_remote_identity "$logical_url")" || return 1
         user="${identity#*/}"; user="${user%%/*}"
       fi
       token="$(greens_gh_token github.com "$user" 2>/dev/null)" || token=""
@@ -258,8 +285,8 @@ greens_destination_git() (
       greens_run git "$@"
       return
     fi
-  fi
-  greens_git_as github github.com "${PERSONAL_GH_USER:-}" "$url" "$@"
+  else unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN; fi
+  greens_git_as_transport github github.com "${PERSONAL_GH_USER:-}" "$url" "$@"
 )
 
 greens_mirror_git() {

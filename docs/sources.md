@@ -75,6 +75,10 @@ Git transport authentication (including SSH) and does not require `gh` or `glab`
 API authentication for that source. Setup also skips Git probes when the selected
 activity types use only the provider API. A saved username without a stored `gh` login
 does not replace existing Git credential helpers or credentials in the URL.
+Git `url.*.insteadOf` rules are resolved in the command's repository context;
+account helpers are scoped to the resulting transport host and port, while API
+requests still use the configured API host. Rewritten URL passwords retain
+priority, and non-HTTPS transports keep their native authentication.
 During sync, groups selecting only API activity validate API access without
 probing Git transport, so a Git outage does not interrupt issue or PR collection.
 If an HTTPS probe fails during setup, the wizard offers a retry with a stored

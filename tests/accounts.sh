@@ -90,12 +90,10 @@ GIT_AUTHOR_DATE=2021-01-01T12:00:00Z GIT_COMMITTER_DATE=2021-01-01T12:00:00Z \
   git -C "$ACCOUNT_TEST/source" commit --quiet --allow-empty -m private
 git clone --bare --quiet "$ACCOUNT_TEST/source" "$ACCOUNT_TEST/source.git"
 git -C "$ACCOUNT_TEST/source" remote add origin https://github.com/team/repo
-git config --global url."$ACCOUNT_TEST/source.git".insteadOf https://github.com/team/repo
 git init --bare --quiet "$ACCOUNT_TEST/mirror.git"
 git init --quiet "$ACCOUNT_TEST/mirror"
 git -C "$ACCOUNT_TEST/mirror" symbolic-ref HEAD refs/heads/main
 git -C "$ACCOUNT_TEST/mirror" remote add origin https://github.com/bob/mirror
-git config --global url."$ACCOUNT_TEST/mirror.git".insteadOf https://github.com/bob/mirror
 
 # An unrelated configured helper would return the personal account. The
 # source command must override it using Alice's command-local gh credentials.
@@ -120,6 +118,37 @@ git config --global credential.http://clone.example.helper '!printf "username=ht
 printf 'protocol=http\nhost=clone.example\n\n' |
   greens_git_as github api.example alice http://clone.example/team/repo credential fill > "$ACCOUNT_TEST/http-credentials"
 grep -qx username=http-user "$ACCOUNT_TEST/http-credentials" || fail "HTTP helper was replaced by gh"
+
+# Resolve actual insteadOf rules in the command's repository/config context,
+# then exercise real Git credential matching against the expanded authority.
+git -C "$ACCOUNT_TEST/source" config url.https://clone.example:8443/team/.insteadOf https://rewritten.example/team/
+git config --global credential.https://clone.example:8443.helper '!printf "username=bob\npassword=wrong\n"'
+for context in worktree gitdir command; do
+  case "$context" in
+    worktree) git_context=(-C "$ACCOUNT_TEST/source"); rewritten_url=https://rewritten.example/team/repo ;;
+    gitdir) git_context=("--git-dir=$ACCOUNT_TEST/source/.git"); rewritten_url=https://rewritten.example/team/repo ;;
+    command) git_context=(-c 'url.https://clone.example:8443/.insteadOf=https://command-rewrite.example/'); rewritten_url=https://command-rewrite.example/team/repo ;;
+  esac
+  printf 'protocol=https\nhost=clone.example:8443\n\n' |
+    greens_git_as github api.example alice "$rewritten_url" "${git_context[@]}" credential fill > "$ACCOUNT_TEST/rewrite-$context"
+  grep -qx password=fixture-alice "$ACCOUNT_TEST/rewrite-$context" || fail "rewritten source helper did not use $context transport authority"
+done
+git -C "$ACCOUNT_TEST/source" config --add url.https://clone.example:8443/team/.insteadOf git@rewritten-ssh:team/
+printf 'protocol=https\nhost=clone.example:8443\n\n' |
+  greens_git_as github api.example alice git@rewritten-ssh:team/repo -C "$ACCOUNT_TEST/source" credential fill > "$ACCOUNT_TEST/rewrite-ssh"
+grep -qx password=fixture-alice "$ACCOUNT_TEST/rewrite-ssh" || fail "SSH-to-HTTPS rewrite did not select HTTPS account"
+git -C "$ACCOUNT_TEST/source" config url.http://clone.example/team/.insteadOf https://rewritten-http.example/team/
+printf 'protocol=http\nhost=clone.example\n\n' |
+  greens_git_as github api.example alice https://rewritten-http.example/team/repo -C "$ACCOUNT_TEST/source" credential fill > "$ACCOUNT_TEST/rewrite-http"
+grep -qx password=fixture-http "$ACCOUNT_TEST/rewrite-http" || fail "HTTPS-to-HTTP rewrite replaced native helper"
+git -C "$ACCOUNT_TEST/source" config url.https://url-user:fixture-url@clone.example:8443/team/.insteadOf https://rewritten-password.example/team/
+printf 'protocol=https\nhost=clone.example:8443\nusername=url-user\npassword=fixture-url\n\n' |
+  greens_git_as github api.example missing https://rewritten-password.example/team/repo -C "$ACCOUNT_TEST/source" credential fill > "$ACCOUNT_TEST/rewrite-password"
+grep -qx password=fixture-url "$ACCOUNT_TEST/rewrite-password" || fail "rewritten URL password required a saved gh account"
+printf 'protocol=https\nhost=clone.example:8443\n\n' |
+  GH_TOKEN=fixture-alice greens_destination_git https://rewritten.example/team/repo -C "$ACCOUNT_TEST/source" credential fill > "$ACCOUNT_TEST/rewrite-destination"
+grep -qx password=fixture-bob "$ACCOUNT_TEST/rewrite-destination" || fail "rewritten destination inherited source actor"
+echo "PASS: rewritten source/destination transport helpers honor repository context, protocol and URL passwords"
 [[ "$(greens_gh_api_as github.com ALICE user --jq .login)" == alice ]] || fail "case-sensitive stored account lookup"
 touch "$ACCOUNT_TEST/no-json-status"
 [[ "$(greens_gh_api_as github.com ALICE user --jq .login)" == alice ]] || fail "older gh account spelling lookup"
@@ -173,6 +202,8 @@ printf 'protocol=https\nhost=github.com\n\n' |
   GH_TOKEN=fixture-alice GITHUB_TOKEN=fixture-alice greens_mirror_git credential fill > "$ACCOUNT_TEST/native-mirror-credentials"
 grep -qx password=fixture-vault "$ACCOUNT_TEST/native-mirror-credentials" || fail "legacy destination did not reach native credentials"
 rm "$ACCOUNT_TEST/no-personal-cli"
+git config --global url."$ACCOUNT_TEST/source.git".insteadOf https://github.com/team/repo
+git config --global url."$ACCOUNT_TEST/mirror.git".insteadOf https://github.com/bob/mirror
 
 # Exercise the complete indexed collector while gh auth status fails. The Git
 # transports are local bare repositories, with the original HTTPS identities.
@@ -247,7 +278,7 @@ if GH_TOKEN=fixture-bob greens_gh_api_as github.com missing user --jq .login > /
 # unrelated ambient PAT must leave a working non-gh credential helper intact.
 git config --global credential.https://github.com.helper '!printf "username=external\npassword=fixture-vault\n"'
 printf 'protocol=https\nhost=github.com\n\n' |
-  GH_TOKEN=fixture-bob GREENS_GIT_TRANSPORT_ONLY=1 greens_git_as github github.com external https://github.com/team/repo credential fill > "$ACCOUNT_TEST/external-credentials"
+  GH_TOKEN=fixture-bob GREENS_GIT_TRANSPORT_ONLY=1 greens_git_as github github.com external https://github.com/team/credential-probe credential fill > "$ACCOUNT_TEST/external-credentials"
 grep -qx username=external "$ACCOUNT_TEST/external-credentials" || fail "commit-only access replaced a non-gh credential helper"
 printf 'protocol=https\nhost=github.com\nusername=url-user\npassword=fixture-url\n\n' |
   GREENS_GIT_TRANSPORT_ONLY=1 greens_git_as github github.com alice https://url-user:fixture-url@github.com/team/repo credential fill > "$ACCOUNT_TEST/url-credentials"
@@ -328,10 +359,13 @@ REAL_GIT="$(command -v git)"
 cat > "$ACCOUNT_TEST/bin/git" <<'MOCK'
 #!/bin/bash
 set -eu
-url="" operation="" gitdir=""
+url="" operation="" gitdir="" get_url=0
 for arg in "$@"; do
-  case "$arg" in ls-remote|fetch|clone) operation="$arg" ;; --git-dir=*) gitdir="$arg" ;; https://github.com/*|https://*@github.com/*) url="$arg" ;; esac
+  case "$arg" in ls-remote|fetch|clone) operation="$arg" ;; --get-url) get_url=1 ;; --git-dir=*) gitdir="$arg" ;; https://github.com/*|https://*@github.com/*) url="$arg" ;; esac
 done
+# These local rewrite rules route fixture traffic. Keep simulating an HTTPS
+# endpoint for account selection; the real transport is tested separately.
+if [[ "$get_url" == 1 && -n "$url" ]]; then printf '%s\n' "$url"; exit 0; fi
 if [[ "$operation" == fetch && -z "$url" && -n "$gitdir" ]]; then
   url="$("$REAL_GIT" "$gitdir" config remote.origin.url)"
 fi
