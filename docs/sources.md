@@ -196,8 +196,10 @@ Legacy configurations remain valid:
 Completing setup migrates those managed values to `WORK_DIRS` and indexed
 sources, while preserving unrelated custom lines. Existing greens-generated
 timestamp history is recognized during the transition so activities are not
-recreated; all new activities receive stable identifiers. Foreign destination
-history is still refused.
+recreated, even if the mirror attribution email has changed. The compatibility
+baseline includes unmarked legacy `sync` commits; initialization and status
+commits do not suppress source activity. All new activities receive stable
+identifiers. Foreign destination history is still refused.
 
 ## Troubleshooting
 

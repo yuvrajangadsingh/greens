@@ -282,8 +282,11 @@ greens_mirror_mixed_records() {
   greens_recognize_github_case_markers "$records" || return 1
   : > "$RUN_TMP/legacy-epochs"
   if [[ "${GREENS_LEGACY_TIMESTAMPS:-0}" == 1 ]]; then
-    git -C "$MIRROR_DIR" log --format=%at --author="<$MIRROR_EMAIL>" \
-      --invert-grep --grep='^Greens-Activity: ' 2>/dev/null | sort -u > "$RUN_TMP/legacy-epochs"
+    # Timestamp-only legacy activities use "sync", regardless of the mirror
+    # email selected today. Exclude metadata and already marked activities.
+    git -C "$MIRROR_DIR" log --format='%at%x09%s' \
+      --invert-grep --grep='^Greens-Activity: ' 2>/dev/null |
+      awk -F '\t' '$2 == "sync" {print $1}' | sort -u > "$RUN_TMP/legacy-epochs"
   elif git -C "$MIRROR_DIR" rev-parse --verify HEAD >/dev/null 2>&1 && [[ ! -s "$RUN_TMP/known" ]]; then
     log "ERROR: destination history has no activity IDs; rerun setup to migrate a legacy greens configuration."
     return 1
