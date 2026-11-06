@@ -130,9 +130,8 @@ greens_group_git_access() {
     checked=1
     url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
     [[ -n "$url" ]] || return 1
-    url="$(greens_source_url "$url" "$repodir")" || return 1
     if ! GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=10}" \
-      GREENS_FETCH_TIMEOUT=15 GREENS_GIT_TRANSPORT_ONLY="$transport_only" greens_git_as "$provider" "$api" "$username" "$url" ls-remote "$url" HEAD >/dev/null 2>&1; then
+      GREENS_FETCH_TIMEOUT=15 GREENS_GIT_TRANSPORT_ONLY="$transport_only" greens_git_as "$provider" "$api" "$username" "$url" -C "$repodir" ls-remote "$url" HEAD >/dev/null 2>&1; then
       warn "Remote access failed for $identity"
       return 1
     fi

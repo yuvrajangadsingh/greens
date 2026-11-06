@@ -915,6 +915,52 @@ FORCE=1 CONTRIB_MIRROR_CONFIG="$destination_alias_config" bash "$ROOT/sync.sh" >
 }
 echo "PASS: explicit mirror transport replacement repairs initial and fresh sync while defaults retain aliases"
 
+# Local insteadOf rules belong to each source checkout. Cached collection must
+# retain their transports while provider identity/grouping uses the raw origin.
+(
+  CONFIG_FILE="$TEST_ROOT/checkout-rewrite-config" WORK_DIRS="$TEST_ROOT/checkout-rewrite-work" SCAN_MODE=in-root SOURCE_COUNT=2
+  MIRROR_DIR="$TEST_ROOT/checkout-rewrite-mirror" MIRROR_URL=https://checkout-rewrite@github.com/fixture/mirror
+  CACHE_DIR="$TEST_ROOT/checkout-rewrite-cache" LOG_DIR="$TEST_ROOT/checkout-rewrite-logs" MIRROR_EMAIL=mirror@example.test
+  # Values are consumed by name in greens_save_config and indexed accessors.
+  # shellcheck disable=SC2034
+  SOURCE_1_PROVIDER=gitlab SOURCE_1_REMOTE_HOSTS=checkout-gitlab SOURCE_1_API_HOST=forge.example SOURCE_1_ORGANIZATION=team SOURCE_1_USERNAME=fixture
+  SOURCE_2_PROVIDER=github SOURCE_2_REMOTE_HOSTS=checkout-github SOURCE_2_API_HOST=github.example SOURCE_2_ORGANIZATION=acme SOURCE_2_USERNAME=fixture-gh
+  # shellcheck disable=SC2034
+  SOURCE_1_ACTIVITY_TYPES=commits SOURCE_2_ACTIVITY_TYPES=commits SOURCE_1_ACCESS_MODE=remote SOURCE_2_ACCESS_MODE=remote
+  # shellcheck disable=SC2034
+  SOURCE_1_EMAILS=author@example.test SOURCE_2_EMAILS=author@example.test SOURCE_1_SINCE=2021-01-01 SOURCE_2_SINCE=2021-01-01
+  mkdir -p "$WORK_DIRS"
+  for provider in gitlab github; do
+    case "$provider" in gitlab) bare="$TEST_ROOT/remotes/source.git"; project=team/repo ;; github) bare="$TEST_ROOT/remotes/github-source.git"; project=AcMe/ApP ;; esac
+    git clone --quiet "$bare" "$WORK_DIRS/$provider"
+    git -C "$WORK_DIRS/$provider" remote set-url origin "https://checkout-$provider/$project"
+    git -C "$WORK_DIRS/$provider" config url."$bare".insteadOf "https://checkout-$provider/$project"
+  done
+  git init --bare --quiet "$TEST_ROOT/remotes/checkout-rewrite-mirror.git"
+  git init --quiet "$MIRROR_DIR"
+  git -C "$MIRROR_DIR" symbolic-ref HEAD refs/heads/main
+  git -C "$MIRROR_DIR" remote add origin "$MIRROR_URL"
+  git config --global url."$TEST_ROOT/remotes/checkout-rewrite-mirror.git".insteadOf "$MIRROR_URL"
+  greens_save_config "$CONFIG_FILE" WORK_DIRS SCAN_MODE SOURCE_COUNT SOURCE_1_PROVIDER SOURCE_1_REMOTE_HOSTS SOURCE_1_API_HOST SOURCE_1_ORGANIZATION SOURCE_1_USERNAME SOURCE_1_EMAILS SOURCE_1_SINCE SOURCE_1_ACTIVITY_TYPES SOURCE_1_ACCESS_MODE SOURCE_2_PROVIDER SOURCE_2_REMOTE_HOSTS SOURCE_2_API_HOST SOURCE_2_ORGANIZATION SOURCE_2_USERNAME SOURCE_2_EMAILS SOURCE_2_SINCE SOURCE_2_ACTIVITY_TYPES SOURCE_2_ACCESS_MODE MIRROR_DIR MIRROR_URL CACHE_DIR LOG_DIR MIRROR_EMAIL
+  greens_mixed_discover_checkouts > "$TEST_ROOT/checkout-rewrite-discovery"
+  awk -F '\t' -v target="$TEST_ROOT/remotes/source.git" '$2=="forge.example/team/repo" && $3==target {found=1} END {exit !found}' "$TEST_ROOT/checkout-rewrite-discovery" || fail "discovery lost GitLab identity or local transport"
+  awk -F '\t' -v target="$TEST_ROOT/remotes/github-source.git" '$2=="github.example/acme/app" && $3==target {found=1} END {exit !found}' "$TEST_ROOT/checkout-rewrite-discovery" || fail "discovery lost GitHub identity or local transport"
+  FIXTURE_VISIBILITY=PUBLIC run_sync
+  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 4 ]] || fail "checkout-local rewrites omitted source commits"
+  first_head="$(git -C "$MIRROR_DIR" rev-parse HEAD)"
+  {
+    printf 'y\n'
+    printf '\n%.0s' {1..15}
+    printf 'n\n'
+  } | SCHEDULER=manual CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$ROOT/setup.sh" > "$TEST_ROOT/checkout-rewrite-setup" 2>&1 || {
+    cat "$TEST_ROOT/checkout-rewrite-setup"; fail "setup lost checkout-local rewrites";
+  }
+  FIXTURE_VISIBILITY=PUBLIC run_sync
+  [[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$first_head" ]] || fail "checkout rewrite rerun duplicated activity"
+  [[ "$(git -C "$WORK_DIRS/github" config remote.origin.url)" == https://checkout-github/AcMe/ApP ]] || fail "source origin was replaced with expanded transport"
+) || fail "checkout-local transport rewrite regression"
+echo "PASS: checkout-local rewrites survive source discovery, cached sync, setup rerun and provider identity grouping"
+
 # Real setup in a simulated Homebrew Cellar must install upgrade-stable jobs.
 # After removing that Cellar version, the saved runner must execute the new one.
 brew_prefix="$TEST_ROOT/brew"

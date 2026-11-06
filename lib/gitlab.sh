@@ -42,11 +42,12 @@ gitlab_collect_object() {
 }
 
 greens_discover_sources() {
-  local gitpath repodir url identity host
+  local gitpath repodir url origin identity host
   while IFS= read -r -d '' gitpath; do
     repodir="$(dirname "$gitpath")"
     case "$repodir/" in "$CACHE_DIR/"*|"$MIRROR_DIR/"*) continue ;; esac
     url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
+    origin="$url"
     url="$(greens_source_url "$url" "$repodir")" || continue
     identity="$(greens_remote_identity "$url" 1)" || continue
     if [[ "$SOURCE_PROVIDER" == gitlab ]]; then
@@ -57,18 +58,20 @@ greens_discover_sources() {
     else
       [[ "$url" == "$REMOTE_PREFIX"* ]] || continue
     fi
+    url="$(greens_source_transport "$origin" "$repodir")" || continue
     printf '%s\t%s\n' "$identity" "$url"
   done < <(greens_find_git_entries "$WORK_DIR" "${SCAN_MODE:-recursive}")
 }
 
 greens_mixed_discover_checkouts() {
-  local dir gitpath repodir url identity host rest organization i aliases api canonical provider source_identity
+  local dir gitpath repodir url origin identity host rest organization i aliases api canonical provider source_identity
   while IFS= read -r dir; do
     [[ -d "$dir" ]] || { log "WARN: work directory is unavailable: $dir" >&2; continue; }
     while IFS= read -r -d '' gitpath; do
       repodir="$(dirname "$gitpath")"
       case "$repodir/" in "$CACHE_DIR/"*|"$MIRROR_DIR/"*) continue ;; esac
       url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
+      origin="$url"
       url="$(greens_source_url "$url" "$repodir")" || continue
       identity="$(greens_remote_identity "$url" 1)" || continue
       host="$(greens_remote_host "$identity")"
@@ -84,6 +87,7 @@ greens_mixed_discover_checkouts() {
         api="$(greens_indexed_value "$i" API_HOST)"
         if [[ "$provider" == git ]]; then canonical="$source_identity"
         else canonical="$(greens_provider_identity "$provider" "$api/$rest")"; fi
+        url="$(greens_source_transport "$origin" "$repodir")" || continue
         printf '%s\t%s\t%s\t%s\n' "$i" "$canonical" "$url" "$repodir"
         break
       done
@@ -234,6 +238,7 @@ greens_recognize_github_case_markers() {
   if [[ -f "$RUN_TMP/mixed-checkouts" ]]; then
     while IFS=$'\t' read -r source_index identity url repodir; do
       [[ "$(greens_indexed_value "$source_index" PROVIDER)" == github ]] || continue
+      url="$(git -C "$repodir" config remote.origin.url)" || continue
       raw_identity="$(greens_remote_identity "$url")" || continue
       api="$(greens_indexed_value "$source_index" API_HOST)"
       printf '%s/%s\t%s\n' "$api" "${raw_identity#*/}" "$identity" >> "$RUN_TMP/github-case-aliases"
