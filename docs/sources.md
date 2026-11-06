@@ -106,6 +106,10 @@ Before storing an edited origin, setup secures the existing mirror Git config
 to owner-only permissions and aborts if that protection fails.
 Homebrew installs `git`, `jq`, and `gh`; install `glab` separately when selecting
 GitLab API activity.
+When GitLab API access is enabled, commit activity uses the numeric project ID,
+so renaming or moving a project keeps its contribution identities. Verified IDs
+remain cached for later commits-only runs; old path-based markers are recognized
+only after confirming that the paths refer to the same project.
 
 Cron jobs retain the PATH from setup so scheduled runs can find dependencies
 installed outside the scheduler's default PATH, including Homebrew's `jq` and
@@ -227,7 +231,9 @@ recreated, even if the mirror attribution email has changed. The compatibility
 baseline recognizes unmarked empty activity commits, including acknowledged
 copied-message history, independently of their subjects. The root initialization
 and commits that change files (such as README status updates) do not suppress
-source activity. All new activities receive stable
+source activity. Migration retains acknowledged message-copying history so a
+genuine copied root activity titled `init` is preserved on subsequent setup runs.
+All new activities receive stable
 identifiers. Foreign destination history is still refused.
 
 ## Troubleshooting

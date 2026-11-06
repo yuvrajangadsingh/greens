@@ -506,6 +506,11 @@ greens_sources_setup() {
   if ! git -C "$MIRROR_DIR" rev-parse --verify HEAD >/dev/null 2>&1; then git -C "$MIRROR_DIR" symbolic-ref HEAD "refs/heads/$branch"; fi
   # Passed by variable name to greens_replace_config.
   # shellcheck disable=SC2034
+  GREENS_LEGACY_COPIED_MESSAGES="${GREENS_LEGACY_COPIED_MESSAGES:-0}"
+  if [[ "$legacy_schema" == 1 && "${COPY_MESSAGES:-0}" == 1 && "${COPY_MESSAGES_ACK:-0}" == 1 ]]; then
+    printf -v GREENS_LEGACY_COPIED_MESSAGES '%s' 1
+  fi
+  # shellcheck disable=SC2034
   COPY_MESSAGES=0 COPY_MESSAGES_ACK=0
   case "$(greens_scheduler_platform)" in
     windows) scheduler_prompt='Scheduler (Windows Task Scheduler or manual)'; scheduler_default=win; scheduler_values='win|manual'; scheduler_error='Choose win or manual.' ;;
@@ -523,11 +528,11 @@ greens_sources_setup() {
   GREENS_LEGACY_TIMESTAMPS="${GREENS_LEGACY_TIMESTAMPS:-0}"
   # shellcheck disable=SC2034
   if [[ "$legacy_schema" == 1 && -d "$MIRROR_DIR/.git" ]] && git -C "$MIRROR_DIR" rev-parse --verify HEAD >/dev/null 2>&1 && ! git -C "$MIRROR_DIR" log --format=%B | grep -q '^Greens-Activity: '; then printf -v GREENS_LEGACY_TIMESTAMPS '%s' 1; fi
-  save_keys=(WORK_DIRS SCAN_MODE SOURCE_COUNT PERSONAL_GH_USER MIRROR_EMAIL MIRROR_NAME MIRROR_URL MIRROR_DIR COPY_MESSAGES COPY_MESSAGES_ACK SCHEDULER SYNC_HOUR GREENS_LEGACY_TIMESTAMPS)
+  save_keys=(WORK_DIRS SCAN_MODE SOURCE_COUNT PERSONAL_GH_USER MIRROR_EMAIL MIRROR_NAME MIRROR_URL MIRROR_DIR COPY_MESSAGES COPY_MESSAGES_ACK SCHEDULER SYNC_HOUR GREENS_LEGACY_TIMESTAMPS GREENS_LEGACY_COPIED_MESSAGES)
   for ((i=1; i<=SOURCE_COUNT; i++)); do for key in PROVIDER REMOTE_HOSTS API_HOST ORGANIZATION USERNAME EMAILS SINCE ACTIVITY_TYPES ACCESS_MODE; do save_keys+=("SOURCE_${i}_${key}"); done; done
   # Retain legacy GITHUB_TOKEN: it may be the only saved source credential.
   # Fresh sync processes load it from this owner-only config as before.
-  greens_replace_config "$CONFIG_FILE" '^(WORK_DIRS?|SCAN_MODE|SOURCE_PROVIDER|SOURCE_COUNT|SOURCE_[0-9]+_.*|REMOTE_PREFIX|GITHUB_(ORG|USERNAME)|GITLAB_(HOST|REMOTE_HOST|USERNAME)|EMAILS|SINCE|ACTIVITY_TYPES|PERSONAL_GH_USER|MIRROR_(EMAIL|NAME|URL|DIR)|COPY_MESSAGES(_ACK)?|SCHEDULER|SYNC_HOUR|GREENS_LEGACY_TIMESTAMPS)$' "${save_keys[@]}"
+  greens_replace_config "$CONFIG_FILE" '^(WORK_DIRS?|SCAN_MODE|SOURCE_PROVIDER|SOURCE_COUNT|SOURCE_[0-9]+_.*|REMOTE_PREFIX|GITHUB_(ORG|USERNAME)|GITLAB_(HOST|REMOTE_HOST|USERNAME)|EMAILS|SINCE|ACTIVITY_TYPES|PERSONAL_GH_USER|MIRROR_(EMAIL|NAME|URL|DIR)|COPY_MESSAGES(_ACK)?|SCHEDULER|SYNC_HOUR|GREENS_LEGACY_(TIMESTAMPS|COPIED_MESSAGES))$' "${save_keys[@]}"
   ok "Saved configuration to $CONFIG_FILE"
   sync_path="$(greens_sync_path "$SCRIPT_DIR/sync.sh")"
   if confirm "Run the initial sync now?"; then
