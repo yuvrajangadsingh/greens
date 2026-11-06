@@ -184,12 +184,17 @@ greens_gh_api_as() {
 # Git's gh credential helper inherits the command-local account as well. SSH
 # keeps its existing key/alias selection; other providers keep their helpers.
 greens_git_as() {
-  local provider="$1" host="$2" user="$3" url="$4" token="" verify_actor=1 authority
+  local provider="$1" host="$2" user="$3" url="$4" token="" verify_actor=1 authority userinfo="" url_password=0
   shift 4
   authority="${url#*://}"; authority="${authority%%/*}"
-  # URL credentials win in every mode, including legacy HTTPS destinations.
+  if [[ "$authority" == *@* ]]; then
+    userinfo="${authority%@*}"
+    [[ "$userinfo" != *:* ]] || url_password=1
+    authority="${authority##*@}"
+  fi
+  # A URL password wins; username-only URLs still need the configured actor.
   # gh's helper supports HTTPS only; leave HTTP to its existing Git helpers.
-  if [[ "$provider" == github && -n "$user" && "$url" == https://* && "$authority" != *@* ]]; then
+  if [[ "$provider" == github && -n "$user" && "$url" == https://* && "$url_password" == 0 ]]; then
     if [[ "${GREENS_GIT_TRANSPORT_ONLY:-0}" == 1 ]]; then
       if ! token="$(greens_gh_token "$host" "$user" 0)"; then
         GITHUB_TOKEN="${GITHUB_TOKEN:-}" greens_run git "$@"

@@ -102,6 +102,9 @@ git config --global credential.https://github.com.helper '!printf "username=bob\
 printf 'protocol=https\nhost=github.com\n\n' |
   greens_git_as github github.com alice https://github.com/team/repo credential fill > "$ACCOUNT_TEST/source-credentials"
 grep -qx username=alice "$ACCOUNT_TEST/source-credentials" || fail "source inherited personal Git credentials"
+printf 'protocol=https\nhost=github.com\nusername=alice\n\n' |
+  GH_TOKEN=fixture-bob GITHUB_TOKEN=fixture-bob greens_git_as github github.com alice https://alice@github.com/team/repo credential fill > "$ACCOUNT_TEST/source-username-credentials"
+grep -qx password=fixture-alice "$ACCOUNT_TEST/source-username-credentials" || fail "username-only source inherited another account's token"
 MIRROR_DIR="$ACCOUNT_TEST/mirror" PERSONAL_GH_USER=bob
 printf 'protocol=https\nhost=github.com\n\n' |
   greens_mirror_git credential fill > "$ACCOUNT_TEST/mirror-credentials"
@@ -302,14 +305,14 @@ cat > "$ACCOUNT_TEST/bin/git" <<'MOCK'
 set -eu
 url="" operation="" gitdir=""
 for arg in "$@"; do
-  case "$arg" in ls-remote|fetch|clone) operation="$arg" ;; --git-dir=*) gitdir="$arg" ;; https://github.com/*|https://bob@github.com/*) url="$arg" ;; esac
+  case "$arg" in ls-remote|fetch|clone) operation="$arg" ;; --git-dir=*) gitdir="$arg" ;; https://github.com/*|https://*@github.com/*) url="$arg" ;; esac
 done
 if [[ "$operation" == fetch && -z "$url" && -n "$gitdir" ]]; then
   url="$("$REAL_GIT" "$gitdir" config remote.origin.url)"
 fi
 if [[ -n "$operation" ]]; then
   case "$url" in
-    https://github.com/team/repo|https://github.com/TeAm/RePo) [[ "${GH_TOKEN:-}" == fixture-alice ]] || exit 1 ;;
+    https://github.com/team/repo|https://alice@github.com/TeAm/RePo) [[ "${GH_TOKEN:-}" == fixture-alice ]] || exit 1 ;;
     https://github.com/otherteam/repo) [[ "${GH_TOKEN:-}" == fixture-carol ]] || exit 1 ;;
     https://bob@github.com/bob/select-mirror) [[ "${GH_TOKEN:-}" == fixture-bob ]] || exit 1 ;;
   esac
@@ -321,11 +324,11 @@ mkdir -p "$ACCOUNT_TEST/setup-work"
 "$REAL_GIT" clone --quiet "$ACCOUNT_TEST/source.git" "$ACCOUNT_TEST/setup-work/team"
 "$REAL_GIT" clone --quiet "$ACCOUNT_TEST/source.git" "$ACCOUNT_TEST/setup-work/team-copy"
 "$REAL_GIT" clone --quiet "$ACCOUNT_TEST/source.git" "$ACCOUNT_TEST/setup-work/otherteam"
-"$REAL_GIT" -C "$ACCOUNT_TEST/setup-work/team" remote set-url origin https://github.com/TeAm/RePo
+"$REAL_GIT" -C "$ACCOUNT_TEST/setup-work/team" remote set-url origin https://alice@github.com/TeAm/RePo
 "$REAL_GIT" -C "$ACCOUNT_TEST/setup-work/team-copy" remote set-url origin https://github.com/team/repo
 "$REAL_GIT" -C "$ACCOUNT_TEST/setup-work/otherteam" remote set-url origin https://github.com/otherteam/repo
 "$REAL_GIT" config --global --add url."$ACCOUNT_TEST/source.git".insteadOf https://github.com/otherteam/repo
-"$REAL_GIT" config --global --add url."$ACCOUNT_TEST/source.git".insteadOf https://github.com/TeAm/RePo
+"$REAL_GIT" config --global --add url."$ACCOUNT_TEST/source.git".insteadOf https://alice@github.com/TeAm/RePo
 "$REAL_GIT" init --bare --quiet "$ACCOUNT_TEST/select-mirror.git"
 "$REAL_GIT" --git-dir="$ACCOUNT_TEST/select-mirror.git" symbolic-ref HEAD refs/heads/main
 "$REAL_GIT" config --global url."$ACCOUNT_TEST/select-mirror.git".insteadOf https://bob@github.com/bob/select-mirror
@@ -340,7 +343,7 @@ touch "$ACCOUNT_TEST/setup-active"
 }
 bash -c 'source "$1"; [[ "$SOURCE_1_USERNAME" == carol && "$SOURCE_2_USERNAME" == alice && "$SOURCE_1_ACCESS_MODE" == remote && "$SOURCE_2_ACCESS_MODE" == remote && "$SOURCE_1_ACTIVITY_TYPES" == commits,issues ]]' bash "$ACCOUNT_TEST/select-config" || fail "setup did not retain selected accounts and normalized activity"
 [[ "$("$REAL_GIT" -C "$ACCOUNT_TEST/select-mirror" rev-list --count HEAD)" == 3 ]] || fail "initial sync omitted a selected source or API activity"
-[[ "$("$REAL_GIT" -C "$ACCOUNT_TEST/setup-work/team" config remote.origin.url)" == https://github.com/TeAm/RePo ]] || fail "setup rewrote source transport casing"
+[[ "$("$REAL_GIT" -C "$ACCOUNT_TEST/setup-work/team" config remote.origin.url)" == https://alice@github.com/TeAm/RePo ]] || fail "setup rewrote source transport casing"
 bash -c 'source "$1/lib/common.sh"; source "$1/lib/gitlab.sh"; source "$2"; CACHE_DIR="$ACCOUNT_TEST/unused-cache"; greens_mixed_discover_checkouts' bash "$ROOT" "$ACCOUNT_TEST/select-config" > "$ACCOUNT_TEST/case-checkouts"
 [[ "$(wc -l < "$ACCOUNT_TEST/case-checkouts" | tr -d ' ')" == 3 ]] || fail "case normalization omitted a checkout"
 rm "$ACCOUNT_TEST/setup-active"
