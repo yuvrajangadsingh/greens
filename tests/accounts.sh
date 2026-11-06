@@ -141,6 +141,19 @@ PERSONAL_GH_USER=bob
 # A username-only personal URL still asks a credential helper for a password.
 # Ambient work tokens must never become that password, even in commits-only runs.
 git config --global credential.https://github.com.helper '!gh auth git-credential'
+# The old wizard used token-only userinfo, not username:password. No personal
+# CLI profile may be required, and a helper must receive that explicit token.
+for url_token in ghp_fixture_personal_token 0123456789abcdef0123456789abcdef01234567; do
+  PERSONAL_GH_USER=not-logged-in
+  git -C "$MIRROR_DIR" remote set-url origin "https://$url_token@github.com/bob/mirror"
+  printf 'protocol=https\nhost=github.com\nusername=%s\n\n' "$url_token" |
+    GH_TOKEN=fixture-alice GITHUB_TOKEN=fixture-alice greens_mirror_git credential fill > "$ACCOUNT_TEST/token-only-url-credentials"
+  grep -qx "password=$url_token" "$ACCOUNT_TEST/token-only-url-credentials" || fail "legacy token-only URL required a personal CLI login or inherited the work token"
+  printf 'protocol=https\nhost=github.com\nusername=%s\n\n' "$url_token" |
+    GH_TOKEN=fixture-bob greens_git_as github github.com alice "https://$url_token@github.com/team/repo" credential fill > "$ACCOUNT_TEST/source-token-url-credentials"
+  grep -qx "password=$url_token" "$ACCOUNT_TEST/source-token-url-credentials" || fail "source URL token was replaced by ambient credentials"
+done
+PERSONAL_GH_USER=bob
 git -C "$MIRROR_DIR" remote set-url origin https://bob@github.com/bob/mirror
 printf 'protocol=https\nhost=github.com\nusername=bob\n\n' |
   GH_TOKEN=fixture-alice GITHUB_TOKEN=fixture-alice GH_ENTERPRISE_TOKEN=fixture-alice GITHUB_ENTERPRISE_TOKEN=fixture-alice \
