@@ -81,6 +81,8 @@ requests still use the configured API host. Rewritten URL passwords retain
 priority, and non-HTTPS transports keep their native authentication.
 Discovery resolves checkout-local rewrite rules before handing transports to
 the cache, while keeping the original provider/repository activity identity.
+Source commands preserve that single rewrite: a global rule matching the
+expanded destination cannot redirect collection to a different repository.
 Mirror pushes use the effective push address, including `remote.origin.pushurl`
 and `pushInsteadOf`; fetches continue to use the fetch address.
 During sync, groups selecting only API activity validate API access without
@@ -98,6 +100,8 @@ resolves the alias hostname only when checking the destination identity.
 Accepting the mirror URL default retains an existing checkout's transport and
 SSH alias. Explicitly entering a URL updates that checkout's origin after its
 repository identity is validated, including replacement URL credentials.
+Before storing an edited origin, setup secures the existing mirror Git config
+to owner-only permissions and aborts if that protection fails.
 Homebrew installs `git`, `jq`, and `gh`; install `glab` separately when selecting
 GitLab API activity.
 

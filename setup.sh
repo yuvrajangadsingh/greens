@@ -106,7 +106,7 @@ verify_mirror_owner() {
 # The mirror's .git/config can hold a PAT (fix_https_auth embeds it in the
 # remote URL). Keep it owner-only after every remote write.
 secure_repo_config() {
-  chmod 600 "$1/.git/config" 2>/dev/null || true
+  chmod 600 "$1/.git/config" 2>/dev/null || [[ "${2:-}" != strict ]]
 }
 
 # Push probe that also works on empty repos. v1.8.2 mirrors start with NO

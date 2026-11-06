@@ -59,7 +59,7 @@ greens_discover_sources() {
       [[ "$url" == "$REMOTE_PREFIX"* ]] || continue
     fi
     url="$(greens_source_transport "$origin" "$repodir")" || continue
-    printf '%s\t%s\n' "$identity" "$url"
+    printf '%s\t%s\t%s\n' "$identity" "$url" "$repodir"
   done < <(greens_find_git_entries "$WORK_DIR" "${SCAN_MODE:-recursive}")
 }
 
@@ -174,8 +174,8 @@ greens_validate_local_sources() {
 }
 
 greens_preflight_mixed_sources() {
-  local sources="$1" source_index identity url mode provider api username types key encoded api_user api_done transport_only
-  while IFS=$'\t' read -r source_index identity url <&4; do
+  local sources="$1" source_index identity url repodir mode provider api username types key encoded api_user api_done transport_only
+  while IFS=$'\t' read -r source_index identity url repodir <&4; do
     mode="$(greens_source_access_mode "$source_index")"
     types="$(greens_indexed_value "$source_index" ACTIVITY_TYPES)"
     if [[ "$mode" == local ]]; then
@@ -186,7 +186,7 @@ greens_preflight_mixed_sources() {
     provider="$(greens_indexed_value "$source_index" PROVIDER)"; api="$(greens_indexed_value "$source_index" API_HOST)"; username="$(greens_indexed_value "$source_index" USERNAME)"
     transport_only=0; [[ "$types" != commits ]] || transport_only=1
     if [[ ",$types," == *,commits,* ]]; then
-      if ! GIT_TERMINAL_PROMPT=0 GREENS_FETCH_TIMEOUT=15 GREENS_GIT_TRANSPORT_ONLY="$transport_only" greens_git_as "$provider" "$api" "$username" "$url" ls-remote "$url" HEAD >/dev/null 2>&1; then
+      if ! GIT_TERMINAL_PROMPT=0 GREENS_FETCH_TIMEOUT=15 GREENS_GIT_TRANSPORT_ONLY="$transport_only" greens_source_git "$provider" "$api" "$username" "$url" "$repodir" ls-remote "$url" HEAD >/dev/null 2>&1; then
         greens_offer_local_fallback "$source_index" "Git remote is unreachable" || return 1
         continue
       fi
@@ -359,14 +359,14 @@ greens_mixed_sync() {
   command -v jq >/dev/null || { log "ERROR: install jq"; return 1; }
   [[ "${COPY_MESSAGES:-0}" == 0 ]] || { log "ERROR: indexed mixed sources support timestamp-only commits; set COPY_MESSAGES=0"; return 1; }
   checkouts="$RUN_TMP/mixed-checkouts"; greens_mixed_discover_checkouts > "$checkouts"
-  sources="$RUN_TMP/mixed-sources"; cut -f1-3 "$checkouts" | LC_ALL=C sort -t $'\t' -k2,2 -u > "$sources"
+  sources="$RUN_TMP/mixed-sources"; LC_ALL=C sort -t $'\t' -k2,2 -u "$checkouts" > "$sources"
   greens_validate_local_sources "$checkouts" || return 1
   [[ -s "$sources" ]] || { log "ERROR: no repositories match the configured sources"; return 1; }
   run_epoch="$(date +%s)"; : > "$RUN_TMP/collected"; : > "$RUN_TMP/publish"
   export GIT_TERMINAL_PROMPT=0
   export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=2}"
   greens_preflight_mixed_sources "$sources" || return 1
-  while IFS=$'\t' read -r source_index identity url; do
+  while IFS=$'\t' read -r source_index identity url repodir; do
     SOURCE_PROVIDER="$(greens_indexed_value "$source_index" PROVIDER)"; SOURCE_API_HOST="$(greens_indexed_value "$source_index" API_HOST)"
     SOURCE_ORGANIZATION="$(greens_indexed_value "$source_index" ORGANIZATION)"; SOURCE_USERNAME="$(greens_indexed_value "$source_index" USERNAME)"
     EMAILS="$(greens_indexed_value "$source_index" EMAILS)"; SINCE="$(greens_indexed_value "$source_index" SINCE)"; ACTIVITY_TYPES="$(greens_indexed_value "$source_index" ACTIVITY_TYPES)"; ACCESS_MODE="$(greens_source_access_mode "$source_index")"
@@ -392,8 +392,8 @@ greens_mixed_sync() {
         fi
         git --git-dir="$bare" remote set-url origin "$url"
         if [[ "$SOURCE_PROVIDER" == gitlab ]]; then
-          greens_run git --git-dir="$bare" fetch --quiet --prune --filter=blob:none origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' '+refs/merge-requests/*/head:refs/merge-requests/*/head'
-        else GREENS_GIT_TRANSPORT_ONLY="$transport_only" greens_git_as "$SOURCE_PROVIDER" "$SOURCE_API_HOST" "$SOURCE_USERNAME" "$url" --git-dir="$bare" fetch --quiet --prune --filter=blob:none origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'; fi
+          greens_source_git "$SOURCE_PROVIDER" "$SOURCE_API_HOST" "$SOURCE_USERNAME" "$url" "$repodir" --git-dir="$bare" fetch --quiet --prune --filter=blob:none "$url" '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' '+refs/merge-requests/*/head:refs/merge-requests/*/head'
+        else GREENS_GIT_TRANSPORT_ONLY="$transport_only" greens_source_git "$SOURCE_PROVIDER" "$SOURCE_API_HOST" "$SOURCE_USERNAME" "$url" "$repodir" --git-dir="$bare" fetch --quiet --prune --filter=blob:none "$url" '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'; fi
         git --git-dir="$bare" log --all --format='%H%x09%at%x09%ai%x09%ae' |
           jq -Rrc --arg identity "$identity" --arg path "$project_path" --arg emails "$EMAILS" --argjson since "$since_epoch" --argjson until "$run_epoch" '
           split("\t")|select(length==4)|. as $r|($emails|ascii_downcase|split(",")|map(gsub("^\\s+|\\s+$";""))) as $e|select(($e|index($r[3]|ascii_downcase))!=null)|(.[1]|tonumber) as $t|select($t >= $since and $t <= $until)|{key:($identity+"/commit/"+.[0]),epoch:$t,date:.[2],kind:"commits",project:$path}' >> "$source_file"
@@ -447,7 +447,7 @@ greens_mixed_sync() {
 
 greens_provider_sync() {
   local SOURCE_PROVIDER="${SOURCE_PROVIDER:-gitlab}"
-  local since_epoch run_epoch state_dir sources identity url key bare source_file
+  local since_epoch run_epoch state_dir sources identity url repodir key bare source_file
   local project_id project_path gitlab_user_id=0 api_enabled=0 checkpoint lower updated
   local kind iid objects event_file mirror_branch ref msg marker
   local pending=0 activity_date activity_key old_types today
@@ -484,7 +484,7 @@ greens_provider_sync() {
   export GIT_TERMINAL_PROMPT=0
   export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=2}"
   : > "$RUN_TMP/collected"
-  while IFS=$'\t' read -r identity url; do
+  while IFS=$'\t' read -r identity url repodir; do
     key="$(printf '%s' "$identity" | greens_hash)"
     project_path="$(greens_remote_path "$identity")"
     bare="$(greens_bare_cache_dir)/$key.git"
@@ -508,11 +508,11 @@ greens_provider_sync() {
       git --git-dir="$bare" remote set-url origin "$url"
       # MR refs retain commits from deleted source branches when GitLab retains them.
       if [[ "$SOURCE_PROVIDER" == gitlab ]]; then
-        greens_run git --git-dir="$bare" fetch --quiet --prune --filter=blob:none origin \
+        greens_source_git "$SOURCE_PROVIDER" "$GITLAB_HOST" "$GITLAB_USERNAME" "$url" "$repodir" --git-dir="$bare" fetch --quiet --prune --filter=blob:none "$url" \
           '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' \
           '+refs/merge-requests/*/head:refs/merge-requests/*/head'
       else
-        greens_run git --git-dir="$bare" fetch --quiet --prune --filter=blob:none origin \
+        greens_source_git "$SOURCE_PROVIDER" "$GITLAB_HOST" "$GITLAB_USERNAME" "$url" "$repodir" --git-dir="$bare" fetch --quiet --prune --filter=blob:none "$url" \
           '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'
       fi
       # Filter the AUTHOR date explicitly: git log --since filters committer dates.
@@ -646,7 +646,7 @@ greens_provider_sync() {
     greens_mirror_git -C "$MIRROR_DIR" push origin "HEAD:refs/heads/$mirror_branch"
   fi
   # All collection and the push succeeded: publish local normalized state.
-  while IFS=$'\t' read -r identity url; do
+  while IFS=$'\t' read -r identity url repodir; do
     key="$(printf '%s' "$identity" | greens_hash)"
     mv "$RUN_TMP/$key.jsonl" "$state_dir/$key.jsonl"
     mv "$RUN_TMP/$key.checkpoint" "$state_dir/$key.checkpoint"
