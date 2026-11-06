@@ -1667,7 +1667,9 @@ else
   TIMEOUT_CMD=()
 fi
 
-git_transport_only=0; [[ "$ACTIVITY_TYPES" != commits ]] || git_transport_only=1
+# Legacy API activity is best-effort and independent of Git authentication.
+# Preserve native helpers when the configured source has no usable gh token.
+git_transport_only=1
 repo_total="$(wc -l < "$tmp_sorted" | tr -d " ")"
 log ""
 log "Step 2/5: Caching $repo_total repos (read-only copies — your code stays untouched)"

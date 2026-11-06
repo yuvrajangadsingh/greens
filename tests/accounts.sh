@@ -39,6 +39,7 @@ case "$*" in
   'auth token --hostname '*' --user '*)
     user="${*: -1}"
     [[ "$user" != bob || ! -f "$ACCOUNT_TEST/no-personal-cli" ]] || exit 1
+    [[ "$user" != alice || ! -f "$ACCOUNT_TEST/native-source-only" ]] || exit 1
     case "$user" in alice|bob|carol) printf 'fixture-%s\n' "$user" ;; *) exit 1 ;; esac ;;
   'auth token --hostname '*) [[ -f "$ACCOUNT_TEST/setup-active" ]] || exit 1; echo fixture-bob ;;
   'auth git-credential get')
@@ -412,6 +413,12 @@ for arg in "$@"; do
   case "$arg" in ls-remote|fetch|clone) operation="$arg" ;; --get-url) get_url=1 ;; --git-dir=*) gitdir="$arg" ;; https://github.com/*|https://*@github.com/*) url="$arg" ;; esac
   previous="$arg"
 done
+if [[ -f "$ACCOUNT_TEST/native-source-only" && "$*" == *'remote get-url origin' ]]; then
+  native_url=""
+  if [[ -n "$directory" ]]; then native_url="$("$REAL_GIT" -C "$directory" config remote.origin.url)"
+  elif [[ -n "$gitdir" ]]; then native_url="$("$REAL_GIT" "$gitdir" config remote.origin.url)"; fi
+  if [[ "$native_url" == https://github.com/team/* ]]; then printf '%s\n' "$native_url"; exit 0; fi
+fi
 # These local rewrite rules route fixture traffic. Keep simulating an HTTPS
 # endpoint for account selection; the real transport is tested separately.
 if [[ "$get_url" == 1 ]]; then
@@ -423,7 +430,11 @@ if [[ "$operation" == fetch && -z "$url" && -n "$gitdir" ]]; then
 fi
 if [[ -n "$operation" ]]; then
   case "$url" in
-    https://github.com/team/repo|https://alice@github.com/TeAm/RePo) [[ "${GH_TOKEN:-}" == fixture-alice ]] || exit 1 ;;
+    https://github.com/team/repo|https://github.com/team/repo.git|https://alice@github.com/TeAm/RePo)
+      if [[ -f "$ACCOUNT_TEST/native-source-only" ]]; then
+        credentials="$(printf 'protocol=https\nhost=github.com\n\n' | "$REAL_GIT" credential fill)"
+        [[ "$credentials" == *password=fixture-native-source* ]] || exit 1
+      else [[ "${GH_TOKEN:-}" == fixture-alice ]] || exit 1; fi ;;
     https://github.com/otherteam/repo) [[ "${GH_TOKEN:-}" == fixture-carol ]] || exit 1 ;;
     https://bob@github.com/bob/select-mirror) [[ "${GH_TOKEN:-}" == fixture-bob ]] || exit 1 ;;
   esac
@@ -488,6 +499,40 @@ FORCE=1 CONTRIB_MIRROR_CONFIG="$ACCOUNT_TEST/ssh-config" bash "$ROOT/sync.sh" > 
   cat "$ACCOUNT_TEST/ssh-fresh-output"; fail "fresh SSH sync lost selected API account";
 }
 [[ ! -e "$ACCOUNT_TEST/switched" ]] || fail "SSH API retry changed the active account"
+
+# A legacy default activity selection must still fetch through native Git
+# credentials when its source account cannot authenticate to the provider API.
+(
+  CONFIG_FILE="$ACCOUNT_TEST/legacy-native-config" WORK_DIR="$ACCOUNT_TEST/legacy-native-work"
+  MIRROR_DIR="$ACCOUNT_TEST/legacy-native-mirror" CACHE_DIR="$ACCOUNT_TEST/legacy-native-cache" LOG_DIR="$ACCOUNT_TEST/legacy-native-logs"
+  "$REAL_GIT" clone --quiet "$ACCOUNT_TEST/source.git" "$WORK_DIR/repo"
+  "$REAL_GIT" -C "$WORK_DIR/repo" remote set-url origin https://github.com/team/repo.git
+  "$REAL_GIT" config --global --add url."$ACCOUNT_TEST/source.git".insteadOf https://github.com/team/repo.git
+  "$REAL_GIT" init --bare --quiet "$ACCOUNT_TEST/legacy-native-mirror.git"
+  "$REAL_GIT" --git-dir="$ACCOUNT_TEST/legacy-native-mirror.git" symbolic-ref HEAD refs/heads/main
+  "$REAL_GIT" init --quiet "$MIRROR_DIR"
+  "$REAL_GIT" -C "$MIRROR_DIR" symbolic-ref HEAD refs/heads/main
+  "$REAL_GIT" -C "$MIRROR_DIR" remote add origin https://github.com/bob/legacy-native-mirror
+  "$REAL_GIT" config --global url."$ACCOUNT_TEST/legacy-native-mirror.git".insteadOf https://github.com/bob/legacy-native-mirror
+  "$REAL_GIT" config --global credential.https://github.com.helper '!printf "username=alice\npassword=fixture-native-source\n"'
+  # Values are consumed by name in greens_save_config.
+  # shellcheck disable=SC2034
+  SOURCE_PROVIDER=github REMOTE_PREFIX=https://github.com/team/ GITHUB_USERNAME=alice GITHUB_ORG=team \
+    ACTIVITY_TYPES=commits,prs,issues EMAILS=author@example.test SINCE='2021-01-01 00:00:00' PERSONAL_GH_USER=bob
+  greens_save_config "$CONFIG_FILE" SOURCE_PROVIDER WORK_DIR REMOTE_PREFIX GITHUB_USERNAME GITHUB_ORG ACTIVITY_TYPES EMAILS SINCE PERSONAL_GH_USER MIRROR_DIR CACHE_DIR LOG_DIR MIRROR_EMAIL
+  touch "$ACCOUNT_TEST/native-source-only"
+  FORCE=1 CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$ROOT/sync.sh" > "$ACCOUNT_TEST/legacy-native-output" 2>&1 || {
+    cat "$ACCOUNT_TEST/legacy-native-output"; fail "legacy default activity blocked native Git credentials";
+  }
+  grep -q 'skipping GitHub activity fetch' "$ACCOUNT_TEST/legacy-native-output" || fail "legacy API failure was not reported"
+  [[ "$("$REAL_GIT" -C "$MIRROR_DIR" rev-list --count HEAD)" == 1 ]] || { cat "$ACCOUNT_TEST/legacy-native-output"; fail "legacy native source commit was not mirrored"; }
+  FORCE=1 CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$ROOT/sync.sh" > "$ACCOUNT_TEST/legacy-native-rerun" 2>&1 || {
+    cat "$ACCOUNT_TEST/legacy-native-rerun"; fail "legacy native source rerun";
+  }
+  [[ "$("$REAL_GIT" -C "$MIRROR_DIR" rev-list --count HEAD)" == 1 ]] || fail "legacy native source rerun duplicated activity"
+  rm "$ACCOUNT_TEST/native-source-only"
+) || fail "legacy native source authentication regression"
+echo "PASS: legacy default API selections retain native Git source credentials when gh login is unavailable"
 echo "PASS: concurrent API accounts and caches, URL credentials, clone hosts, account casing, and PAT priority"
 echo "PASS: PAT migration, transport-only credentials, and clean HTTPS account selection"
 echo "PASS: case-insensitive GitHub setup and fresh SSH API account selection"

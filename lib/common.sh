@@ -591,7 +591,11 @@ greens_remote_identity() {
       authority="${authority##*@}"
       ;;
     *:*)
-      authority="${url%%:*}"; path="${url#*:}"; scheme=ssh
+      authority="${url%%]:*}"
+      if [[ "$url" == *']:'* && "${authority##*@}" == \[* && "$authority" != */* ]]; then
+        authority+=']'; path="${url#*]:}"
+      else authority="${url%%:*}"; path="${url#*:}"; fi
+      scheme=ssh
       [[ -n "$path" ]] || return 1
       if [[ "$preserve_transport" == 1 ]]; then
         [[ "$authority" != *@* ]] || login="${authority%@*}"

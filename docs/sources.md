@@ -13,6 +13,8 @@ same host remain separate repositories. Generic endpoint keys retain their schem
 repository suffix, and SSH absolute/home-relative path semantics; provider-specific
 normalization applies only after GitHub/GitLab classification. The original clone URLs remain unchanged
 for Git authentication.
+Bracketed IPv6 SCP and SSH URI forms also deduplicate, such as
+`git@[::1]:team/repo.git` and `ssh://git@[::1]/~/team/repo.git`.
 Setup asks for one
 root at a time and repeats the prompt until an empty answer is submitted.
 On a rerun, saved roots are retained automatically and the first directory
@@ -213,6 +215,10 @@ Legacy configurations remain valid:
   `ACTIVITY_TYPES` are read exactly as before.
 - When a legacy GitHub activity list is applied to a GitLab source, `prs` is
   converted to GitLab's corresponding `mrs` activity name.
+
+Legacy GitHub fetches retain native Git authentication when the named account
+has no usable `gh` token, even with the old `commits,prs,issues` selection.
+Unavailable API activity is reported and skipped independently of Git commits.
 
 Completing setup migrates those managed values to `WORK_DIRS` and indexed
 sources, while preserving unrelated custom lines. Existing greens-generated

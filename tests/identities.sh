@@ -172,3 +172,36 @@ echo "PASS: distinct SSH login homes and casing, equivalent URL forms, and idemp
 echo "PASS: GitHub and Enterprise casing, historical markers, aliases, and case-sensitive generic Git paths"
 
 echo "PASS: independent SSH/HTTPS Git ports, complete remote collection, and idempotent reruns"
+
+# Bracketed SCP IPv6 endpoints split at ]:, not the address's first colon.
+(
+  WORK_DIRS="$IDENTITY_TEST/ipv6-work" CONFIG_FILE="$IDENTITY_TEST/ipv6-config"
+  CACHE_DIR="$IDENTITY_TEST/ipv6-cache" RUN_TMP="$IDENTITY_TEST/ipv6-run"
+  MIRROR_DIR="$IDENTITY_TEST/ipv6-mirror" SUCCESS_STAMP_FILE="$IDENTITY_TEST/ipv6-stamp"
+  # Values are consumed by indexed accessors.
+  # shellcheck disable=SC2034
+  SOURCE_COUNT=1 SOURCE_1_PROVIDER=git SOURCE_1_API_HOST='[::1]' SOURCE_1_REMOTE_HOSTS='[::1]' SOURCE_1_ORGANIZATION=team \
+    SOURCE_1_ACTIVITY_TYPES=commits SOURCE_1_ACCESS_MODE=remote SOURCE_1_USERNAME='' SOURCE_1_EMAILS=author@example.test SOURCE_1_SINCE=2021-01-01
+  mkdir -p "$WORK_DIRS" "$RUN_TMP" "$CACHE_DIR"
+  scp_url='git@[::1]:team/repo.git' uri_url='ssh://git@[::1]/~/team/repo.git'
+  [[ "$(greens_remote_identity "$scp_url" 1)" == "$uri_url" ]] || fail "IPv6 SCP address split inside brackets"
+  [[ "$(greens_remote_host "$(greens_remote_identity "$scp_url" 1)")" == '[::1]' ]] || fail "IPv6 hostname was truncated"
+  [[ "$(greens_remote_identity '[2001:DB8::1]:team/repo.git' 1)" == 'ssh://[2001:db8::1]/~/team/repo.git' ]] || fail "IPv6 SCP without login"
+  for kind in scp uri; do
+    git clone --quiet "$IDENTITY_TEST/base" "$WORK_DIRS/$kind"
+    if [[ "$kind" == scp ]]; then url="$scp_url"; else url="$uri_url"; fi
+    git -C "$WORK_DIRS/$kind" remote set-url origin "$url"
+    git config --global --add url."$IDENTITY_TEST/base".insteadOf "$url"
+  done
+  git init --bare --quiet "$IDENTITY_TEST/ipv6-mirror.git"
+  git init --quiet "$MIRROR_DIR"
+  git -C "$MIRROR_DIR" symbolic-ref HEAD refs/heads/main
+  git -C "$MIRROR_DIR" remote add origin "$IDENTITY_TEST/ipv6-mirror.git"
+  greens_mixed_discover_sources > "$IDENTITY_TEST/ipv6-sources"
+  [[ "$(wc -l < "$IDENTITY_TEST/ipv6-sources" | tr -d ' ')" == 1 ]] || fail "IPv6 URL aliases did not deduplicate"
+  greens_mixed_sync > "$IDENTITY_TEST/ipv6-output" 2>&1 || { cat "$IDENTITY_TEST/ipv6-output"; fail "IPv6 source sync"; }
+  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 1 ]] || fail "IPv6 aliases mirrored duplicate activity"
+  greens_mixed_sync >> "$IDENTITY_TEST/ipv6-output" 2>&1 || { cat "$IDENTITY_TEST/ipv6-output"; fail "IPv6 rerun"; }
+  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 1 ]] || fail "IPv6 rerun duplicated activity"
+) || fail "bracketed IPv6 identity regression"
+echo "PASS: bracketed IPv6 SCP/URI aliases group together and mirror each activity once"
