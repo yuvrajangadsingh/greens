@@ -72,7 +72,8 @@ from the authenticated personal `github.com` account.
 
 Choose activity types before account validation. A `commits`-only source uses
 Git transport authentication (including SSH) and does not require `gh` or `glab`
-API authentication for that source. A saved username without a stored `gh` login
+API authentication for that source. Setup also skips Git probes when the selected
+activity types use only the provider API. A saved username without a stored `gh` login
 does not replace existing Git credential helpers or credentials in the URL.
 During sync, groups selecting only API activity validate API access without
 probing Git transport, so a Git outage does not interrupt issue or PR collection.
@@ -86,6 +87,9 @@ The destination still needs an authenticated
 GitHub.com account; a matching `GH_TOKEN` or `GITHUB_TOKEN` also works without a
 stored CLI account. SSH destinations keep their original aliases and keys; setup
 resolves the alias hostname only when checking the destination identity.
+Accepting the mirror URL default retains an existing checkout's transport and
+SSH alias. Explicitly entering a URL updates that checkout's origin after its
+repository identity is validated, including replacement URL credentials.
 Homebrew installs `git`, `jq`, and `gh`; install `glab` separately when selecting
 GitLab API activity.
 
@@ -202,8 +206,10 @@ Completing setup migrates those managed values to `WORK_DIRS` and indexed
 sources, while preserving unrelated custom lines. Existing greens-generated
 timestamp history is recognized during the transition so activities are not
 recreated, even if the mirror attribution email has changed. The compatibility
-baseline includes unmarked legacy `sync` commits; initialization and status
-commits do not suppress source activity. All new activities receive stable
+baseline recognizes unmarked empty activity commits, including acknowledged
+copied-message history, independently of their subjects. The root initialization
+and commits that change files (such as README status updates) do not suppress
+source activity. All new activities receive stable
 identifiers. Foreign destination history is still refused.
 
 ## Troubleshooting

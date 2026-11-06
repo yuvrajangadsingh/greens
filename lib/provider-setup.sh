@@ -184,7 +184,7 @@ greens_sources_setup() {
   local scan hosts class groups gitpath repodir url identity host rest organization
   local record provider api domain detected choice ssh_domain existing_source_count existing_sources
   local aliases saved_aliases alias username emails since types access_mode defaults meta i key owner branch default_email personal_default retry sync_path retry_username git_access account_selected api_access
-  local scheduler_prompt scheduler_default scheduler_values scheduler_error
+  local scheduler_prompt scheduler_default scheduler_values scheduler_error mirror_url_changed=0
   local -a save_keys
   for key in git jq gh; do command -v "$key" >/dev/null || { fail "Install $key, then rerun setup."; return 1; }; done
   existing_source_count="${SOURCE_COUNT:-0}"
@@ -392,14 +392,23 @@ greens_sources_setup() {
       continue
     fi
     case "$provider" in github) defaults=commits,prs,issues ;; gitlab) defaults=commits,mrs,issues,comments,approvals,merges,state_changes ;; *) defaults=commits ;; esac
+    types="$(greens_normalize_activity_types "$provider" "$types")"
+    if [[ "$access_mode" == local || "$provider" == git ]]; then types=commits; else types="$(greens_required "Activity types for $api/$organization" "${types:-$defaults}")"; fi
+    types="$(greens_normalize_activity_types "$provider" "$types")"
+    greens_validate_activity_types "$provider" "$types" || return 1
 
     if [[ "$access_mode" == local ]]; then
       retry="$(prompt "Retry remote access for $api/$organization? (y/N)" 'n')"
       if [[ "$retry" =~ ^[Yy]$ ]]; then
         if greens_group_git_access "$scan" "$organization" "$aliases" "$provider" "$api" "$username" "$types"; then access_mode=remote; ok "Remote Git access restored for $api/$organization"
         else warn "Keeping $api/$organization in local-only mode."; fi
+        if [[ "$access_mode" == remote && "$provider" != git ]]; then
+          types="$(greens_required "Activity types for $api/$organization" "$types")"
+          types="$(greens_normalize_activity_types "$provider" "$types")"
+          greens_validate_activity_types "$provider" "$types" || return 1
+        fi
       fi
-    elif ! greens_group_git_access "$scan" "$organization" "$aliases" "$provider" "$api" "$username" "$types"; then
+    elif [[ ",$types," == *,commits,* ]] && ! greens_group_git_access "$scan" "$organization" "$aliases" "$provider" "$api" "$username" "$types"; then
       git_access=0
       if [[ "$provider" == github ]] && greens_group_has_https "$scan" "$organization" "$aliases"; then
         retry_username="$(prompt "GitHub username to retry HTTPS access for $api/$organization (or - to skip retry)" "$username")" || return 1
@@ -419,10 +428,6 @@ greens_sources_setup() {
     fi
 
     [[ "$access_mode" == local ]] && types=commits
-    types="$(greens_normalize_activity_types "$provider" "$types")"
-    if [[ "$access_mode" == local || "$provider" == git ]]; then types=commits; else types="$(greens_required "Activity types for $api/$organization" "${types:-$defaults}")"; fi
-    types="$(greens_normalize_activity_types "$provider" "$types")"
-    greens_validate_activity_types "$provider" "$types" || return 1
 
     # Commit collection uses Git transport authentication, including SSH. Only
     # API activity needs a provider session and a validated account.
@@ -483,7 +488,9 @@ greens_sources_setup() {
   default_email="$(greens_gh_api_as github.com "$PERSONAL_GH_USER" user/emails --jq '.[] | select(.verified and .primary) | .email' 2>/dev/null || true)"
   MIRROR_EMAIL="$(greens_required 'Personal GitHub email' "${MIRROR_EMAIL:-$default_email}")"; MIRROR_NAME="$(greens_required 'Mirror author name' "${MIRROR_NAME:-greens}")"
   url="${MIRROR_URL:-https://github.com/$PERSONAL_GH_USER/work-contributions-mirror}"
-  MIRROR_URL="$(greens_required 'GitHub mirror URL' "$url" "$(mask_url "$url")")"
+  printf 'GitHub mirror URL [%s]: ' "$(mask_url "$url")" >&2
+  read -r answer || { fail "Setup input ended."; return 1; }
+  if [[ -n "$answer" ]]; then MIRROR_URL="$answer"; mirror_url_changed=1; else MIRROR_URL="$url"; fi
   owner="$(greens_destination_identity "$MIRROR_URL")" || { fail "Invalid mirror URL."; return 1; }
   owner="${owner#github.com/}"
   greens_gh_same_account "${owner%%/*}" "$PERSONAL_GH_USER" || { fail "Choose a github.com repository owned by $PERSONAL_GH_USER."; return 1; }
@@ -493,6 +500,7 @@ greens_sources_setup() {
   mkdir -p "$(dirname "$MIRROR_DIR")"; MIRROR_DIR="$(cd "$(dirname "$MIRROR_DIR")" && pwd)/$(basename "$MIRROR_DIR")"
   while IFS= read -r path; do case "$MIRROR_DIR/" in "$path/"*) fail "Choose a mirror directory outside every work directory."; return 1 ;; esac; done <<< "$WORK_DIRS"
   if [[ ! -d "$MIRROR_DIR/.git" ]]; then greens_destination_git "$MIRROR_URL" clone "$MIRROR_URL" "$MIRROR_DIR"; elif [[ "$(greens_destination_identity "$(git -C "$MIRROR_DIR" config remote.origin.url)")" != "github.com/$owner" ]]; then fail "Existing mirror has a different origin."; return 1; fi
+  if [[ "$mirror_url_changed" == 1 ]]; then git -C "$MIRROR_DIR" remote set-url origin "$MIRROR_URL"; fi
   if ! git -C "$MIRROR_DIR" rev-parse --verify HEAD >/dev/null 2>&1; then git -C "$MIRROR_DIR" symbolic-ref HEAD "refs/heads/$branch"; fi
   # Passed by variable name to greens_replace_config.
   # shellcheck disable=SC2034

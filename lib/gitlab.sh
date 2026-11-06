@@ -267,6 +267,28 @@ greens_recognize_github_case_markers() {
   done < "$RUN_TMP/github-case-keys"
 }
 
+# Legacy activities are empty commits, including those carrying copied source
+# subjects. Compare trees in one history pass, independently of author identity.
+greens_legacy_activity_epochs() {
+  local empty_tree
+  git -C "$MIRROR_DIR" rev-parse --verify HEAD >/dev/null 2>&1 || return 0
+  empty_tree="$(git -C "$MIRROR_DIR" hash-object -t tree --stdin </dev/null)" || return 1
+  git -C "$MIRROR_DIR" log --format=%H --grep='^Greens-Activity: [0-9a-f]\{64\}$' > "$RUN_TMP/legacy-marked" || return 1
+  git -C "$MIRROR_DIR" log --format='%H%x09%T%x09%at%x09p%P%x09%s' > "$RUN_TMP/legacy-history" || return 1
+  awk -F '\t' -v empty="$empty_tree" '
+    FILENAME == ARGV[1] {marked[$1]=1; next}
+    {tree[$1]=$2; epoch[$1]=$3; parent[$1]=substr($4,2); init[$1]=(NF==5 && $5=="init")}
+    END {
+      for (id in epoch) {
+        if (marked[id] || parent[id] ~ / /) continue
+        if (parent[id] == "") {
+          if (tree[id] != empty || init[id]) continue
+        } else if (!(parent[id] in tree) || tree[id] != tree[parent[id]]) continue
+        print epoch[id]
+      }
+    }' "$RUN_TMP/legacy-marked" "$RUN_TMP/legacy-history" | sort -u
+}
+
 greens_mirror_mixed_records() {
   local records="$1" publish="$2" mirror_branch ref marker msg activity_key activity_date activity_epoch
   local pending=0 today
@@ -284,11 +306,7 @@ greens_mirror_mixed_records() {
   greens_recognize_github_case_markers "$records" || return 1
   : > "$RUN_TMP/legacy-epochs"
   if [[ "${GREENS_LEGACY_TIMESTAMPS:-0}" == 1 ]]; then
-    # Timestamp-only legacy activities use "sync", regardless of the mirror
-    # email selected today. Exclude metadata and already marked activities.
-    git -C "$MIRROR_DIR" log --format='%at%x09%s' \
-      --invert-grep --grep='^Greens-Activity: ' 2>/dev/null |
-      awk -F '\t' '$2 == "sync" {print $1}' | sort -u > "$RUN_TMP/legacy-epochs"
+    greens_legacy_activity_epochs > "$RUN_TMP/legacy-epochs" || return 1
   elif git -C "$MIRROR_DIR" rev-parse --verify HEAD >/dev/null 2>&1 && [[ ! -s "$RUN_TMP/known" ]]; then
     log "ERROR: destination history has no activity IDs; rerun setup to migrate a legacy greens configuration."
     return 1
