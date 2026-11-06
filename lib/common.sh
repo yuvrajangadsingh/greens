@@ -97,7 +97,7 @@ greens_count_repositories() {
   while IFS= read -r -d '' gitpath; do
     repodir="$(dirname "$gitpath")"
     url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
-    if identity="$(greens_remote_identity "$url" 2>/dev/null)"; then key="origin:$identity"; else key="path:$repodir"; fi
+    if identity="$(greens_remote_identity "$url" 0 "$repodir" 2>/dev/null)"; then key="origin:$identity"; else key="path:$repodir"; fi
     duplicate=0
     for existing in ${seen[@]+"${seen[@]}"}; do [[ "$existing" == "$key" ]] && { duplicate=1; break; }; done
     [[ "$duplicate" == 1 ]] && continue
@@ -403,10 +403,106 @@ greens_utc_date() {
     date -u -r "$1" '+%Y-%m-%dT%H:%M:%SZ'
 }
 
+# File origins have their own host classification, distinct from network hosts.
+greens_is_file_origin() {
+  [[ -n "$1" ]] || return 1
+  case "$1" in file://*|/*|./*|../*) return 0 ;; *://*) return 1 ;; esac
+  if command -v cygpath >/dev/null 2>&1; then
+    case "$1" in [a-zA-Z]:/*|[a-zA-Z]:\\*) return 0 ;; esac
+  fi
+  [[ "${1%%/*}" != *:* ]]
+}
+
+greens_source_url() {
+  local url="$1" base="${2:-$PWD}"
+  [[ -n "$url" ]] || return 1
+  if greens_is_file_origin "$url" && [[ "$url" != file://* ]]; then
+    case "$url" in
+      /*|[a-zA-Z]:/*|[a-zA-Z]:\\*) ;;
+      *)
+        if command -v cygpath >/dev/null 2>&1; then
+          base="$(cygpath -am "$base")" || return 1
+          cygpath -am "$base/$url"
+          return
+        fi
+        base="$(cd "$base" 2>/dev/null && pwd -P)" || return 1
+        # Resolve leading dot components from the existing checkout. Leave
+        # interior components intact because a remote directory may be a symlink.
+        while :; do
+          case "$url" in
+            .) url=""; break ;; ./*) url="${url#./}" ;;
+            ..) base="${base%/*}"; url=""; break ;;
+            ../*) base="${base%/*}"; url="${url#../}" ;;
+            *) break ;;
+          esac
+          [[ -n "$base" ]] || base=/
+        done
+        url="${base%/}${url:+/$url}"; [[ -n "$url" ]] || url=/
+        ;;
+    esac
+  fi
+  printf '%s\n' "$url"
+}
+
+greens_uri_path_encode() (
+  export LC_ALL=C
+  local value="$1" encoded="" char hex byte
+  while [[ -n "$value" ]]; do
+    char="${value:0:1}"; value="${value:1}"
+    case "$char" in
+      [a-zA-Z0-9._~/:\-]) encoded+="$char" ;;
+      *)
+        printf -v byte '%d' "'$char"
+        printf -v hex '%02X' "$((byte & 255))"
+        encoded+="%$hex"
+        ;;
+    esac
+  done
+  printf '%s' "$encoded"
+)
+
+greens_uri_path_decode() {
+  local value="$1" decoded="" prefix tail hex char
+  while [[ "$value" == *%[[:xdigit:]][[:xdigit:]]* ]]; do
+    prefix="${value%%%[[:xdigit:]][[:xdigit:]]*}"
+    tail="${value#"$prefix"}"; hex="${tail:1:2}"
+    # Reject field separators before command substitution can trim a newline.
+    case "$hex" in 00|09|0[aA]) return 1 ;; esac
+    printf -v char '%b' "\\x$hex"
+    decoded+="$prefix$char"; value="${tail:3}"
+  done
+  printf '%s' "$decoded$value"
+}
+
+greens_file_identity() {
+  local url="$1" base="${2:-$PWD}" authority="" path body
+  if [[ "$url" == file://* ]]; then
+    body="${url#file://}"; [[ "$body" == */* ]] || return 1
+    authority="${body%%/*}"; authority="${authority##*@}"
+    path="/$(greens_uri_path_decode "${body#*/}")" || return 1
+  else path="$(greens_source_url "$url" "$base")" || return 1; fi
+  [[ "$path" != *$'\t'* && "$path" != *$'\n'* ]] || return 1
+  authority="$(printf '%s' "$authority" | tr '[:upper:]' '[:lower:]')"
+  if [[ -z "$authority" || "$authority" == localhost ]]; then
+    authority=""
+    if [[ "$url" != file://* ]] && command -v cygpath >/dev/null 2>&1; then
+      path="$(cygpath -am "$path")" || return 1
+      if [[ "$path" == //* ]]; then
+        body="${path#//}"; authority="${body%%/*}"; path="/${body#*/}"
+      else [[ "$path" == /* ]] || path="/$path"; fi
+    fi
+  fi
+  case "$path" in /|/[a-zA-Z]:/) ;; *) path="${path%/}" ;; esac
+  authority="$(printf '%s' "$authority" | tr '[:upper:]' '[:lower:]')"
+  printf 'file://%s%s\n' "$authority" "$(greens_uri_path_encode "$path")"
+}
+
 # The default projects a host/path for compatibility. Collection passes 1 to
 # retain a sanitized transport endpoint; only known providers canonicalize it.
 greens_remote_identity() {
   local url="$1" preserve_transport="${2:-0}" authority path login="" scheme="${1%%://*}"
+  [[ -n "$url" ]] || return 1
+  if greens_is_file_origin "$url"; then greens_file_identity "$url" "${3:-$PWD}"; return; fi
   case "$url" in
     *://*)
       url="${url#*://}"
@@ -452,6 +548,7 @@ greens_remote_path() {
 greens_remote_host() {
   local authority="${1#*://}"
   authority="${authority%%/*}"; authority="${authority##*@}"
+  if [[ "$1" == file://* ]]; then printf 'file://%s\n' "${authority:-localhost}"; return; fi
   case "$authority" in
     \[*\]*) printf '%s]\n' "${authority%%]*}" ;;
     *) printf '%s\n' "${authority%%:*}" ;;

@@ -32,6 +32,11 @@ own username, commit emails, history start, and activity selection.
 Generic Git also accepts single-component paths: `git@forge.example:project.git`
 belongs to the `project` group. GitHub and GitLab still require an owner or
 namespace followed by a repository name.
+Absolute filesystem origins and `file://` URLs are classified automatically as
+generic Git, without a web/API probe. Relative filesystem origins are resolved
+from their checkout before fetching. Filesystem groups use `file://localhost`
+(or their file-server hostname), and URL escaping preserves spaces and literal
+percent characters in repository paths.
 Entering `-` at its author-email prompt skips the complete group before account
 or activity configuration. All repositories represented by that group are
 omitted from sync. The group is offered again on a later setup run.

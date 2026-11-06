@@ -47,6 +47,7 @@ greens_discover_sources() {
     repodir="$(dirname "$gitpath")"
     case "$repodir/" in "$CACHE_DIR/"*|"$MIRROR_DIR/"*) continue ;; esac
     url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
+    url="$(greens_source_url "$url" "$repodir")" || continue
     identity="$(greens_remote_identity "$url" 1)" || continue
     if [[ "$SOURCE_PROVIDER" == gitlab ]]; then
       [[ "$(greens_remote_path "$identity")" == */* ]] || continue
@@ -68,6 +69,7 @@ greens_mixed_discover_checkouts() {
       repodir="$(dirname "$gitpath")"
       case "$repodir/" in "$CACHE_DIR/"*|"$MIRROR_DIR/"*) continue ;; esac
       url="$(git -C "$repodir" config remote.origin.url 2>/dev/null || true)"
+      url="$(greens_source_url "$url" "$repodir")" || continue
       identity="$(greens_remote_identity "$url" 1)" || continue
       host="$(greens_remote_host "$identity")"
       for ((i=1; i<=SOURCE_COUNT; i++)); do
