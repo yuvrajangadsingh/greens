@@ -38,6 +38,7 @@ case "$*" in
   'auth status'*) [[ ! -f "$ACCOUNT_TEST/no-json-status" ]] || echo 'Logged in to github.com account alice (keyring)'; exit 1 ;; # Active account expired.
   'auth token --hostname '*' --user '*)
     user="${*: -1}"
+    [[ "$user" != bob || ! -f "$ACCOUNT_TEST/no-personal-cli" ]] || exit 1
     case "$user" in alice|bob|carol) printf 'fixture-%s\n' "$user" ;; *) exit 1 ;; esac ;;
   'auth token --hostname '*) [[ -f "$ACCOUNT_TEST/setup-active" ]] || exit 1; echo fixture-bob ;;
   'auth git-credential get')
@@ -164,6 +165,15 @@ printf 'protocol=https\nhost=github.com\nusername=bob\n\n' |
 grep -qx password=fixture-bob "$ACCOUNT_TEST/initial-clone-credentials" || fail "initial destination credentials inherited the work actor"
 git -C "$MIRROR_DIR" remote set-url origin https://github.com/bob/mirror
 
+# A legacy destination may have native Git credentials without a personal CLI
+# credential. Work tokens must not prevent its helper from being reached.
+touch "$ACCOUNT_TEST/no-personal-cli"
+git config --global credential.https://github.com.helper '!printf "username=bob\npassword=fixture-vault\n"'
+printf 'protocol=https\nhost=github.com\n\n' |
+  GH_TOKEN=fixture-alice GITHUB_TOKEN=fixture-alice greens_mirror_git credential fill > "$ACCOUNT_TEST/native-mirror-credentials"
+grep -qx password=fixture-vault "$ACCOUNT_TEST/native-mirror-credentials" || fail "legacy destination did not reach native credentials"
+rm "$ACCOUNT_TEST/no-personal-cli"
+
 # Exercise the complete indexed collector while gh auth status fails. The Git
 # transports are local bare repositories, with the original HTTPS identities.
 # Config values are read dynamically by the collector.
@@ -269,12 +279,14 @@ grep -qx username=url-user "$ACCOUNT_TEST/url-credentials" || fail "commit-only 
     MIRROR_DIR CACHE_DIR LOG_DIR MIRROR_EMAIL PERSONAL_GH_USER
   mkdir -p "$CACHE_DIR"
   git clone --bare --quiet "$ACCOUNT_TEST/source.git" "$CACHE_DIR/source.git"
+  touch "$ACCOUNT_TEST/no-personal-cli"
   FORCE=1 CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$ROOT/sync.sh" > "$ACCOUNT_TEST/legacy-output" 2>&1 || {
     cat "$ACCOUNT_TEST/legacy-output"; fail "legacy account isolation";
   }
   [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 2 ]] || fail "legacy source API activity was skipped"
   if grep -q 'Cloning source.git' "$ACCOUNT_TEST/legacy-output"; then fail "upgrade did not reuse its existing bare cache"; fi
   [[ -d "$CACHE_DIR/bare/$(greens_scheduler_id)/source.git" ]] || fail "upgrade cache was not namespaced"
+  rm "$ACCOUNT_TEST/no-personal-cli"
 )
 [[ ! -e "$ACCOUNT_TEST/switched" ]] || fail "legacy sync changed the shared account"
 

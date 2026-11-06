@@ -252,6 +252,11 @@ greens_destination_git() (
     unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
     if [[ -n "$token" ]]; then
       export GH_TOKEN="$token" GITHUB_TOKEN="$token" GH_ENTERPRISE_TOKEN="$token" GITHUB_ENTERPRISE_TOKEN="$token"
+    else
+      # Legacy mirrors can authenticate through GCM/keychain/store without a
+      # personal gh profile. Keep those helpers after clearing work tokens.
+      greens_run git "$@"
+      return
     fi
   fi
   greens_git_as github github.com "${PERSONAL_GH_USER:-}" "$url" "$@"
