@@ -501,7 +501,7 @@ greens_mixed_sync() {
     fi
     if [[ "$SOURCE_PROVIDER" == gitlab && "$ACTIVITY_TYPES" != commits ]]; then
       lower="$since_epoch"; old_types=""
-      if [[ -f "$checkpoint_file" ]]; then read -r checkpoint old_types < "$checkpoint_file"; [[ "$checkpoint" =~ ^[0-9]+$ && "$old_types" == "$ACTIVITY_TYPES:$since_epoch:$project_features" ]] && lower="$((checkpoint - 86400))"; fi
+      if [[ -f "$checkpoint_file" ]]; then read -r checkpoint old_types < "$checkpoint_file"; [[ "$checkpoint" =~ ^[0-9]+$ && "$old_types" == "$ACTIVITY_TYPES:$since_epoch:$project_features:$project_id" ]] && lower="$((checkpoint - 86400))"; fi
       updated="$(greens_utc_date "$lower")"
       if [[ ",$ACTIVITY_TYPES," == *,approvals,* ]]; then event_file="$RUN_TMP/events-$key"; gitlab_api "users/$gitlab_user_id/events?after=${updated%%T*}&per_page=100&sort=asc" "$event_file"; gitlab_records events "$event_file" >> "$source_file"; fi
       for kind in mrs issues; do
@@ -518,7 +518,7 @@ greens_mixed_sync() {
         failed=0; for pid in ${workers[@]+"${workers[@]}"}; do wait "$pid" || failed=1; done; [[ "$failed" == 0 ]] || return 1
         while IFS= read -r iid; do cat "$RUN_TMP/$key-$kind-$iid.notes" >> "$source_file"; done < "$RUN_TMP/iids-$key-$kind"
       done
-      printf '%s %s:%s:%s\n' "$run_epoch" "$ACTIVITY_TYPES" "$since_epoch" "$project_features" > "$RUN_TMP/$key.checkpoint"
+      printf '%s %s:%s:%s:%s\n' "$run_epoch" "$ACTIVITY_TYPES" "$since_epoch" "$project_features" "$project_id" > "$RUN_TMP/$key.checkpoint"
     else printf '%s %s:%s:true,true\n' "$run_epoch" "$ACTIVITY_TYPES" "$since_epoch" > "$RUN_TMP/$key.checkpoint"; fi
     jq -c --arg old "$identity/commit/" --arg new "$commit_identity/commit/" '
       (if .kind=="commits" and (.key|startswith($old)) then .key=$new+.key[($old|length):] else . end) |
@@ -627,7 +627,7 @@ greens_provider_sync() {
       # Changing activity selection must backfill newly selected types.
       if [[ -f "$state_dir/$key.checkpoint" ]]; then
         read -r checkpoint old_types < "$state_dir/$key.checkpoint"
-        if [[ "$checkpoint" =~ ^[0-9]+$ && "$old_types" == "$ACTIVITY_TYPES:$since_epoch:$project_features" && "$checkpoint" -gt "$((since_epoch + 86400))" ]]; then
+        if [[ "$checkpoint" =~ ^[0-9]+$ && "$old_types" == "$ACTIVITY_TYPES:$since_epoch:$project_features:$project_id" && "$checkpoint" -gt "$((since_epoch + 86400))" ]]; then
           lower="$((checkpoint - 86400))"
         fi
       fi
@@ -688,7 +688,7 @@ greens_provider_sync() {
     mv "$source_file.ids" "$source_file"
     jq -sc 'unique_by(.key)[]' "$source_file" > "$RUN_TMP/$key.jsonl"
     cat "$RUN_TMP/$key.jsonl" >> "$RUN_TMP/collected"
-    printf '%s %s:%s:%s\n' "$run_epoch" "$ACTIVITY_TYPES" "$since_epoch" "$project_features" > "$RUN_TMP/$key.checkpoint"
+    printf '%s %s:%s:%s:%s\n' "$run_epoch" "$ACTIVITY_TYPES" "$since_epoch" "$project_features" "$project_id" > "$RUN_TMP/$key.checkpoint"
   done < "$sources"
   jq -sc --arg types "$ACTIVITY_TYPES" --argjson since "$since_epoch" '
     ($types|split(",")) as $types |

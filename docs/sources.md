@@ -110,6 +110,9 @@ When GitLab API access is enabled, commit activity uses the numeric project ID,
 so renaming or moving a project keeps its contribution identities. Verified IDs
 remain cached for later commits-only runs; old path-based markers are recognized
 only after confirming that the paths refer to the same project.
+API checkpoints are also bound to the project ID: replacing a project at the
+same path triggers a backfill from `SINCE`, with new state published only after
+the mirror push succeeds.
 
 Cron jobs retain the PATH from setup so scheduled runs can find dependencies
 installed outside the scheduler's default PATH, including Homebrew's `jq` and

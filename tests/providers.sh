@@ -81,6 +81,21 @@ if [[ "$*" == "auth status --hostname forge.example" ]]; then exit 0; fi
 [[ ! -f "$TEST_ROOT/api-fails" ]] || exit 1
 if [[ -f "$TEST_ROOT/worker-fails" && "$4" == projects/7/issues/4/discussions* ]]; then exit 1; fi
 echo "$4" >> "$TEST_ROOT/api-calls"
+if [[ -f "$TEST_ROOT/project-checkpoint-fixture" ]]; then
+  case "$4" in
+    projects/team%2Fcheckpoint)
+      if [[ -f "$TEST_ROOT/checkpoint-replacement" ]]; then echo '{"id":18,"merge_requests_enabled":false}'
+      else echo '{"id":17,"merge_requests_enabled":false}'; fi; exit 0 ;;
+    projects/1[78]/issues\?*)
+      project="${4#projects/}"; project="${project%%/*}"
+      if [[ "$4" == *updated_after=2021-01-01* ]]; then
+        printf '[{"id":%s01,"iid":1,"author":{"id":42},"created_at":"2021-02-03T12:00:00Z"}]\n' "$project"
+      else echo '[]'; fi; exit 0 ;;
+    projects/1[78]/issues/1/discussions*)
+      project="${4#projects/}"; project="${project%%/*}"
+      printf '[{"notes":[{"id":%s02,"author":{"id":42},"system":false,"type":"DiscussionNote","created_at":"2021-02-03T12:00:00Z"}]}]\n' "$project"; exit 0 ;;
+  esac
+fi
 if [[ -f "$TEST_ROOT/rename-fixture" ]]; then
   case "$4" in
     projects/team%2Fold|projects/team%2Fnew|projects/team%2Fthird) echo '{"id":7,"issues_enabled":false}'; exit 0 ;;
@@ -1400,6 +1415,53 @@ echo "PASS: filesystem origin migration, file URI aliases, relative remotes, esc
   rm "$TEST_ROOT/rename-fixture"
 ) || fail "stable GitLab project commit identities"
 echo "PASS: GitLab project renames, pre-ID markers, commits-only transitions and distinct fork histories"
+
+# A replacement at the same path needs a full API backfill, even though its
+# activity settings/features are unchanged and the old checkpoint is recent.
+for schema in indexed legacy; do
+  (
+    CONFIG_FILE="$TEST_ROOT/$schema-checkpoint-config" WORK_DIR="$TEST_ROOT/$schema-checkpoint-work" WORK_DIRS="$TEST_ROOT/$schema-checkpoint-work"
+    MIRROR_DIR="$TEST_ROOT/$schema-checkpoint-mirror" MIRROR_URL="https://$schema-checkpoint@github.com/fixture/mirror"
+    CACHE_DIR="$TEST_ROOT/$schema-checkpoint-cache" LOG_DIR="$TEST_ROOT/$schema-checkpoint-logs" MIRROR_EMAIL=mirror@example.test
+    git init --quiet "$WORK_DIR/repo"
+    git -C "$WORK_DIR/repo" remote add origin git@forge.example:team/checkpoint.git
+    git init --bare --quiet "$TEST_ROOT/remotes/$schema-checkpoint.git"
+    git init --quiet "$MIRROR_DIR"
+    git -C "$MIRROR_DIR" symbolic-ref HEAD refs/heads/main
+    git -C "$MIRROR_DIR" remote add origin "$MIRROR_URL"
+    git config --global url."$TEST_ROOT/remotes/$schema-checkpoint.git".insteadOf "$MIRROR_URL"
+    greens_save_config "$CONFIG_FILE" MIRROR_DIR MIRROR_URL CACHE_DIR LOG_DIR MIRROR_EMAIL
+    if [[ "$schema" == indexed ]]; then
+      # Config values are read through indexed accessors.
+      # shellcheck disable=SC2034
+      SOURCE_COUNT=1 SOURCE_1_PROVIDER=gitlab SOURCE_1_API_HOST=forge.example SOURCE_1_REMOTE_HOSTS=forge.example SOURCE_1_ORGANIZATION=team \
+        SOURCE_1_USERNAME=fixture SOURCE_1_EMAILS=author@example.test SOURCE_1_SINCE=2021-01-01 SOURCE_1_ACTIVITY_TYPES=issues,comments SOURCE_1_ACCESS_MODE=remote
+      greens_save_config "$CONFIG_FILE" WORK_DIRS SOURCE_COUNT SOURCE_1_PROVIDER SOURCE_1_API_HOST SOURCE_1_REMOTE_HOSTS SOURCE_1_ORGANIZATION SOURCE_1_USERNAME SOURCE_1_EMAILS SOURCE_1_SINCE SOURCE_1_ACTIVITY_TYPES SOURCE_1_ACCESS_MODE
+    else
+      # shellcheck disable=SC2034
+      SOURCE_PROVIDER=gitlab GITLAB_HOST=forge.example GITLAB_USERNAME=fixture EMAILS=author@example.test SINCE=2021-01-01 ACTIVITY_TYPES=issues,comments
+      greens_save_config "$CONFIG_FILE" WORK_DIR SOURCE_PROVIDER GITLAB_HOST GITLAB_USERNAME EMAILS SINCE ACTIVITY_TYPES
+    fi
+    touch "$TEST_ROOT/project-checkpoint-fixture"
+    FIXTURE_VISIBILITY=PUBLIC run_sync
+    [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 2 ]] || fail "$schema initial issue/discussion collection"
+    checkpoint_before="$(cat "$CACHE_DIR"/activity-state/*/*.checkpoint)"
+    id_before="$(cat "$CACHE_DIR"/gitlab-projects/*/*.id)"
+    touch "$TEST_ROOT/checkpoint-replacement"
+    printf '#!/bin/sh\nexit 1\n' > "$TEST_ROOT/remotes/$schema-checkpoint.git/hooks/pre-receive"
+    chmod +x "$TEST_ROOT/remotes/$schema-checkpoint.git/hooks/pre-receive"
+    if FIXTURE_VISIBILITY=PUBLIC run_sync; then fail "$schema replacement skipped backfill/push rejection"; fi
+    [[ "$(cat "$CACHE_DIR"/activity-state/*/*.checkpoint)" == "$checkpoint_before" && "$(cat "$CACHE_DIR"/gitlab-projects/*/*.id)" == "$id_before" ]] || fail "$schema failed replacement published checkpoint/project ID"
+    rm "$TEST_ROOT/remotes/$schema-checkpoint.git/hooks/pre-receive"
+    FIXTURE_VISIBILITY=PUBLIC run_sync
+    [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 4 ]] || fail "$schema replacement omitted historical issue/discussion"
+    [[ "$(cat "$CACHE_DIR"/gitlab-projects/*/*.id)" == 18 ]] || fail "$schema replacement ID was not published"
+    FIXTURE_VISIBILITY=PUBLIC run_sync
+    [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 4 ]] || fail "$schema replacement rerun duplicated activity"
+    rm "$TEST_ROOT/project-checkpoint-fixture" "$TEST_ROOT/checkpoint-replacement"
+  ) || fail "$schema project checkpoint invalidation"
+done
+echo "PASS: project replacements backfill historical issues/discussions and retain transactional checkpoints in both schemas"
 
 # The real legacy collector may have copied acknowledged source subjects.
 # Setup disables future copying without recreating those existing activities.
