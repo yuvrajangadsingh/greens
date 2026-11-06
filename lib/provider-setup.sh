@@ -499,7 +499,10 @@ greens_sources_setup() {
   mkdir -p "$(dirname "$MIRROR_DIR")"; MIRROR_DIR="$(cd "$(dirname "$MIRROR_DIR")" && pwd)/$(basename "$MIRROR_DIR")"
   while IFS= read -r path; do case "$MIRROR_DIR/" in "$path/"*) fail "Choose a mirror directory outside every work directory."; return 1 ;; esac; done <<< "$WORK_DIRS"
   if [[ ! -d "$MIRROR_DIR/.git" ]]; then greens_destination_git "$MIRROR_URL" clone "$MIRROR_URL" "$MIRROR_DIR"; elif [[ "$(greens_destination_identity "$(git -C "$MIRROR_DIR" config remote.origin.url)")" != "github.com/$owner" ]]; then fail "Existing mirror has a different origin."; return 1; fi
-  if [[ "$mirror_url_changed" == 1 ]]; then git -C "$MIRROR_DIR" remote set-url origin "$MIRROR_URL"; fi
+  if [[ "$mirror_url_changed" == 1 ]]; then
+    secure_repo_config "$MIRROR_DIR" strict || { fail "Cannot secure the mirror Git config; origin was not changed."; return 1; }
+    git -C "$MIRROR_DIR" remote set-url origin "$MIRROR_URL"
+  fi
   if ! git -C "$MIRROR_DIR" rev-parse --verify HEAD >/dev/null 2>&1; then git -C "$MIRROR_DIR" symbolic-ref HEAD "refs/heads/$branch"; fi
   # Passed by variable name to greens_replace_config.
   # shellcheck disable=SC2034

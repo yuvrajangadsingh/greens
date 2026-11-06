@@ -497,6 +497,29 @@ greens_source_transport() {
   greens_source_url "$url" "$repodir"
 }
 
+# Run on the checkout's original origin with an exact A -> B rule. Starting
+# Git on the expanded B would incorrectly apply an unrelated B -> C rewrite.
+greens_source_git() (
+  local provider="$1" host="$2" user="$3" url="$4" repodir="$5" origin arg rule
+  local -a args
+  umask 077
+  shift 5; args=()
+  origin="$url"
+  [[ -z "$repodir" ]] || origin="$(git -C "$repodir" config remote.origin.url)" || return 1
+  # A filesystem path can also be a configured remote name (e.g. "origin").
+  # Give those literal transports an unambiguous command-local URL alias.
+  if greens_is_file_origin "$origin"; then origin="greens-source-$$-$RANDOM://repository"; fi
+  for arg in "$@"; do
+    if [[ "$arg" == "$url" ]]; then args+=("$origin"); else args+=("$arg"); fi
+  done
+  # A file also quotes URL keys containing '=' and keeps URL credentials out
+  # of the long-running transport's command-line config arguments.
+  rule="$(mktemp "${RUN_TMP:-${TMPDIR:-/tmp}}/source-transport.XXXXXX")" || return 1
+  trap 'rm -f "$rule"' EXIT
+  git config --file "$rule" "url.$url.insteadOf" "$origin" || return 1
+  greens_git_as_transport "$provider" "$host" "$user" "$url" -c "include.path=$rule" ${args[@]+"${args[@]}"}
+)
+
 greens_uri_path_encode() (
   export LC_ALL=C
   local value="$1" encoded="" char hex byte

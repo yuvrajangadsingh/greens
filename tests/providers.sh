@@ -901,14 +901,34 @@ replacement_url=https://fixture:replacement-password@github.com/fixture/mirror
 git -C "$TEST_ROOT/destination-alias-mirror" remote set-url origin "$expired_url"
 git config --global url."$TEST_ROOT/nonexistent-mirror.git".insteadOf "$expired_url"
 git config --global url."$TEST_ROOT/remotes/mirror.git".insteadOf "$replacement_url"
-{
+mirror_transport_answers() {
   printf 'y\n'
   printf '\n%.0s' {1..8}
   printf '%s\n\n\n\ny\n' "$replacement_url"
-} | CONTRIB_MIRROR_CONFIG="$destination_alias_config" bash "$ROOT/setup.sh" > "$TEST_ROOT/mirror-url-edit-output" 2>&1 || {
+}
+chmod 644 "$TEST_ROOT/destination-alias-mirror/.git/config"
+mkdir -p "$TEST_ROOT/deny-config-chmod"
+export FIXTURE_CHMOD
+FIXTURE_CHMOD="$(command -v chmod)"
+cat > "$TEST_ROOT/deny-config-chmod/chmod" <<'MOCK'
+#!/bin/bash
+if [[ "$1" == 600 && "$2" == "$TEST_ROOT/destination-alias-mirror/.git/config" ]]; then exit 1; fi
+exec "$FIXTURE_CHMOD" "$@"
+MOCK
+chmod +x "$TEST_ROOT/deny-config-chmod/chmod"
+if mirror_transport_answers | PATH="$TEST_ROOT/deny-config-chmod:$PATH" CONTRIB_MIRROR_CONFIG="$destination_alias_config" bash "$ROOT/setup.sh" > "$TEST_ROOT/mirror-permission-failure" 2>&1; then
+  fail "setup stored URL credentials despite failed config protection"
+fi
+grep -q 'Cannot secure the mirror Git config' "$TEST_ROOT/mirror-permission-failure" || fail "missing permission failure diagnostic"
+[[ "$(git -C "$TEST_ROOT/destination-alias-mirror" config remote.origin.url)" == "$expired_url" ]] || fail "failed config protection changed origin"
+mirror_transport_answers | CONTRIB_MIRROR_CONFIG="$destination_alias_config" bash "$ROOT/setup.sh" > "$TEST_ROOT/mirror-url-edit-output" 2>&1 || {
   cat "$TEST_ROOT/mirror-url-edit-output"; fail "explicit mirror transport edit";
 }
 [[ "$(git -C "$TEST_ROOT/destination-alias-mirror" config remote.origin.url)" == "$replacement_url" ]] || fail "explicit mirror URL did not update origin"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) ;; # Windows ACLs do not implement these POSIX mode bits.
+  *) python3 -c 'import os,stat,sys; assert stat.S_IMODE(os.stat(sys.argv[1]).st_mode)==0o600' "$TEST_ROOT/destination-alias-mirror/.git/config" || fail "replacement URL credentials remained readable by other users" ;;
+esac
 if grep -q 'Initial sync failed' "$TEST_ROOT/mirror-url-edit-output"; then cat "$TEST_ROOT/mirror-url-edit-output"; fail "initial sync used expired mirror URL"; fi
 FORCE=1 CONTRIB_MIRROR_CONFIG="$destination_alias_config" bash "$ROOT/sync.sh" > "$TEST_ROOT/mirror-url-fresh-output" 2>&1 || {
   cat "$TEST_ROOT/mirror-url-fresh-output"; fail "fresh sync lost replacement mirror URL";
@@ -930,12 +950,22 @@ echo "PASS: explicit mirror transport replacement repairs initial and fresh sync
   # shellcheck disable=SC2034
   SOURCE_1_EMAILS=author@example.test SOURCE_2_EMAILS=author@example.test SOURCE_1_SINCE=2021-01-01 SOURCE_2_SINCE=2021-01-01
   mkdir -p "$WORK_DIRS"
+  git clone --mirror --quiet "$TEST_ROOT/remotes/source.git" "$TEST_ROOT/remotes/source=exact.git"
   for provider in gitlab github; do
-    case "$provider" in gitlab) bare="$TEST_ROOT/remotes/source.git"; project=team/repo ;; github) bare="$TEST_ROOT/remotes/github-source.git"; project=AcMe/ApP ;; esac
+    case "$provider" in gitlab) bare="$TEST_ROOT/remotes/source=exact.git"; project=team/repo ;; github) bare="$TEST_ROOT/remotes/github-source.git"; project=AcMe/ApP ;; esac
     git clone --quiet "$bare" "$WORK_DIRS/$provider"
     git -C "$WORK_DIRS/$provider" remote set-url origin "https://checkout-$provider/$project"
     git -C "$WORK_DIRS/$provider" config url."$bare".insteadOf "https://checkout-$provider/$project"
   done
+  # Native access to A performs only the local A -> B rewrite. A later global
+  # B -> C must not redirect indexed preflight/fetch to this distinct history.
+  git init --quiet "$TEST_ROOT/wrong-rewrite-work"
+  GIT_AUTHOR_DATE=2021-01-15T12:00:00Z GIT_COMMITTER_DATE=2021-01-15T12:00:00Z \
+    git -C "$TEST_ROOT/wrong-rewrite-work" commit --quiet --allow-empty -m 'wrong repository activity'
+  wrong_sha="$(git -C "$TEST_ROOT/wrong-rewrite-work" rev-parse HEAD)"
+  git clone --bare --quiet "$TEST_ROOT/wrong-rewrite-work" "$TEST_ROOT/wrong-rewrite.git"
+  git config --global url."$TEST_ROOT/wrong-rewrite.git".insteadOf "$TEST_ROOT/remotes/source=exact.git"
+  native_sha="$(git -C "$WORK_DIRS/gitlab" ls-remote origin refs/heads/main | cut -f1)"
   git init --bare --quiet "$TEST_ROOT/remotes/checkout-rewrite-mirror.git"
   git init --quiet "$MIRROR_DIR"
   git -C "$MIRROR_DIR" symbolic-ref HEAD refs/heads/main
@@ -943,10 +973,11 @@ echo "PASS: explicit mirror transport replacement repairs initial and fresh sync
   git config --global url."$TEST_ROOT/remotes/checkout-rewrite-mirror.git".insteadOf "$MIRROR_URL"
   greens_save_config "$CONFIG_FILE" WORK_DIRS SCAN_MODE SOURCE_COUNT SOURCE_1_PROVIDER SOURCE_1_REMOTE_HOSTS SOURCE_1_API_HOST SOURCE_1_ORGANIZATION SOURCE_1_USERNAME SOURCE_1_EMAILS SOURCE_1_SINCE SOURCE_1_ACTIVITY_TYPES SOURCE_1_ACCESS_MODE SOURCE_2_PROVIDER SOURCE_2_REMOTE_HOSTS SOURCE_2_API_HOST SOURCE_2_ORGANIZATION SOURCE_2_USERNAME SOURCE_2_EMAILS SOURCE_2_SINCE SOURCE_2_ACTIVITY_TYPES SOURCE_2_ACCESS_MODE MIRROR_DIR MIRROR_URL CACHE_DIR LOG_DIR MIRROR_EMAIL
   greens_mixed_discover_checkouts > "$TEST_ROOT/checkout-rewrite-discovery"
-  awk -F '\t' -v target="$TEST_ROOT/remotes/source.git" '$2=="forge.example/team/repo" && $3==target {found=1} END {exit !found}' "$TEST_ROOT/checkout-rewrite-discovery" || fail "discovery lost GitLab identity or local transport"
+  awk -F '\t' -v target="$TEST_ROOT/remotes/source=exact.git" '$2=="forge.example/team/repo" && $3==target {found=1} END {exit !found}' "$TEST_ROOT/checkout-rewrite-discovery" || fail "discovery lost GitLab identity or local transport"
   awk -F '\t' -v target="$TEST_ROOT/remotes/github-source.git" '$2=="github.example/acme/app" && $3==target {found=1} END {exit !found}' "$TEST_ROOT/checkout-rewrite-discovery" || fail "discovery lost GitHub identity or local transport"
   FIXTURE_VISIBILITY=PUBLIC run_sync
   [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 4 ]] || fail "checkout-local rewrites omitted source commits"
+  jq -es --arg wrong "$wrong_sha" --arg native "$native_sha" 'all(.[]; (.key|contains($wrong)|not)) and any(.[]; .key|contains($native))' "$CACHE_DIR"/activity-state/*/*.jsonl >/dev/null || fail "a second rewrite imported the wrong repository"
   first_head="$(git -C "$MIRROR_DIR" rev-parse HEAD)"
   {
     printf 'y\n'
@@ -958,6 +989,7 @@ echo "PASS: explicit mirror transport replacement repairs initial and fresh sync
   FIXTURE_VISIBILITY=PUBLIC run_sync
   [[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$first_head" ]] || fail "checkout rewrite rerun duplicated activity"
   [[ "$(git -C "$WORK_DIRS/github" config remote.origin.url)" == https://checkout-github/AcMe/ApP ]] || fail "source origin was replaced with expanded transport"
+  git config --global --unset-all url."$TEST_ROOT/wrong-rewrite.git".insteadOf
 ) || fail "checkout-local transport rewrite regression"
 echo "PASS: checkout-local rewrites survive source discovery, cached sync, setup rerun and provider identity grouping"
 
