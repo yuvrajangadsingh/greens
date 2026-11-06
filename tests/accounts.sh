@@ -360,8 +360,8 @@ mkdir -p "$ACCOUNT_TEST/setup-work"
 touch "$ACCOUNT_TEST/setup-active"
 {
   printf '%s\n\n' "$ACCOUNT_TEST/setup-work"
-  printf 'author@example.test\ncarol\ncommits, issues, commits\n2021-01-01\n'
-  printf 'author@example.test\nalice\ncommits\n2021-01-01\n'
+  printf 'author@example.test\ncommits, issues, commits\ncarol\n2021-01-01\n'
+  printf 'author@example.test\ncommits\nalice\n2021-01-01\n'
   printf 'bob\nmirror@example.test\ngreens\nhttps://bob@github.com/bob/select-mirror\n%s\nmanual\n0\ny\n' "$ACCOUNT_TEST/select-mirror"
 } | CONTRIB_MIRROR_CONFIG="$ACCOUNT_TEST/select-config" bash "$ROOT/setup.sh" > "$ACCOUNT_TEST/select-output" 2>&1 || {
   cat "$ACCOUNT_TEST/select-output"; fail "clean HTTPS setup could not select work accounts";

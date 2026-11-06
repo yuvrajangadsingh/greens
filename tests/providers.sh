@@ -215,8 +215,8 @@ SYNC_HOUR=11 greens_save_config "$dialog_config" SYNC_HOUR
 { printf '%s\n' 'SYNC_HOUR="${SYNC_HOUR:-0}"'; cat "$dialog_config"; } > "$dialog_config.duplicate"
 mv "$dialog_config.duplicate" "$dialog_config"
 
-# An unreachable GitLab source can be confirmed as local-only before any glab
-# authentication or activity prompt is attempted.
+# An unreachable GitLab commit source can use local-only collection without
+# attempting glab authentication.
 mkdir -p "$TEST_ROOT/local-dialog-work/repo"
 git init --quiet "$TEST_ROOT/local-dialog-work/repo"
 git -C "$TEST_ROOT/local-dialog-work/repo" remote add origin git@gitlab.com:offline/repo.git
@@ -224,7 +224,7 @@ git config --global --add url."$TEST_ROOT/missing/offline.git".insteadOf git@git
 local_dialog_config="$TEST_ROOT/local-dialog/config"
 touch "$TEST_ROOT/forbid-glab"
 {
-  printf '%s\n\nauthor@example.test\ny\n2021-01-01\n' "$TEST_ROOT/local-dialog-work"
+  printf '%s\n\nauthor@example.test\ncommits\ny\n2021-01-01\n' "$TEST_ROOT/local-dialog-work"
   printf '\n\n\nhttps://github.com/fixture/mirror\n%s\nmanual\n0\nn\n' "$TEST_ROOT/local-dialog-mirror"
 } | CONTRIB_MIRROR_CONFIG="$local_dialog_config" bash "$ROOT/setup.sh" --in-root > "$TEST_ROOT/local-dialog-output" 2>&1 || {
   rm -f "$TEST_ROOT/forbid-glab"; cat "$TEST_ROOT/local-dialog-output"; fail "local-only setup dialog";
@@ -232,7 +232,7 @@ touch "$TEST_ROOT/forbid-glab"
 rm "$TEST_ROOT/forbid-glab"
 [[ ! -e "$TEST_ROOT/glab-called" ]] || fail "local-only setup invoked glab"
 bash -c 'source "$1"; [[ "$SOURCE_COUNT" == 1 && "$SOURCE_1_ACCESS_MODE" == local && "$SOURCE_1_ACTIVITY_TYPES" == commits && -z "$SOURCE_1_USERNAME" ]]' bash "$local_dialog_config" || fail "setup did not persist local-only source"
-if grep -qE 'GitLab username|Activity types for gitlab.com/offline' "$TEST_ROOT/local-dialog-output"; then fail "local-only setup showed provider prompts"; fi
+if grep -q 'GitLab username' "$TEST_ROOT/local-dialog-output"; then fail "local-only setup showed API account prompts"; fi
 
 # A saved local source stays offline unless the user explicitly requests a
 # remote retry during a later setup run.
@@ -450,6 +450,7 @@ echo "PASS: mixed GitLab and GitHub Enterprise sources"
   MIRROR_DIR="$TEST_ROOT/api-only-mirror" CACHE_DIR="$TEST_ROOT/api-only-cache" LOG_DIR="$TEST_ROOT/api-only-logs"
   SOURCE_1_REMOTE_HOSTS=api-only-gitlab SOURCE_2_REMOTE_HOSTS=api-only-github
   SOURCE_1_ACTIVITY_TYPES=issues SOURCE_2_ACTIVITY_TYPES=issues
+  MIRROR_URL=https://api-only@github.com/fixture/mirror
   mkdir -p "$WORK_DIRS"
   for provider in gitlab github; do
     git init --quiet "$WORK_DIRS/$provider"
@@ -460,12 +461,13 @@ echo "PASS: mixed GitLab and GitHub Enterprise sources"
   git init --bare --quiet "$TEST_ROOT/remotes/api-only-mirror.git"
   git init --quiet "$MIRROR_DIR"
   git -C "$MIRROR_DIR" symbolic-ref HEAD refs/heads/main
-  git -C "$MIRROR_DIR" remote add origin "$TEST_ROOT/remotes/api-only-mirror.git"
-  greens_save_config "$CONFIG_FILE" WORK_DIRS SCAN_MODE SOURCE_COUNT SOURCE_1_PROVIDER SOURCE_1_REMOTE_HOSTS SOURCE_1_API_HOST SOURCE_1_ORGANIZATION SOURCE_1_USERNAME SOURCE_1_EMAILS SOURCE_1_SINCE SOURCE_1_ACTIVITY_TYPES SOURCE_2_PROVIDER SOURCE_2_REMOTE_HOSTS SOURCE_2_API_HOST SOURCE_2_ORGANIZATION SOURCE_2_USERNAME SOURCE_2_EMAILS SOURCE_2_SINCE SOURCE_2_ACTIVITY_TYPES MIRROR_DIR CACHE_DIR LOG_DIR MIRROR_EMAIL SINCE
-  run_sync
+  git -C "$MIRROR_DIR" remote add origin "$MIRROR_URL"
+  git config --global url."$TEST_ROOT/remotes/api-only-mirror.git".insteadOf "$MIRROR_URL"
+  greens_save_config "$CONFIG_FILE" WORK_DIRS SCAN_MODE SOURCE_COUNT SOURCE_1_PROVIDER SOURCE_1_REMOTE_HOSTS SOURCE_1_API_HOST SOURCE_1_ORGANIZATION SOURCE_1_USERNAME SOURCE_1_EMAILS SOURCE_1_SINCE SOURCE_1_ACTIVITY_TYPES SOURCE_2_PROVIDER SOURCE_2_REMOTE_HOSTS SOURCE_2_API_HOST SOURCE_2_ORGANIZATION SOURCE_2_USERNAME SOURCE_2_EMAILS SOURCE_2_SINCE SOURCE_2_ACTIVITY_TYPES MIRROR_DIR MIRROR_URL CACHE_DIR LOG_DIR MIRROR_EMAIL SINCE
+  FIXTURE_VISIBILITY=PUBLIC run_sync
   [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 2 ]] || fail "API-only activity was not mirrored"
   first_head="$(git -C "$MIRROR_DIR" rev-parse HEAD)"
-  run_sync
+  FIXTURE_VISIBILITY=PUBLIC run_sync
   [[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$first_head" ]] || fail "API-only rerun duplicated activity"
   # Failure of API authentication must still abort instead of changing mode.
   touch "$TEST_ROOT/api-fails"
@@ -473,6 +475,16 @@ echo "PASS: mixed GitLab and GitHub Enterprise sources"
   rm "$TEST_ROOT/api-fails"
   [[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$first_head" ]] || fail "failed API validation added activity"
   bash -c 'source "$1"; [[ "$SOURCE_1_ACTIVITY_TYPES" == issues && "${SOURCE_1_ACCESS_MODE:-remote}" == remote ]]' bash "$CONFIG_FILE" || fail "API-only sync changed source mode"
+  {
+    printf 'y\n'
+    printf '\n%.0s' {1..17}
+    printf 'n\n'
+  } | SCHEDULER=manual CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$ROOT/setup.sh" > "$TEST_ROOT/api-only-setup-output" 2>&1 || {
+    cat "$TEST_ROOT/api-only-setup-output"; fail "API-only setup probed unavailable Git transports";
+  }
+  bash -c 'source "$1"; [[ "$SOURCE_COUNT" == 2 && "$SOURCE_1_ACTIVITY_TYPES" == issues && "$SOURCE_2_ACTIVITY_TYPES" == issues && "$SOURCE_1_ACCESS_MODE" == remote && "$SOURCE_2_ACCESS_MODE" == remote ]]' bash "$CONFIG_FILE" || fail "API-only setup changed source activities/modes"
+  FIXTURE_VISIBILITY=PUBLIC run_sync
+  [[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$first_head" ]] || fail "API-only setup rerun duplicated activity"
 ) || fail "API-only sources with unavailable Git transports"
 echo "PASS: API-only GitLab/GitHub sync bypasses unavailable Git transports and retains API validation"
 
@@ -713,24 +725,32 @@ echo "PASS: terminal preflight fallback reads confirmations for every source"
   mirror_visibility() { echo public; }
   : > "$RUN_TMP/publish"
   legacy_epoch="$(git -C "$MIRROR_DIR" log -1 --format=%at)"
+  printf '# generated status fixture\n' > "$MIRROR_DIR/README.md"
+  git -C "$MIRROR_DIR" add README.md
   GIT_AUTHOR_DATE=2021-01-02T12:00:00Z GIT_COMMITTER_DATE=2021-01-02T12:00:00Z \
-    git -C "$MIRROR_DIR" -c user.email="$MIRROR_EMAIL" commit --quiet --allow-empty -m 'Update sync status'
+    git -C "$MIRROR_DIR" -c user.email="$MIRROR_EMAIL" commit --quiet -m 'Update sync status'
   status_epoch="$(git -C "$MIRROR_DIR" log -1 --format=%at)"
+  # Copied messages may even match the status subject; an unchanged README
+  # tree makes this an activity rather than a generated status commit.
+  GIT_AUTHOR_DATE=2021-01-03T12:00:00Z GIT_COMMITTER_DATE=2021-01-03T12:00:00Z \
+    git -C "$MIRROR_DIR" -c user.email="$MIRROR_EMAIL" commit --quiet --allow-empty -m 'Update sync status'
+  copied_epoch="$(git -C "$MIRROR_DIR" log -1 --format=%at)"
   new_epoch=1612353600 # 2021-02-03T12:00:00Z, independent of the test host timezone.
   jq -nc --argjson legacy "$legacy_epoch" --argjson epoch "$new_epoch" \
-    --argjson init "$init_epoch" --argjson status "$status_epoch" '
+    --argjson init "$init_epoch" --argjson status "$status_epoch" --argjson copied "$copied_epoch" '
     {key:"legacy",epoch:$legacy,date:"2021-01-01T12:00:00Z",kind:"commits",project:"one"},
     {key:"init-coincidence",epoch:$init,date:"2021-01-01T10:00:00Z",kind:"commits",project:"one"},
     {key:"status-coincidence",epoch:$status,date:"2021-01-02T12:00:00Z",kind:"commits",project:"one"},
+    {key:"copied",epoch:$copied,date:"2021-01-03T12:00:00Z",kind:"commits",project:"one"},
     {key:"first",epoch:$epoch,date:"2021-02-03T12:00:00Z",kind:"commits",project:"one"}' > "$RUN_TMP/input"
   greens_mirror_mixed_records "$RUN_TMP/input" "$RUN_TMP/publish" > "$TEST_ROOT/legacy-epoch-output" 2>&1
   [[ "$(git -C "$MIRROR_DIR" log --format=%at --author='<previous-mirror@example.test>')" == "$legacy_epoch" ]] || fail "legacy attribution changed"
   [[ "$(git -C "$MIRROR_DIR" log --format=%at | grep -cx "$legacy_epoch")" == 1 ]] || fail "legacy timestamp was duplicated after changing mirror email"
-  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 6 ]] || fail "metadata timestamps suppressed real activity"
+  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 7 ]] || fail "legacy/metadata timestamps were misclassified"
   jq -nc --argjson epoch "$new_epoch" '{key:"second",epoch:$epoch,date:"2021-02-03T12:00:00Z",kind:"commits",project:"two"}' >> "$RUN_TMP/input"
   greens_mirror_mixed_records "$RUN_TMP/input" "$RUN_TMP/publish" >> "$TEST_ROOT/legacy-epoch-output" 2>&1
-  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 7 ]] || fail "new activity at a marked commit timestamp was skipped"
-  [[ "$(cat "$RUN_TMP/legacy-epochs")" == "$legacy_epoch" ]] || fail "marked commits entered legacy timestamp baseline"
+  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 8 ]] || fail "new activity at a marked commit timestamp was skipped"
+  [[ "$(cat "$RUN_TMP/legacy-epochs")" == "$legacy_epoch"$'\n'"$copied_epoch" ]] || fail "legacy baseline lost copied activity or included metadata/marked commits"
   mirrored_head="$(git -C "$MIRROR_DIR" rev-parse HEAD)"
   greens_mirror_mixed_records "$RUN_TMP/input" "$RUN_TMP/publish" >> "$TEST_ROOT/legacy-epoch-output" 2>&1
   [[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$mirrored_head" ]] || fail "legacy-mode rerun duplicated activity IDs"
@@ -870,6 +890,30 @@ FORCE=1 CONTRIB_MIRROR_CONFIG="$destination_alias_config" bash "$ROOT/sync.sh" >
 }
 if greens_destination_identity git@not-github:fixture/mirror.git >/dev/null; then fail "non-GitHub SSH alias accepted"; fi
 echo "PASS: SSH mirror alias migration, transport preservation, and sync"
+
+# Accepting defaults preserves an existing alias, even if the saved URL uses
+# another transport. An explicitly entered replacement must repair origin.
+bash -c 'source "$1/lib/common.sh"; MIRROR_URL=https://github.com/fixture/mirror; greens_save_config "$2" MIRROR_URL' bash "$ROOT" "$destination_alias_config"
+rerun_setup_defaults "$destination_alias_config" "$TEST_ROOT/alias-default-output" || fail "default mirror URL rerun"
+[[ "$(git -C "$TEST_ROOT/destination-alias-mirror" config remote.origin.url)" == "$destination_alias" ]] || fail "accepting defaults overwrote existing alias"
+expired_url=https://fixture:expired-password@github.com/fixture/mirror
+replacement_url=https://fixture:replacement-password@github.com/fixture/mirror
+git -C "$TEST_ROOT/destination-alias-mirror" remote set-url origin "$expired_url"
+git config --global url."$TEST_ROOT/nonexistent-mirror.git".insteadOf "$expired_url"
+git config --global url."$TEST_ROOT/remotes/mirror.git".insteadOf "$replacement_url"
+{
+  printf 'y\n'
+  printf '\n%.0s' {1..8}
+  printf '%s\n\n\n\ny\n' "$replacement_url"
+} | CONTRIB_MIRROR_CONFIG="$destination_alias_config" bash "$ROOT/setup.sh" > "$TEST_ROOT/mirror-url-edit-output" 2>&1 || {
+  cat "$TEST_ROOT/mirror-url-edit-output"; fail "explicit mirror transport edit";
+}
+[[ "$(git -C "$TEST_ROOT/destination-alias-mirror" config remote.origin.url)" == "$replacement_url" ]] || fail "explicit mirror URL did not update origin"
+if grep -q 'Initial sync failed' "$TEST_ROOT/mirror-url-edit-output"; then cat "$TEST_ROOT/mirror-url-edit-output"; fail "initial sync used expired mirror URL"; fi
+FORCE=1 CONTRIB_MIRROR_CONFIG="$destination_alias_config" bash "$ROOT/sync.sh" > "$TEST_ROOT/mirror-url-fresh-output" 2>&1 || {
+  cat "$TEST_ROOT/mirror-url-fresh-output"; fail "fresh sync lost replacement mirror URL";
+}
+echo "PASS: explicit mirror transport replacement repairs initial and fresh sync while defaults retain aliases"
 
 # Real setup in a simulated Homebrew Cellar must install upgrade-stable jobs.
 # After removing that Cellar version, the saved runner must execute the new one.
@@ -1197,6 +1241,45 @@ echo "PASS: local cache migration retains history without copying transport cred
   [[ "$(git -C "$MIRROR_DIR" log --format=%H --author='<mirror@example.test>' | wc -l | tr -d ' ')" == 3 ]] || fail "filesystem rerun duplicated activity"
 ) || fail "filesystem origins and legacy migration regression"
 echo "PASS: filesystem origin migration, file URI aliases, relative remotes, escaping and fresh sync"
+
+# The real legacy collector may have copied acknowledged source subjects.
+# Setup disables future copying without recreating those existing activities.
+(
+  CONFIG_FILE="$TEST_ROOT/copied-message-config" WORK_DIR="$TEST_ROOT/copied-message-work"
+  REMOTE_PREFIX="$TEST_ROOT/filesystem remotes %/"
+  MIRROR_DIR="$TEST_ROOT/copied-message-mirror" MIRROR_URL=https://copied-mode@github.com/fixture/mirror
+  CACHE_DIR="$TEST_ROOT/copied-message-cache" LOG_DIR="$TEST_ROOT/copied-message-logs"
+  SOURCE_PROVIDER=github EMAILS=author@example.test MIRROR_EMAIL=mirror@example.test MIRROR_NAME=greens
+  # Values are consumed by name in greens_save_config.
+  # shellcheck disable=SC2034
+  PERSONAL_GH_USER=fixture GITHUB_USERNAME=fixture ACTIVITY_TYPES=commits SINCE='2021-01-01 00:00:00'
+  # shellcheck disable=SC2034
+  COPY_MESSAGES=1 COPY_MESSAGES_ACK=1 SCHEDULER=manual SYNC_HOUR=0
+  git clone --quiet "$TEST_ROOT/filesystem remotes %/source-1.git" "$WORK_DIR/repo"
+  git init --bare --quiet "$TEST_ROOT/remotes/copied-message-mirror.git"
+  git --git-dir="$TEST_ROOT/remotes/copied-message-mirror.git" symbolic-ref HEAD refs/heads/main
+  git init --quiet "$MIRROR_DIR"
+  git -C "$MIRROR_DIR" symbolic-ref HEAD refs/heads/main
+  git -C "$MIRROR_DIR" remote add origin "$MIRROR_URL"
+  git config --global url."$TEST_ROOT/remotes/copied-message-mirror.git".insteadOf "$MIRROR_URL"
+  greens_save_config "$CONFIG_FILE" SOURCE_PROVIDER WORK_DIR REMOTE_PREFIX MIRROR_DIR MIRROR_URL CACHE_DIR LOG_DIR EMAILS MIRROR_EMAIL MIRROR_NAME PERSONAL_GH_USER GITHUB_USERNAME ACTIVITY_TYPES SINCE COPY_MESSAGES COPY_MESSAGES_ACK SCHEDULER SYNC_HOUR
+  run_sync
+  [[ "$(git -C "$MIRROR_DIR" log --format=%s --author='<mirror@example.test>')" == 'filesystem source 1' ]] || fail "legacy collector did not copy source subject"
+  old_tip="$(git -C "$MIRROR_DIR" rev-parse HEAD)"
+  {
+    printf 'y\n'
+    printf '\n%.0s' {1..11}
+    printf 'y\n'
+  } | CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$ROOT/setup.sh" > "$TEST_ROOT/copied-message-setup-output" 2>&1 || {
+    cat "$TEST_ROOT/copied-message-setup-output"; fail "copied-message legacy migration";
+  }
+  if grep -q 'Initial sync failed' "$TEST_ROOT/copied-message-setup-output"; then cat "$TEST_ROOT/copied-message-setup-output"; fail "initial copied-message sync"; fi
+  bash -c 'source "$1"; [[ "$SOURCE_COUNT" == 1 && "$COPY_MESSAGES" == 0 && "$COPY_MESSAGES_ACK" == 0 && "$GREENS_LEGACY_TIMESTAMPS" == 1 ]]' bash "$CONFIG_FILE" || fail "copied-message migration did not disable future copying"
+  [[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$old_tip" ]] || fail "migration recreated an activity with a copied subject"
+  run_sync
+  [[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$old_tip" ]] || fail "fresh sync duplicated copied-message activity"
+) || fail "acknowledged copied-message migration regression"
+echo "PASS: legacy copied-message collector migrates without duplicating existing activity"
 
 # Keep native Windows drive/UNC identities compatible with their file URIs.
 (
