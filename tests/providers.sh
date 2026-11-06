@@ -81,6 +81,14 @@ if [[ "$*" == "auth status --hostname forge.example" ]]; then exit 0; fi
 [[ ! -f "$TEST_ROOT/api-fails" ]] || exit 1
 if [[ -f "$TEST_ROOT/worker-fails" && "$4" == projects/7/issues/4/discussions* ]]; then exit 1; fi
 echo "$4" >> "$TEST_ROOT/api-calls"
+if [[ -f "$TEST_ROOT/rename-fixture" ]]; then
+  case "$4" in
+    projects/team%2Fold|projects/team%2Fnew|projects/team%2Fthird) echo '{"id":7,"issues_enabled":false}'; exit 0 ;;
+    projects/team%2Ffork)
+      if [[ -f "$TEST_ROOT/recreated-project" ]]; then echo '{"id":9,"issues_enabled":false}'
+      else echo '{"id":8,"issues_enabled":false}'; fi; exit 0 ;;
+  esac
+fi
 case "$4" in
   metadata) echo '{"version":"18.0.0","revision":"fixture"}' ;;
   user) echo '{"id":42,"username":"fixture"}' ;;
@@ -1320,6 +1328,79 @@ echo "PASS: local cache migration retains history without copying transport cred
 ) || fail "filesystem origins and legacy migration regression"
 echo "PASS: filesystem origin migration, file URI aliases, relative remotes, escaping and fresh sync"
 
+# API-enabled GitLab commit identity survives renames and activity-selection
+# changes. Upgrade aliases must verify IDs, preserving distinct fork projects.
+(
+  CONFIG_FILE="$TEST_ROOT/gitlab-rename-config" WORK_DIRS="$TEST_ROOT/gitlab-rename-work" SCAN_MODE=in-root SOURCE_COUNT=1
+  MIRROR_DIR="$TEST_ROOT/gitlab-rename-mirror" MIRROR_URL=https://rename-fixture@github.com/fixture/mirror
+  CACHE_DIR="$TEST_ROOT/gitlab-rename-cache" LOG_DIR="$TEST_ROOT/gitlab-rename-logs" MIRROR_EMAIL=mirror@example.test
+  # Values are consumed by indexed accessors and greens_save_config.
+  # shellcheck disable=SC2034
+  SOURCE_1_PROVIDER=gitlab SOURCE_1_API_HOST=forge.example SOURCE_1_REMOTE_HOSTS=forge.example SOURCE_1_ORGANIZATION=team SOURCE_1_USERNAME=fixture \
+    SOURCE_1_EMAILS=author@example.test SOURCE_1_SINCE=2021-01-01 SOURCE_1_ACTIVITY_TYPES=commits,issues SOURCE_1_ACCESS_MODE=remote
+  git clone --quiet "$TEST_ROOT/remotes/github-source.git" "$WORK_DIRS/repo"
+  sha="$(git --git-dir="$TEST_ROOT/remotes/github-source.git" rev-parse refs/heads/main)"
+  for path in old new third fork; do git config --global --add url."$TEST_ROOT/remotes/github-source.git".insteadOf "git@forge.example:team/$path.git"; done
+  git -C "$WORK_DIRS/repo" remote set-url origin git@forge.example:team/old.git
+  git init --bare --quiet "$TEST_ROOT/remotes/gitlab-rename-mirror.git"
+  git init --quiet "$MIRROR_DIR"
+  git -C "$MIRROR_DIR" symbolic-ref HEAD refs/heads/main
+  git -C "$MIRROR_DIR" remote add origin "$MIRROR_URL"
+  git config --global url."$TEST_ROOT/remotes/gitlab-rename-mirror.git".insteadOf "$MIRROR_URL"
+  greens_save_config "$CONFIG_FILE" WORK_DIRS SCAN_MODE SOURCE_COUNT SOURCE_1_PROVIDER SOURCE_1_API_HOST SOURCE_1_REMOTE_HOSTS SOURCE_1_ORGANIZATION SOURCE_1_USERNAME SOURCE_1_EMAILS SOURCE_1_SINCE SOURCE_1_ACTIVITY_TYPES SOURCE_1_ACCESS_MODE MIRROR_DIR MIRROR_URL CACHE_DIR LOG_DIR MIRROR_EMAIL
+  touch "$TEST_ROOT/rename-fixture"
+  FIXTURE_VISIBILITY=PUBLIC run_sync
+  first_tip="$(git -C "$MIRROR_DIR" rev-parse HEAD)"
+  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 1 ]] || fail "GitLab ID fixture activity count"
+  stable_key="forge.example/7/commit/$sha"
+  git -C "$MIRROR_DIR" log --format=%B | grep -q "$(printf '%s' "$stable_key" | greens_hash)" || fail "GitLab commit key did not use project ID"
+  git -C "$WORK_DIRS/repo" remote set-url origin git@forge.example:team/new.git
+  FIXTURE_VISIBILITY=PUBLIC run_sync
+  [[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$first_tip" ]] || fail "GitLab rename replayed unchanged commits"
+  SOURCE_1_ACTIVITY_TYPES=commits; greens_save_config "$CONFIG_FILE" SOURCE_1_ACTIVITY_TYPES
+  rm -f "$TEST_ROOT/glab-called"; touch "$TEST_ROOT/forbid-glab"
+  FIXTURE_VISIBILITY=PUBLIC run_sync
+  rm "$TEST_ROOT/forbid-glab"
+  [[ ! -e "$TEST_ROOT/glab-called" && "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$first_tip" ]] || fail "commits-only switch lost verified GitLab project ID"
+  # Recreate a pre-ID marker/cache, then rename before its first fixed sync.
+  old_key="forge.example/team/old/commit/$sha"
+  GIT_AUTHOR_DATE=2021-02-03T12:30:00Z GIT_COMMITTER_DATE=2021-02-03T12:30:00Z \
+    git -C "$MIRROR_DIR" commit --amend --allow-empty --quiet -m "$(printf 'sync\n\nGreens-Activity: %s' "$(printf '%s' "$old_key" | greens_hash)")"
+  git -C "$MIRROR_DIR" push --force --quiet origin HEAD:refs/heads/main
+  old_path_key="$(printf '%s' forge.example/team/old | greens_hash)"
+  for cached in "$CACHE_DIR"/activity-state/*/"$old_path_key.jsonl"; do
+    [[ -f "$cached" ]] || continue
+    jq -c --arg key "$old_key" 'if .kind=="commits" then .key=$key else . end' "$cached" > "$cached.old"; mv "$cached.old" "$cached"
+  done
+  rm -rf "$CACHE_DIR/gitlab-projects"
+  # shellcheck disable=SC2034
+  SOURCE_1_ACTIVITY_TYPES=commits,issues; greens_save_config "$CONFIG_FILE" SOURCE_1_ACTIVITY_TYPES
+  git -C "$WORK_DIRS/repo" remote set-url origin git@forge.example:team/third.git
+  legacy_tip="$(git -C "$MIRROR_DIR" rev-parse HEAD)"
+  FIXTURE_VISIBILITY=PUBLIC run_sync
+  [[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$legacy_tip" ]] || fail "pre-ID rename duplicated the old-path marker"
+  FIXTURE_VISIBILITY=PUBLIC run_sync
+  [[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$legacy_tip" ]] || fail "GitLab marker upgrade was not idempotent"
+  git -C "$WORK_DIRS/repo" remote set-url origin git@forge.example:team/fork.git
+  FIXTURE_VISIBILITY=PUBLIC run_sync
+  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 2 ]] || fail "distinct GitLab project sharing a SHA was suppressed"
+  # Recreating a path with a new ID must not import its previous cached data
+  # into a fresh destination using the same config and source cache.
+  touch "$TEST_ROOT/recreated-project"
+  MIRROR_DIR="$TEST_ROOT/recreated-project-mirror" MIRROR_URL=https://recreated-project@github.com/fixture/mirror
+  git init --bare --quiet "$TEST_ROOT/remotes/recreated-project-mirror.git"
+  git init --quiet "$MIRROR_DIR"
+  git -C "$MIRROR_DIR" symbolic-ref HEAD refs/heads/main
+  git -C "$MIRROR_DIR" remote add origin "$MIRROR_URL"
+  git config --global url."$TEST_ROOT/remotes/recreated-project-mirror.git".insteadOf "$MIRROR_URL"
+  greens_save_config "$CONFIG_FILE" MIRROR_DIR MIRROR_URL
+  FIXTURE_VISIBILITY=PUBLIC run_sync
+  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 1 ]] || fail "recreated project imported previous project ID activity"
+  rm "$TEST_ROOT/recreated-project"
+  rm "$TEST_ROOT/rename-fixture"
+) || fail "stable GitLab project commit identities"
+echo "PASS: GitLab project renames, pre-ID markers, commits-only transitions and distinct fork histories"
+
 # The real legacy collector may have copied acknowledged source subjects.
 # Setup disables future copying without recreating those existing activities.
 (
@@ -1334,6 +1415,10 @@ echo "PASS: filesystem origin migration, file URI aliases, relative remotes, esc
   # shellcheck disable=SC2034
   COPY_MESSAGES=1 COPY_MESSAGES_ACK=1 SCHEDULER=manual SYNC_HOUR=0
   git clone --quiet "$TEST_ROOT/filesystem remotes %/source-1.git" "$WORK_DIR/repo"
+  GIT_AUTHOR_DATE=2021-01-01T12:00:00Z GIT_COMMITTER_DATE=2021-01-01T12:00:00Z \
+    git -C "$WORK_DIR/repo" commit --amend --allow-empty --quiet -m init
+  git clone --bare --quiet "$WORK_DIR/repo" "$TEST_ROOT/filesystem remotes %/copied-init.git"
+  git -C "$WORK_DIR/repo" remote set-url origin "$TEST_ROOT/filesystem remotes %/copied-init.git"
   git init --bare --quiet "$TEST_ROOT/remotes/copied-message-mirror.git"
   git --git-dir="$TEST_ROOT/remotes/copied-message-mirror.git" symbolic-ref HEAD refs/heads/main
   git init --quiet "$MIRROR_DIR"
@@ -1342,7 +1427,7 @@ echo "PASS: filesystem origin migration, file URI aliases, relative remotes, esc
   git config --global url."$TEST_ROOT/remotes/copied-message-mirror.git".insteadOf "$MIRROR_URL"
   greens_save_config "$CONFIG_FILE" SOURCE_PROVIDER WORK_DIR REMOTE_PREFIX MIRROR_DIR MIRROR_URL CACHE_DIR LOG_DIR EMAILS MIRROR_EMAIL MIRROR_NAME PERSONAL_GH_USER GITHUB_USERNAME ACTIVITY_TYPES SINCE COPY_MESSAGES COPY_MESSAGES_ACK SCHEDULER SYNC_HOUR
   run_sync
-  [[ "$(git -C "$MIRROR_DIR" log --format=%s --author='<mirror@example.test>')" == 'filesystem source 1' ]] || fail "legacy collector did not copy source subject"
+  [[ "$(git -C "$MIRROR_DIR" log --format=%s --author='<mirror@example.test>')" == init ]] || fail "legacy collector did not copy root init subject"
   old_tip="$(git -C "$MIRROR_DIR" rev-parse HEAD)"
   {
     printf 'y\n'
@@ -1352,10 +1437,19 @@ echo "PASS: filesystem origin migration, file URI aliases, relative remotes, esc
     cat "$TEST_ROOT/copied-message-setup-output"; fail "copied-message legacy migration";
   }
   if grep -q 'Initial sync failed' "$TEST_ROOT/copied-message-setup-output"; then cat "$TEST_ROOT/copied-message-setup-output"; fail "initial copied-message sync"; fi
-  bash -c 'source "$1"; [[ "$SOURCE_COUNT" == 1 && "$COPY_MESSAGES" == 0 && "$COPY_MESSAGES_ACK" == 0 && "$GREENS_LEGACY_TIMESTAMPS" == 1 ]]' bash "$CONFIG_FILE" || fail "copied-message migration did not disable future copying"
+  bash -c 'source "$1"; [[ "$SOURCE_COUNT" == 1 && "$COPY_MESSAGES" == 0 && "$COPY_MESSAGES_ACK" == 0 && "$GREENS_LEGACY_TIMESTAMPS" == 1 && "$GREENS_LEGACY_COPIED_MESSAGES" == 1 ]]' bash "$CONFIG_FILE" || fail "copied-message migration did not retain its root activity mode"
   [[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$old_tip" ]] || fail "migration recreated an activity with a copied subject"
   run_sync
   [[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$old_tip" ]] || fail "fresh sync duplicated copied-message activity"
+  {
+    printf 'y\n'
+    printf '\n%.0s' {1..11}
+    printf 'n\n'
+  } | CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$ROOT/setup.sh" > "$TEST_ROOT/copied-message-rerun-output" 2>&1 || {
+    cat "$TEST_ROOT/copied-message-rerun-output"; fail "copied root setup rerun";
+  }
+  run_sync
+  [[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$old_tip" ]] || fail "setup rerun lost copied root init activity"
 ) || fail "acknowledged copied-message migration regression"
 echo "PASS: legacy copied-message collector migrates without duplicating existing activity"
 
