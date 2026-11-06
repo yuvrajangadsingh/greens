@@ -181,9 +181,11 @@ greens_preflight_mixed_sources() {
     [[ "$mode" == remote ]] || { log "ERROR: invalid access mode for source $source_index: $mode"; return 1; }
     provider="$(greens_indexed_value "$source_index" PROVIDER)"; api="$(greens_indexed_value "$source_index" API_HOST)"; username="$(greens_indexed_value "$source_index" USERNAME)"
     transport_only=0; [[ "$types" != commits ]] || transport_only=1
-    if ! GIT_TERMINAL_PROMPT=0 GREENS_FETCH_TIMEOUT=15 GREENS_GIT_TRANSPORT_ONLY="$transport_only" greens_git_as "$provider" "$api" "$username" "$url" ls-remote "$url" HEAD >/dev/null 2>&1; then
-      greens_offer_local_fallback "$source_index" "Git remote is unreachable" || return 1
-      continue
+    if [[ ",$types," == *,commits,* ]]; then
+      if ! GIT_TERMINAL_PROMPT=0 GREENS_FETCH_TIMEOUT=15 GREENS_GIT_TRANSPORT_ONLY="$transport_only" greens_git_as "$provider" "$api" "$username" "$url" ls-remote "$url" HEAD >/dev/null 2>&1; then
+        greens_offer_local_fallback "$source_index" "Git remote is unreachable" || return 1
+        continue
+      fi
     fi
     [[ "$types" != commits ]] || continue
     provider="$(greens_indexed_value "$source_index" PROVIDER)"; api="$(greens_indexed_value "$source_index" API_HOST)"; username="$(greens_indexed_value "$source_index" USERNAME)"

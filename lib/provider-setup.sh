@@ -506,6 +506,7 @@ greens_sources_setup() {
   SCHEDULER="$(greens_required "$scheduler_prompt" "${SCHEDULER:-$scheduler_default}")"
   [[ "$SCHEDULER" =~ ^($scheduler_values)$ ]] || { fail "$scheduler_error"; return 1; }
   SYNC_HOUR="$(greens_required 'Daily hour (0-23, local timezone)' "${SYNC_HOUR:-0}")"; [[ "$SYNC_HOUR" =~ ^[0-9]{1,2}$ ]] && [[ "$((10#$SYNC_HOUR))" -le 23 ]] || { fail "Invalid hour."; return 1; }; SYNC_HOUR="$((10#$SYNC_HOUR))"
+  greens_validate_scheduler "$SCHEDULER" || return 1
   # Passed by variable name to greens_replace_config.
   # shellcheck disable=SC2034
   # Indexed reruns still need the timestamp deduplication enabled at migration.
@@ -524,13 +525,15 @@ greens_sources_setup() {
       warn "Initial sync failed. Continuing setup; run greens to retry."
     fi
   fi
-  greens_remove_all_schedulers "$sync_path"
+  # Keep the previous jobs until the replacement is successfully installed.
+  # Manual scheduling deliberately removes all managed jobs.
   case "$SCHEDULER" in
     systemd) greens_install_systemd "$sync_path" "$SYNC_HOUR" ;;
     cron) greens_install_cron "$sync_path" "$SYNC_HOUR" ;;
     launchd) greens_install_launchd "$sync_path" "$SYNC_HOUR" ;;
     win) greens_install_windows_task "$sync_path" "$SYNC_HOUR" ;;
   esac
+  greens_remove_all_schedulers "$sync_path" "$SCHEDULER"
   ok "Setup complete. Run greens --status to inspect configuration and scheduling."
 }
 

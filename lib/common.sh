@@ -670,13 +670,28 @@ greens_install_windows_task() {
 }
 
 greens_remove_all_schedulers() {
-  local timer
+  local keep="${2:-}" timer
   timer="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$(greens_scheduler_id).timer"
-  [[ ! -f "$timer" ]] || greens_systemd_remove
-  greens_remove_cron
-  greens_remove_launchd
-  greens_remove_windows_task
+  [[ "$keep" == systemd || ! -f "$timer" ]] || greens_systemd_remove
+  [[ "$keep" == cron ]] || greens_remove_cron
+  [[ "$keep" == launchd ]] || greens_remove_launchd
+  [[ "$keep" == win ]] || greens_remove_windows_task
   greens_remove_legacy_schedulers
+}
+
+greens_validate_scheduler() {
+  case "$1" in
+    systemd)
+      if ! command -v systemctl >/dev/null || ! systemctl --user show-environment >/dev/null 2>&1; then
+        echo "systemd user manager is unavailable; choose cron or manual." >&2
+        return 1
+      fi ;;
+    cron) command -v crontab >/dev/null || { echo "crontab is unavailable; choose manual." >&2; return 1; } ;;
+    launchd) command -v launchctl >/dev/null || { echo "launchctl is unavailable; choose cron or manual." >&2; return 1; } ;;
+    win) command -v schtasks.exe >/dev/null || { echo "Windows Task Scheduler is unavailable; choose manual." >&2; return 1; } ;;
+    manual) ;;
+    *) return 1 ;;
+  esac
 }
 
 # v1.8.2 jobs have no configuration selector, so they belong to the default
@@ -718,8 +733,7 @@ greens_systemd_remove() {
 greens_install_systemd() {
   local script="$1" hour="$2" id dir runner escaped
   script="$(greens_sync_path "$script")"
-  command -v systemctl >/dev/null || { echo "systemd is unavailable; choose cron or manual." >&2; return 1; }
-  systemctl --user show-environment >/dev/null || return 1
+  greens_validate_scheduler systemd || return 1
   id="$(greens_scheduler_id)"
   dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
   runner="$(dirname "$CONFIG_FILE")/$id-run"

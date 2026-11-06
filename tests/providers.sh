@@ -444,6 +444,38 @@ FIXTURE_VISIBILITY=PUBLIC run_sync
 [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 13 ]] || fail "mixed provider rerun duplicated activity"
 echo "PASS: mixed GitLab and GitHub Enterprise sources"
 
+# API-only groups keep syncing when their Git transport is unavailable.
+(
+  CONFIG_FILE="$TEST_ROOT/api-only-config" WORK_DIRS="$TEST_ROOT/api-only-work"
+  MIRROR_DIR="$TEST_ROOT/api-only-mirror" CACHE_DIR="$TEST_ROOT/api-only-cache" LOG_DIR="$TEST_ROOT/api-only-logs"
+  SOURCE_1_REMOTE_HOSTS=api-only-gitlab SOURCE_2_REMOTE_HOSTS=api-only-github
+  SOURCE_1_ACTIVITY_TYPES=issues SOURCE_2_ACTIVITY_TYPES=issues
+  mkdir -p "$WORK_DIRS"
+  for provider in gitlab github; do
+    git init --quiet "$WORK_DIRS/$provider"
+    case "$provider" in gitlab) project=team/repo ;; github) project=acme/app ;; esac
+    git -C "$WORK_DIRS/$provider" remote add origin "git@api-only-$provider:$project.git"
+    git config --global --add url."$TEST_ROOT/nonexistent-source.git".insteadOf "git@api-only-$provider:"
+  done
+  git init --bare --quiet "$TEST_ROOT/remotes/api-only-mirror.git"
+  git init --quiet "$MIRROR_DIR"
+  git -C "$MIRROR_DIR" symbolic-ref HEAD refs/heads/main
+  git -C "$MIRROR_DIR" remote add origin "$TEST_ROOT/remotes/api-only-mirror.git"
+  greens_save_config "$CONFIG_FILE" WORK_DIRS SCAN_MODE SOURCE_COUNT SOURCE_1_PROVIDER SOURCE_1_REMOTE_HOSTS SOURCE_1_API_HOST SOURCE_1_ORGANIZATION SOURCE_1_USERNAME SOURCE_1_EMAILS SOURCE_1_SINCE SOURCE_1_ACTIVITY_TYPES SOURCE_2_PROVIDER SOURCE_2_REMOTE_HOSTS SOURCE_2_API_HOST SOURCE_2_ORGANIZATION SOURCE_2_USERNAME SOURCE_2_EMAILS SOURCE_2_SINCE SOURCE_2_ACTIVITY_TYPES MIRROR_DIR CACHE_DIR LOG_DIR MIRROR_EMAIL SINCE
+  run_sync
+  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 2 ]] || fail "API-only activity was not mirrored"
+  first_head="$(git -C "$MIRROR_DIR" rev-parse HEAD)"
+  run_sync
+  [[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$first_head" ]] || fail "API-only rerun duplicated activity"
+  # Failure of API authentication must still abort instead of changing mode.
+  touch "$TEST_ROOT/api-fails"
+  if run_sync; then fail "API-only source bypassed API validation"; fi
+  rm "$TEST_ROOT/api-fails"
+  [[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$first_head" ]] || fail "failed API validation added activity"
+  bash -c 'source "$1"; [[ "$SOURCE_1_ACTIVITY_TYPES" == issues && "${SOURCE_1_ACCESS_MODE:-remote}" == remote ]]' bash "$CONFIG_FILE" || fail "API-only sync changed source mode"
+) || fail "API-only sources with unavailable Git transports"
+echo "PASS: API-only GitLab/GitHub sync bypasses unavailable Git transports and retains API validation"
+
 # Public GitHub origins are rewritten only for transport, so visibility still
 # reaches gh and dashboard history must refuse to sync with exit code 3.
 grep -q 'repo view fixture/mixed-mirror ' "$TEST_ROOT/visibility-calls" || fail "mixed mirror visibility was not queried"
@@ -551,6 +583,10 @@ echo "PASS: source actor cache isolation"
 cat > "$TEST_ROOT/bin/systemctl" <<'MOCK'
 #!/bin/bash
 echo "$*" >> "$TEST_ROOT/systemctl-calls"
+if [[ "$*" == '--user show-environment' && -f "$TEST_ROOT/no-systemd-manager" ]]; then
+  echo 'Failed to connect to bus' >&2; exit 1
+fi
+if [[ "$*" == '--user enable --now '* && -f "$TEST_ROOT/systemd-install-fails" ]]; then exit 1; fi
 MOCK
 chmod +x "$TEST_ROOT/bin/systemctl"
 export XDG_CONFIG_HOME="$TEST_ROOT/xdg"
@@ -774,6 +810,21 @@ rerun_setup_defaults "$expired_config" "$TEST_ROOT/custom-scheduler-output" || {
 cmp -s "$TEST_ROOT/crontab" "$TEST_ROOT/legacy-crontab" || fail "custom setup removed a default or unrelated cron job"
 [[ -f "$HOME/Library/LaunchAgents/com.greens.plist" ]] || fail "custom setup removed default legacy launchd agent"
 rm -f "$TEST_ROOT/launchctl-calls"
+cp "$default_config" "$TEST_ROOT/before-scheduler-config"
+for failure in no-systemd-manager systemd-install-fails; do
+  touch "$TEST_ROOT/$failure"
+  if SCHEDULER=systemd rerun_setup_defaults "$default_config" "$TEST_ROOT/$failure-output"; then
+    fail "setup accepted unavailable/failed systemd scheduling"
+  fi
+  rm "$TEST_ROOT/$failure"
+  cmp -s "$TEST_ROOT/crontab" "$TEST_ROOT/legacy-crontab" || fail "failed replacement removed the working cron job"
+  [[ -f "$HOME/Library/LaunchAgents/com.greens.plist" ]] || fail "failed replacement removed legacy launchd job"
+  if [[ "$failure" == no-systemd-manager ]]; then
+    cmp -s "$default_config" "$TEST_ROOT/before-scheduler-config" || fail "unavailable scheduler changed configuration"
+    grep -q 'systemd user manager is unavailable' "$TEST_ROOT/$failure-output" || fail "missing scheduler diagnostic"
+  fi
+  cp "$TEST_ROOT/before-scheduler-config" "$default_config"
+done
 SCHEDULER=cron SYNC_HOUR=9 rerun_setup_defaults "$default_config" "$TEST_ROOT/legacy-scheduler-output" || {
   cat "$TEST_ROOT/legacy-scheduler-output"; fail "legacy scheduler replacement";
 }
