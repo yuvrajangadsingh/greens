@@ -869,7 +869,10 @@ for failure in no-systemd-manager systemd-install-fails; do
   [[ -f "$HOME/Library/LaunchAgents/com.greens.plist" ]] || fail "failed replacement removed legacy launchd job"
   if [[ "$failure" == no-systemd-manager ]]; then
     cmp -s "$default_config" "$TEST_ROOT/before-scheduler-config" || fail "unavailable scheduler changed configuration"
-    grep -q 'systemd user manager is unavailable' "$TEST_ROOT/$failure-output" || fail "missing scheduler diagnostic"
+    # macOS setup never offers systemd, so it rejects the saved value before checking the manager.
+    diagnostic='systemd user manager is unavailable'
+    [[ "$(uname -s)" == Linux ]] || diagnostic='Choose launchd, cron, or manual'
+    grep -q "$diagnostic" "$TEST_ROOT/$failure-output" || fail "missing scheduler diagnostic"
   fi
   cp "$TEST_ROOT/before-scheduler-config" "$default_config"
 done
