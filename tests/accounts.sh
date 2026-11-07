@@ -49,6 +49,8 @@ case "$*" in
     case "${GH_TOKEN:-}" in fixture-alice-sso) echo alice ;; fixture-alice|fixture-bob|fixture-pat|fixture-carol) echo "${GH_TOKEN#fixture-}" ;; *) exit 1 ;; esac ;;
   'api --hostname github.com user') printf '{"login":"%s"}\n' "${GH_TOKEN#fixture-}" ;;
   'api --hostname github.com user/emails --jq '*) echo mirror@example.test ;;
+  'api --hostname github.com repos/team/repo --jq .id') echo 700 ;;
+  'api --hostname github.com repos/otherteam/repo --jq .id') echo 701 ;;
   'api --hostname github.com repos/bob/'*) echo '{"private":true,"default_branch":"main"}' ;;
   'api --hostname '*' users/team --jq .type') echo Organization ;;
   'api --hostname '*' users/otherteam --jq .type') echo Organization ;;

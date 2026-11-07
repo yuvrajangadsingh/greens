@@ -106,11 +106,13 @@ Before storing an edited origin, setup secures the existing mirror Git config
 to owner-only permissions and aborts if that protection fails.
 Homebrew installs `git`, `jq`, and `gh`; install `glab` separately when selecting
 GitLab API activity.
-When GitLab API access is enabled, commit activity uses the numeric project ID,
-so renaming or moving a project keeps its contribution identities. Verified IDs
+When GitHub or GitLab API access is enabled, commit activity uses the numeric
+repository/project ID, so renames keep their contribution identities. Verified IDs
 remain cached for later commits-only runs; old path-based markers are recognized
 only after confirming that the paths refer to the same project.
-API checkpoints are also bound to the project ID: replacing a project at the
+Private dashboards show only a repository basename for filesystem sources;
+their full paths remain in local identity data and are never published there.
+GitLab API checkpoints are also bound to the project ID: replacing a project at the
 same path triggers a backfill from `SINCE`, with new state published only after
 the mirror push succeeds.
 

@@ -174,6 +174,7 @@ echo "PASS: config, discovery, API pagination/filtering, stable IDs, privacy, an
 # sessions. All personal values must come from answers, not the implementation.
 cat > "$TEST_ROOT/bin/gh" <<'MOCK'
 #!/bin/bash
+if [[ -f "$TEST_ROOT/forbid-github-source-api" && "$1" == api && "${3:-}" == github.example ]]; then touch "$TEST_ROOT/github-source-api-called"; exit 99; fi
 case "$*" in
   'auth switch '*) echo "$*" >> "$TEST_ROOT/forbidden-switches"; exit 99 ;;
   'auth token --hostname github.example --user '*) printf 'fixture-token-%s\n' "${*: -1}" ;;
@@ -186,8 +187,12 @@ case "$*" in
   'api --hostname github.example user') printf '{"login":"%s"}\n' "${GH_TOKEN#fixture-token-}" ;;
   'api --hostname github.example user --jq .login') printf '%s\n' "${GH_TOKEN#fixture-token-}" ;;
   'api --hostname github.example / --jq .current_user_url') echo 'https://github.example/api/v3/user' ;;
+  'api --hostname github.example repos/acme/app --jq .id') echo 701 ;;
+  'api --hostname github.example repos/acme/old --jq .id'|'api --hostname github.example repos/AcMe/Old --jq .id'|'api --hostname github.example repos/acme/new --jq .id'|'api --hostname github.example repos/acme/third --jq .id') echo 801 ;;
+  'api --hostname github.example repos/acme/fork --jq .id') echo 802 ;;
   api\ --hostname\ github.example\ --paginate\ -X\ GET\ search/issues*)
     [[ "${GH_TOKEN:-}" == fixture-token-fixture-gh ]] || exit 1
+    if [[ -f "$TEST_ROOT/github-rename-fixture" ]]; then echo '{"items":[]}'; exit 0; fi
     if [[ "$*" == *'type:issue'* ]]; then
       echo '{"items":[{"id":502,"created_at":"2021-02-03T14:00:00Z","repository_url":"https://github.example/api/v3/repos/acme/app"}]}'
     else
@@ -1342,6 +1347,116 @@ echo "PASS: local cache migration retains history without copying transport cred
   [[ "$(git -C "$MIRROR_DIR" log --format=%H --author='<mirror@example.test>' | wc -l | tr -d ' ')" == 3 ]] || fail "filesystem rerun duplicated activity"
 ) || fail "filesystem origins and legacy migration regression"
 echo "PASS: filesystem origin migration, file URI aliases, relative remotes, escaping and fresh sync"
+
+# GitHub repository IDs survive renames, including upgrades from old path/case
+# markers, without suppressing a distinct repository with the same commit SHA.
+(
+  CONFIG_FILE="$TEST_ROOT/github-rename-config" WORK_DIRS="$TEST_ROOT/github-rename-work" SCAN_MODE=in-root SOURCE_COUNT=1
+  MIRROR_DIR="$TEST_ROOT/github-rename-mirror" MIRROR_URL=https://github-rename@github.com/fixture/mirror
+  CACHE_DIR="$TEST_ROOT/github-rename-cache" LOG_DIR="$TEST_ROOT/github-rename-logs" MIRROR_EMAIL=mirror@example.test
+  # Values are read through indexed accessors and greens_save_config.
+  # shellcheck disable=SC2034
+  SOURCE_1_PROVIDER=github SOURCE_1_API_HOST=github.example SOURCE_1_REMOTE_HOSTS=github.example SOURCE_1_ORGANIZATION=acme SOURCE_1_USERNAME=fixture-gh \
+    SOURCE_1_EMAILS=author@example.test SOURCE_1_SINCE=2021-01-01 SOURCE_1_ACTIVITY_TYPES=commits,issues SOURCE_1_ACCESS_MODE=remote
+  git clone --quiet --branch main "$TEST_ROOT/remotes/github-source.git" "$WORK_DIRS/repo"
+  sha="$(git -C "$WORK_DIRS/repo" rev-parse HEAD)"
+  for path in old new third fork; do git config --global --add url."$TEST_ROOT/remotes/github-source.git".insteadOf "git@github.example:acme/$path.git"; done
+  git -C "$WORK_DIRS/repo" remote set-url origin git@github.example:acme/old.git
+  git init --bare --quiet "$TEST_ROOT/remotes/github-rename-mirror.git"
+  git init --quiet "$MIRROR_DIR"
+  git -C "$MIRROR_DIR" symbolic-ref HEAD refs/heads/main
+  git -C "$MIRROR_DIR" remote add origin "$MIRROR_URL"
+  git config --global url."$TEST_ROOT/remotes/github-rename-mirror.git".insteadOf "$MIRROR_URL"
+  greens_save_config "$CONFIG_FILE" WORK_DIRS SCAN_MODE SOURCE_COUNT SOURCE_1_PROVIDER SOURCE_1_API_HOST SOURCE_1_REMOTE_HOSTS SOURCE_1_ORGANIZATION SOURCE_1_USERNAME SOURCE_1_EMAILS SOURCE_1_SINCE SOURCE_1_ACTIVITY_TYPES SOURCE_1_ACCESS_MODE MIRROR_DIR MIRROR_URL CACHE_DIR LOG_DIR MIRROR_EMAIL
+  touch "$TEST_ROOT/github-rename-fixture"
+  FIXTURE_VISIBILITY=PUBLIC run_sync
+  first_tip="$(git -C "$MIRROR_DIR" rev-parse HEAD)"
+  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 1 ]] || fail "GitHub rename initial activity count"
+  git -C "$MIRROR_DIR" log --format=%B | grep -q "$(printf '%s' "github.example/801/commit/$sha" | greens_hash)" || fail "GitHub commit key did not use repository ID"
+  git -C "$WORK_DIRS/repo" remote set-url origin git@github.example:acme/new.git
+  FIXTURE_VISIBILITY=PUBLIC run_sync
+  [[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$first_tip" ]] || fail "GitHub rename replayed unchanged commits"
+  old_key="github.example/AcMe/Old/commit/$sha"
+  GIT_AUTHOR_DATE=2021-02-03T12:30:00Z GIT_COMMITTER_DATE=2021-02-03T12:30:00Z \
+    git -C "$MIRROR_DIR" commit --amend --allow-empty --quiet -m "$(printf 'sync\n\nGreens-Activity: %s' "$(printf '%s' "$old_key" | greens_hash)")"
+  git -C "$MIRROR_DIR" push --force --quiet origin HEAD:refs/heads/main
+  old_path_key="$(printf '%s' github.example/acme/old | greens_hash)"
+  for cached in "$CACHE_DIR"/activity-state/*/"$old_path_key.jsonl"; do
+    [[ -f "$cached" ]] || continue
+    jq -c --arg key "$old_key" 'if .kind=="commits" then .key=$key else . end' "$cached" > "$cached.old"; mv "$cached.old" "$cached"
+  done
+  rm -rf "$CACHE_DIR/github-projects"
+  git -C "$WORK_DIRS/repo" remote set-url origin git@github.example:acme/third.git
+  legacy_tip="$(git -C "$MIRROR_DIR" rev-parse HEAD)"
+  FIXTURE_VISIBILITY=PUBLIC run_sync
+  [[ "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$legacy_tip" ]] || fail "GitHub rename failed to recognize old path/case marker"
+  SOURCE_1_ACTIVITY_TYPES=commits; greens_save_config "$CONFIG_FILE" SOURCE_1_ACTIVITY_TYPES
+  rm -f "$TEST_ROOT/github-source-api-called"; touch "$TEST_ROOT/forbid-github-source-api"
+  FIXTURE_VISIBILITY=PUBLIC run_sync
+  rm "$TEST_ROOT/forbid-github-source-api"
+  [[ ! -e "$TEST_ROOT/github-source-api-called" && "$(git -C "$MIRROR_DIR" rev-parse HEAD)" == "$legacy_tip" ]] || fail "GitHub commits-only transition lost verified repository ID"
+  # shellcheck disable=SC2034
+  SOURCE_1_ACTIVITY_TYPES=commits,issues; greens_save_config "$CONFIG_FILE" SOURCE_1_ACTIVITY_TYPES
+  git -C "$WORK_DIRS/repo" remote set-url origin git@github.example:acme/fork.git
+  FIXTURE_VISIBILITY=PUBLIC run_sync
+  [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 2 ]] || fail "distinct GitHub repository sharing a SHA was suppressed"
+  rm "$TEST_ROOT/github-rename-fixture"
+) || fail "stable GitHub repository commit identities"
+echo "PASS: GitHub renames, pre-ID path/case markers, commits-only transitions and distinct repository identities"
+
+# Both dashboards publish only repository names for filesystem sources. Full
+# identities still distinguish separate remotes that share a basename and SHA.
+for dashboard_schema in indexed legacy; do
+  (
+    CONFIG_FILE="$TEST_ROOT/$dashboard_schema-dashboard-config" WORK_DIR="$TEST_ROOT/$dashboard_schema-dashboard-work" WORK_DIRS="$TEST_ROOT/$dashboard_schema-dashboard-work"
+    private_remotes="$TEST_ROOT/home/alice/Customer-X/$dashboard_schema/remotes"
+    MIRROR_DIR="$TEST_ROOT/$dashboard_schema-dashboard-mirror" MIRROR_URL="https://$dashboard_schema-dashboard@github.com/fixture/mirror"
+    CACHE_DIR="$TEST_ROOT/$dashboard_schema-dashboard-cache" LOG_DIR="$TEST_ROOT/$dashboard_schema-dashboard-logs" MIRROR_EMAIL=mirror@example.test
+    for name in first second; do
+      git clone --bare --quiet "$TEST_ROOT/remotes/github-source.git" "$private_remotes/$name/project.git"
+      git --git-dir="$private_remotes/$name/project.git" symbolic-ref HEAD refs/heads/main
+      git clone --quiet --branch main "$private_remotes/$name/project.git" "$WORK_DIR/$name"
+    done
+    git init --bare --quiet "$TEST_ROOT/remotes/$dashboard_schema-dashboard.git"
+    git init --quiet "$MIRROR_DIR"
+    git -C "$MIRROR_DIR" symbolic-ref HEAD refs/heads/main
+    git -C "$MIRROR_DIR" remote add origin "$MIRROR_URL"
+    git config --global url."$TEST_ROOT/remotes/$dashboard_schema-dashboard.git".insteadOf "$MIRROR_URL"
+    greens_save_config "$CONFIG_FILE" MIRROR_DIR MIRROR_URL CACHE_DIR LOG_DIR MIRROR_EMAIL
+    origin="$(git -C "$WORK_DIR/first" config remote.origin.url)"
+    if [[ "$dashboard_schema" == indexed ]]; then
+      id="$(greens_remote_identity "$origin" 1)"; path="$(greens_remote_path "$id")"
+      # Config values are consumed through indexed accessors.
+      # shellcheck disable=SC2034
+      SOURCE_COUNT=1 SOURCE_1_PROVIDER=git SOURCE_1_API_HOST=file://localhost SOURCE_1_REMOTE_HOSTS=file://localhost SOURCE_1_ORGANIZATION="${path%%/*}" \
+        SOURCE_1_USERNAME='' SOURCE_1_EMAILS=author@example.test SOURCE_1_SINCE=2021-01-01 SOURCE_1_ACTIVITY_TYPES=commits SOURCE_1_ACCESS_MODE=remote
+      greens_save_config "$CONFIG_FILE" WORK_DIRS SOURCE_COUNT SOURCE_1_PROVIDER SOURCE_1_API_HOST SOURCE_1_REMOTE_HOSTS SOURCE_1_ORGANIZATION SOURCE_1_USERNAME SOURCE_1_EMAILS SOURCE_1_SINCE SOURCE_1_ACTIVITY_TYPES SOURCE_1_ACCESS_MODE
+    else
+      # shellcheck disable=SC2034
+      SOURCE_PROVIDER=git REMOTE_PREFIX="${origin%first/project.git}" EMAILS=author@example.test SINCE=2021-01-01 ACTIVITY_TYPES=commits
+      greens_save_config "$CONFIG_FILE" WORK_DIR SOURCE_PROVIDER REMOTE_PREFIX EMAILS SINCE ACTIVITY_TYPES
+    fi
+    FIXTURE_VISIBILITY=PRIVATE run_sync
+    [[ "$(git -C "$MIRROR_DIR" log --author='<mirror@example.test>' --format=%H | wc -l | tr -d ' ')" == 2 ]] || fail "$dashboard_schema filesystem identities were conflated"
+    git --git-dir="$TEST_ROOT/remotes/$dashboard_schema-dashboard.git" show refs/heads/main:README.md > "$TEST_ROOT/$dashboard_schema-published-readme"
+    grep -Fq '| project | 2 |' "$TEST_ROOT/$dashboard_schema-published-readme" || fail "$dashboard_schema dashboard omitted display name"
+    if grep -Eq 'Customer-X|home/alice' "$TEST_ROOT/$dashboard_schema-published-readme"; then fail "$dashboard_schema dashboard published filesystem hierarchy"; fi
+    # Simulate old cached records, then force another published dashboard.
+    for cached in "$CACHE_DIR"/activity-state/*/*.jsonl; do
+      jq -c '.project="home/alice/Customer-X/remotes/project"' "$cached" > "$cached.old"; mv "$cached.old" "$cached"
+    done
+    GIT_AUTHOR_DATE=2021-03-01T12:00:00Z GIT_COMMITTER_DATE=2021-03-01T12:00:00Z \
+      git -C "$WORK_DIR/first" commit --allow-empty --quiet -m 'new filesystem activity'
+    git -C "$WORK_DIR/first" push --quiet origin main
+    FIXTURE_VISIBILITY=PRIVATE run_sync
+    [[ "$(git -C "$MIRROR_DIR" log --author='<mirror@example.test>' --format=%H | wc -l | tr -d ' ')" == 3 ]] || fail "$dashboard_schema cache migration replayed filesystem activity"
+    git --git-dir="$TEST_ROOT/remotes/$dashboard_schema-dashboard.git" show refs/heads/main:README.md > "$TEST_ROOT/$dashboard_schema-published-readme"
+    grep -Fq '| project | 3 |' "$TEST_ROOT/$dashboard_schema-published-readme" || fail "$dashboard_schema cached display names were not normalized"
+    if grep -Eq 'Customer-X|home/alice' "$TEST_ROOT/$dashboard_schema-published-readme"; then fail "$dashboard_schema cached hierarchy was published"; fi
+    jq -es 'all(.[]; (.key|startswith("file://")) and (.key|contains("Customer-X")))' "$CACHE_DIR"/activity-state/*/*.jsonl >/dev/null || fail "$dashboard_schema filesystem identity lost its full path"
+  ) || fail "$dashboard_schema filesystem dashboard privacy"
+done
+echo "PASS: indexed and legacy private dashboards redact filesystem hierarchy, including cached records"
 
 # API-enabled GitLab commit identity survives renames and activity-selection
 # changes. Upgrade aliases must verify IDs, preserving distinct fork projects.

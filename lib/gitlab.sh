@@ -272,79 +272,95 @@ greens_recognize_github_case_markers() {
   done < "$RUN_TMP/github-case-keys"
 }
 
-greens_gitlab_id_file() {
-  printf '%s/gitlab-projects/%s/%s.id\n' "$CACHE_DIR" "$(greens_scheduler_id)" "$(printf '%s' "$1" | greens_hash)"
+greens_project_id_file() {
+  printf '%s/%s-projects/%s/%s.id\n' "$CACHE_DIR" "${2:-gitlab}" "$(greens_scheduler_id)" "$(printf '%s' "$1" | greens_hash)"
 }
 
-greens_gitlab_remember_id() {
-  local identity="$1" id="$2" publish="$3" staged target
-  staged="$RUN_TMP/$(printf '%s' "$identity" | greens_hash).project-id"
-  target="$(greens_gitlab_id_file "$identity")"
+greens_remember_project_id() {
+  local identity="$1" id="$2" publish="$3" provider="${4:-gitlab}" staged target
+  staged="$RUN_TMP/$provider-$(printf '%s' "$identity" | greens_hash).project-id"
+  target="$(greens_project_id_file "$identity" "$provider")"
   printf '%s\n' "$id" > "$staged"
   if ! grep -qxF "$staged"$'\t'"$target" "$publish"; then printf '%s\t%s\n' "$staged" "$target" >> "$publish"; fi
 }
 
 # Keep the last verified ID available when a group later selects commits-only.
-greens_gitlab_commit_identity() {
-  local identity="$1" host="$2" id="$3" publish="$4" cached can_api=0
+greens_project_commit_identity() {
+  local identity="$1" host="$2" id="$3" publish="$4" provider="${5:-gitlab}" username="${6:-}" cached can_api=0
   if [[ "$id" == 0 ]]; then
-    cached="$(greens_gitlab_id_file "$identity")"
+    cached="$(greens_project_id_file "$identity" "$provider")"
     [[ ! -f "$cached" ]] || read -r id < "$cached"
   else can_api=1; fi
   if [[ "$id" =~ ^[0-9]+$ && "$id" -gt 0 ]]; then
-    [[ "$can_api" == 0 ]] || greens_gitlab_remember_id "$identity" "$id" "$publish" || return 1
-    printf '%s\t%s\t%s\t%s\n' "$host" "$id" "$identity" "$can_api" >> "$RUN_TMP/gitlab-projects"
+    [[ "$can_api" == 0 ]] || greens_remember_project_id "$identity" "$id" "$publish" "$provider" || return 1
+    printf '%s\t%s\t%s\t%s\t%s\n' "$host" "$id" "$identity" "$can_api" "$username" >> "$RUN_TMP/$provider-projects"
     printf '%s/%s\n' "$host" "$id"
   else printf '%s\n' "$identity"; fi
 }
 
 # Recognize pre-ID commit markers using retained path caches, but verify each
 # path's project ID before aliasing. Shared SHAs in distinct projects stay apart.
-greens_recognize_gitlab_project_markers() {
-  local records="$1" publish="$2" cached identity host path id meta old_key new_key old_hash
-  [[ -s "$RUN_TMP/gitlab-projects" && -s "$RUN_TMP/known" ]] || return 0
-  : > "$RUN_TMP/gitlab-old-records"; : > "$RUN_TMP/gitlab-verified-paths"
+greens_recognize_project_markers() {
+  local records="$1" publish="$2" provider="${3:-gitlab}" cached identity host path id meta old_key new_key old_hash projects username source_index url repodir
+  projects="$RUN_TMP/$provider-projects"
+  [[ -s "$projects" && -s "$RUN_TMP/known" ]] || return 0
+  : > "$RUN_TMP/project-old-records"; : > "$RUN_TMP/project-verified-paths"
   for cached in "$CACHE_DIR/activity-state/$(greens_scheduler_id)-"*/*.jsonl; do
-    [[ ! -f "$cached" ]] || cat "$cached" >> "$RUN_TMP/gitlab-old-records"
+    [[ ! -f "$cached" ]] || cat "$cached" >> "$RUN_TMP/project-old-records"
   done
-  jq -nr --slurpfile current "$records" --slurpfile old "$RUN_TMP/gitlab-old-records" --rawfile projects "$RUN_TMP/gitlab-projects" '
+  jq -nr --arg provider "$provider" --slurpfile current "$records" --slurpfile old "$RUN_TMP/project-old-records" --rawfile projects "$projects" '
     ($current|map(select(.kind=="commits")|{key:(.key|split("/")|last),value:true})|from_entries) as $sha |
-    ($projects|split("\n")|map(split("\t")|select(length==4))) as $projects |
+    ($projects|split("\n")|map(split("\t")|select(length>=4))) as $projects |
     ($projects[][2]),
     ($old[]|select(.kind=="commits" and $sha[(.key|split("/")|last)]) |
       . as $r | ($r.key|split("/")|first) as $host |
       select(any($projects[]; .[0]==$host)) |
-      select($r.key|startswith($host+"/"+$r.project+"/commit/")) | $host+"/"+$r.project)
-  ' | LC_ALL=C sort -u > "$RUN_TMP/gitlab-old-paths" || return 1
+      if $provider=="github" then
+        ($r.key|split("/")) as $p | select(($p|length)==5 and $p[3]=="commit") | $p[0:3]|join("/")
+      else select($r.key|startswith($host+"/"+$r.project+"/commit/")) | $host+"/"+$r.project end)
+  ' | LC_ALL=C sort -u > "$RUN_TMP/project-old-paths" || return 1
+  if [[ "$provider" == github && -f "$RUN_TMP/mixed-checkouts" ]]; then
+    while IFS=$'\t' read -r source_index identity url repodir; do
+      [[ "$(greens_indexed_value "$source_index" PROVIDER)" == github ]] || continue
+      url="$(git -C "$repodir" config remote.origin.url)" || continue
+      identity="$(greens_remote_identity "$url")" || continue
+      printf '%s/%s\n' "$(greens_indexed_value "$source_index" API_HOST)" "${identity#*/}" >> "$RUN_TMP/project-old-paths"
+    done < "$RUN_TMP/mixed-checkouts"
+    LC_ALL=C sort -u "$RUN_TMP/project-old-paths" > "$RUN_TMP/project-old-paths.sorted"; mv "$RUN_TMP/project-old-paths.sorted" "$RUN_TMP/project-old-paths"
+  fi
   while IFS= read -r identity; do
     host="${identity%%/*}"; path="${identity#*/}"
-    id="$(awk -F '\t' -v identity="$identity" '$3==identity {print $2; exit}' "$RUN_TMP/gitlab-projects")"
-    cached="$(greens_gitlab_id_file "$identity")"
+    id="$(awk -F '\t' -v identity="$identity" -v provider="$provider" '$3==identity || (provider=="github" && tolower($3)==tolower(identity)) {print $2; exit}' "$projects")"
+    cached="$(greens_project_id_file "$identity" "$provider")"
     if [[ -z "$id" && -f "$cached" ]]; then read -r id < "$cached"; fi
-    if [[ -z "$id" ]]; then
+    if [[ -z "$id" && "$provider" == gitlab ]]; then
       id="$(jq -sr --arg host "$host" --arg path "$path" '
         [.[]|select(.kind!="commits" and .project==$path and (.key|startswith($host+"/")))|
-          (.key|split("/"))[1]|select(test("^[0-9]+$"))]|unique|if length==1 then .[0] else empty end' "$RUN_TMP/gitlab-old-records")" || return 1
+          (.key|split("/"))[1]|select(test("^[0-9]+$"))]|unique|if length==1 then .[0] else empty end' "$RUN_TMP/project-old-records")" || return 1
     fi
-    if [[ -z "$id" ]] && awk -F '\t' -v host="$host" '$1==host && $4==1 {found=1} END {exit !found}' "$RUN_TMP/gitlab-projects"; then
-      meta="$RUN_TMP/gitlab-alias-project"
-      if GREENS_FETCH_TIMEOUT=15 greens_run glab api --hostname "$host" "projects/$(jq -nr --arg path "$path" '$path|@uri')" > "$meta" 2>/dev/null; then
+    if [[ -z "$id" ]] && awk -F '\t' -v host="$host" '$1==host && $4==1 {found=1} END {exit !found}' "$projects"; then
+      meta="$RUN_TMP/project-alias-project"
+      if [[ "$provider" == github ]]; then
+        while IFS= read -r username; do
+          if id="$(GREENS_FETCH_TIMEOUT=15 greens_gh_api_as "$host" "$username" "repos/$path" --jq .id 2>/dev/null)"; then break; else id=""; fi
+        done < <(awk -F '\t' -v host="$host" '$1==host && $4==1 && !seen[$5]++ {print $5}' "$projects")
+      elif GREENS_FETCH_TIMEOUT=15 greens_run glab api --hostname "$host" "projects/$(jq -nr --arg path "$path" '$path|@uri')" > "$meta" 2>/dev/null; then
         id="$(jq -er .id "$meta" 2>/dev/null)" || id=""
       fi
     fi
     [[ "$id" =~ ^[0-9]+$ && "$id" -gt 0 ]] || continue
-    printf '%s\t%s\t%s\n' "$host" "$id" "$identity" >> "$RUN_TMP/gitlab-verified-paths"
-    greens_gitlab_remember_id "$identity" "$id" "$publish" || return 1
-  done < "$RUN_TMP/gitlab-old-paths"
-  jq -nr --slurpfile records "$records" --rawfile paths "$RUN_TMP/gitlab-verified-paths" '
+    printf '%s\t%s\t%s\n' "$host" "$id" "$identity" >> "$RUN_TMP/project-verified-paths"
+    greens_remember_project_id "$identity" "$id" "$publish" "$provider" || return 1
+  done < "$RUN_TMP/project-old-paths"
+  jq -nr --slurpfile records "$records" --rawfile paths "$RUN_TMP/project-verified-paths" '
     $paths|split("\n")[]|split("\t")|select(length==3)|. as $p |
     $records[]|select(.kind=="commits" and (.key|startswith($p[0]+"/"+$p[1]+"/commit/"))) |
     [$p[2]+"/commit/"+(.key|split("/")|last),.key]|@tsv
-  ' > "$RUN_TMP/gitlab-marker-aliases" || return 1
+  ' > "$RUN_TMP/project-marker-aliases" || return 1
   while IFS=$'\t' read -r old_key new_key; do
     old_hash="$(printf '%s' "$old_key" | greens_hash)"
     if grep -qxF "$old_hash" "$RUN_TMP/known"; then printf '%s' "$new_key" | greens_hash >> "$RUN_TMP/known"; fi
-  done < "$RUN_TMP/gitlab-marker-aliases"
+  done < "$RUN_TMP/project-marker-aliases"
 }
 
 # Legacy activities are empty commits, including those carrying copied source
@@ -384,7 +400,8 @@ greens_mirror_mixed_records() {
   { git -C "$MIRROR_DIR" log --format=%B HEAD 2>/dev/null || true; } |
     sed -n 's/^Greens-Activity: \([0-9a-f]\{64\}\)$/\1/p' | sort -u > "$RUN_TMP/known"
   greens_recognize_github_case_markers "$records" || return 1
-  greens_recognize_gitlab_project_markers "$records" "$publish" || return 1
+  greens_recognize_project_markers "$records" "$publish" || return 1
+  greens_recognize_project_markers "$records" "$publish" github || return 1
   : > "$RUN_TMP/legacy-epochs"
   if [[ "${GREENS_LEGACY_TIMESTAMPS:-0}" == 1 ]]; then
     greens_legacy_activity_epochs > "$RUN_TMP/legacy-epochs" || return 1
@@ -439,7 +456,7 @@ greens_mixed_sync() {
   sources="$RUN_TMP/mixed-sources"; LC_ALL=C sort -t $'\t' -k2,2 -u "$checkouts" > "$sources"
   greens_validate_local_sources "$checkouts" || return 1
   [[ -s "$sources" ]] || { log "ERROR: no repositories match the configured sources"; return 1; }
-  run_epoch="$(date +%s)"; : > "$RUN_TMP/collected"; : > "$RUN_TMP/publish"; : > "$RUN_TMP/gitlab-projects"
+  run_epoch="$(date +%s)"; : > "$RUN_TMP/collected"; : > "$RUN_TMP/publish"; : > "$RUN_TMP/gitlab-projects"; : > "$RUN_TMP/github-projects"
   export GIT_TERMINAL_PROMPT=0
   export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=2}"
   greens_preflight_mixed_sources "$sources" || return 1
@@ -449,7 +466,7 @@ greens_mixed_sync() {
     EMAILS="$(greens_indexed_value "$source_index" EMAILS)"; SINCE="$(greens_indexed_value "$source_index" SINCE)"; ACTIVITY_TYPES="$(greens_indexed_value "$source_index" ACTIVITY_TYPES)"; ACCESS_MODE="$(greens_source_access_mode "$source_index")"
     transport_only=0; [[ "$ACTIVITY_TYPES" != commits ]] || transport_only=1
     since_epoch="$(greens_epoch "$SINCE")" || { log "ERROR: invalid SINCE for source $source_index"; return 1; }; since_date="${SINCE%% *}"
-    project_path="$(greens_remote_path "$identity")"; key="$(printf '%s' "$identity" | greens_hash)"; bare="$(greens_bare_cache_dir)/$key.git"; source_file="$RUN_TMP/$key.records"; : > "$source_file"
+    project_path="$(greens_project_display_name "$identity")"; key="$(printf '%s' "$identity" | greens_hash)"; bare="$(greens_bare_cache_dir)/$key.git"; source_file="$RUN_TMP/$key.records"; : > "$source_file"
     state_scope="$(printf '%s\n' "$SOURCE_PROVIDER" "$SOURCE_API_HOST" "$SOURCE_ORGANIZATION" "$SOURCE_USERNAME" "$EMAILS" "$SINCE" "$ACTIVITY_TYPES" "$ACCESS_MODE" | greens_hash)"
     state_dir="$CACHE_DIR/activity-state/$(greens_scheduler_id)-$state_scope"; checkpoint_file="$state_dir/$key.checkpoint"
     [[ ! -f "$state_dir/$key.jsonl" ]] || cat "$state_dir/$key.jsonl" >> "$source_file"
@@ -462,13 +479,27 @@ greens_mixed_sync() {
       [[ "$(jq -r .username "$RUN_TMP/user-$source_index")" == "$GITLAB_USERNAME" ]] || { log "ERROR: glab actor mismatch for $GITLAB_HOST"; return 1; }
       if [[ -f "$RUN_TMP/preflight-project-$key" ]]; then cp "$RUN_TMP/preflight-project-$key" "$RUN_TMP/project-$key"; else gitlab_api "projects/$(jq -nr --arg path "$project_path" '$path|@uri')" "$RUN_TMP/project-$key"; fi
       project_id="$(jq -er .id "$RUN_TMP/project-$key")"; project_features="$(jq -r '[(.merge_requests_enabled != false),(.issues_enabled != false)]|join(",")' "$RUN_TMP/project-$key")"
-      cached_project_file="$(greens_gitlab_id_file "$identity")"
+      cached_project_file="$(greens_project_id_file "$identity")"
       if [[ -f "$cached_project_file" ]]; then
         read -r cached_project_id < "$cached_project_file"
         [[ "$cached_project_id" == "$project_id" ]] || : > "$source_file"
       fi
     fi
-    if [[ "$SOURCE_PROVIDER" == gitlab ]]; then commit_identity="$(greens_gitlab_commit_identity "$identity" "$SOURCE_API_HOST" "$project_id" "$RUN_TMP/publish")" || return 1; fi
+    if [[ "$SOURCE_PROVIDER" == gitlab ]]; then commit_identity="$(greens_project_commit_identity "$identity" "$SOURCE_API_HOST" "$project_id" "$RUN_TMP/publish")" || return 1; fi
+    if [[ "$SOURCE_PROVIDER" == github && ",$ACTIVITY_TYPES," == *,commits,* ]]; then
+      if [[ "$ACTIVITY_TYPES" != commits ]]; then
+        project_id="$(greens_gh_api_as "$SOURCE_API_HOST" "$SOURCE_USERNAME" "repos/$project_path" --jq .id)" || return 1
+        [[ "$project_id" =~ ^[0-9]+$ && "$project_id" -gt 0 ]] || { log "ERROR: GitHub repository ID is unavailable"; return 1; }
+        cached_project_file="$(greens_project_id_file "$identity" github)"
+        if [[ -f "$cached_project_file" ]]; then
+          read -r cached_project_id < "$cached_project_file"
+          if [[ "$cached_project_id" != "$project_id" ]]; then
+            jq -c 'select(.kind!="commits")' "$source_file" > "$source_file.previous"; mv "$source_file.previous" "$source_file"
+          fi
+        fi
+      fi
+      commit_identity="$(greens_project_commit_identity "$identity" "$SOURCE_API_HOST" "$project_id" "$RUN_TMP/publish" github "$SOURCE_USERNAME")" || return 1
+    fi
     log "Collecting $SOURCE_PROVIDER $project_path"
     if [[ ",$ACTIVITY_TYPES," == *,commits,* ]]; then
       if [[ "$ACCESS_MODE" == local ]]; then
@@ -520,9 +551,10 @@ greens_mixed_sync() {
       done
       printf '%s %s:%s:%s:%s\n' "$run_epoch" "$ACTIVITY_TYPES" "$since_epoch" "$project_features" "$project_id" > "$RUN_TMP/$key.checkpoint"
     else printf '%s %s:%s:true,true\n' "$run_epoch" "$ACTIVITY_TYPES" "$since_epoch" > "$RUN_TMP/$key.checkpoint"; fi
-    jq -c --arg old "$identity/commit/" --arg new "$commit_identity/commit/" '
+    jq -c --arg old "$identity/commit/" --arg new "$commit_identity/commit/" --arg project "$project_path" --arg provider "$SOURCE_PROVIDER" '
       (if .kind=="commits" and (.key|startswith($old)) then .key=$new+.key[($old|length):] else . end) |
-      select($old==$new or (.key|startswith($new|rtrimstr("commit/"))))' "$source_file" > "$source_file.ids" || return 1
+      select($old==$new or ($provider=="github" and .kind!="commits") or (.key|startswith($new|rtrimstr("commit/")))) |
+      if ($old|startswith("file://")) then .project=$project else . end' "$source_file" > "$source_file.ids" || return 1
     mv "$source_file.ids" "$source_file"
     jq -sc --arg types "$ACTIVITY_TYPES" --argjson since "$since_epoch" --argjson until "$run_epoch" '
       ($types|split(",")) as $types |
@@ -576,7 +608,7 @@ greens_provider_sync() {
   : > "$RUN_TMP/collected"; : > "$RUN_TMP/gitlab-projects"; : > "$RUN_TMP/project-publish"
   while IFS=$'\t' read -r identity url repodir; do
     key="$(printf '%s' "$identity" | greens_hash)"
-    project_path="$(greens_remote_path "$identity")"
+    project_path="$(greens_project_display_name "$identity")"
     bare="$(greens_bare_cache_dir)/$key.git"
     source_file="$RUN_TMP/$key.records"
     : > "$source_file"
@@ -587,14 +619,14 @@ greens_provider_sync() {
       gitlab_api "projects/$(jq -nr --arg path "$project_path" '$path|@uri')" "$RUN_TMP/project"
       project_id="$(jq -er .id "$RUN_TMP/project")"
       project_features="$(jq -r '[(.merge_requests_enabled != false),(.issues_enabled != false)]|join(",")' "$RUN_TMP/project")"
-      cached_project_file="$(greens_gitlab_id_file "$identity")"
+      cached_project_file="$(greens_project_id_file "$identity")"
       if [[ -f "$cached_project_file" ]]; then
         read -r cached_project_id < "$cached_project_file"
         [[ "$cached_project_id" == "$project_id" ]] || : > "$source_file"
       fi
     fi
     commit_identity="$identity"
-    if [[ "$SOURCE_PROVIDER" == gitlab ]]; then commit_identity="$(greens_gitlab_commit_identity "$identity" "$GITLAB_HOST" "$project_id" "$RUN_TMP/project-publish")" || return 1; fi
+    if [[ "$SOURCE_PROVIDER" == gitlab ]]; then commit_identity="$(greens_project_commit_identity "$identity" "$GITLAB_HOST" "$project_id" "$RUN_TMP/project-publish")" || return 1; fi
     log "Collecting $project_path"
     if [[ ",$ACTIVITY_TYPES," == *,commits,* ]]; then
       if [[ ! -d "$bare" ]]; then
@@ -682,9 +714,10 @@ greens_provider_sync() {
         done < "$RUN_TMP/iids"
       done
     fi
-    jq -c --arg old "$identity/commit/" --arg new "$commit_identity/commit/" '
+    jq -c --arg old "$identity/commit/" --arg new "$commit_identity/commit/" --arg project "$project_path" '
       (if .kind=="commits" and (.key|startswith($old)) then .key=$new+.key[($old|length):] else . end) |
-      select($old==$new or (.key|startswith($new|rtrimstr("commit/"))))' "$source_file" > "$source_file.ids" || return 1
+      select($old==$new or (.key|startswith($new|rtrimstr("commit/")))) |
+      if ($old|startswith("file://")) then .project=$project else . end' "$source_file" > "$source_file.ids" || return 1
     mv "$source_file.ids" "$source_file"
     jq -sc 'unique_by(.key)[]' "$source_file" > "$RUN_TMP/$key.jsonl"
     cat "$RUN_TMP/$key.jsonl" >> "$RUN_TMP/collected"
@@ -709,7 +742,7 @@ greens_provider_sync() {
   fi
   { git -C "$MIRROR_DIR" log --format=%B HEAD 2>/dev/null || true; } |
     sed -n 's/^Greens-Activity: \([0-9a-f]\{64\}\)$/\1/p' | sort -u > "$RUN_TMP/known"
-  greens_recognize_gitlab_project_markers "$RUN_TMP/records" "$RUN_TMP/project-publish" || return 1
+  greens_recognize_project_markers "$RUN_TMP/records" "$RUN_TMP/project-publish" || return 1
   # Old timestamp-only histories need a fresh destination or an explicit resync.
   if git -C "$MIRROR_DIR" rev-parse --verify HEAD >/dev/null 2>&1 && [[ ! -s "$RUN_TMP/known" ]]; then
     log "ERROR: destination has history without activity IDs. Use an empty mirror for the new provider."

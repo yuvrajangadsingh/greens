@@ -313,7 +313,7 @@ greens_sources_setup() {
     BEGIN {OFS=FS}
     NR==FNR {p[$1]=$2; a[$1]=$3; next}
     ($1 in p) {
-      path=$3; sub(/^[^:]+:\/\//,"",path); sub(/^[^/]*\//,"",path)
+      path=$3; sub(/^[^:]+:\/\//,"",path); sub(/^[^\/]*\//,"",path)
       if($3 ~ /^ssh:/) sub(/^~\//,"",path)
       sub(/\.git$/,"",path)
       if(p[$1]!="git") {
