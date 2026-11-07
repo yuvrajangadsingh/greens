@@ -635,6 +635,14 @@ greens_remote_host() {
   esac
 }
 
+# Filesystem hierarchy is an identity detail, not a published repository name.
+greens_project_display_name() {
+  local path
+  path="$(greens_remote_path "$1")" || return 1
+  if [[ "$1" == file://* ]]; then greens_uri_path_decode "${path##*/}"
+  else printf '%s\n' "$path"; fi
+}
+
 # Configuration locks protect this namespace, including bare-repo init/fetch.
 # Different configs may intentionally share CACHE_DIR and use different actors.
 greens_bare_cache_dir() {
