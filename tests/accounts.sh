@@ -54,7 +54,7 @@ case "$*" in
   'api --hostname github.com repos/bob/'*) echo '{"private":true,"default_branch":"main"}' ;;
   'api --hostname '*' users/team --jq .type') echo Organization ;;
   'api --hostname '*' users/otherteam --jq .type') echo Organization ;;
-  'api --hostname '*' --paginate -X GET search/issues'*)
+  'api --hostname '*' -X GET search/issues'*)
     printf '%s\n' "$*" >> "$ACCOUNT_TEST/github-queries"
     if [[ "$*" == *org:otherteam* ]]; then
       echo '{"items":[{"id":99,"created_at":"2021-01-02T12:00:00Z","repository_url":"https://api.github.com/repos/otherteam/repo"}]}'

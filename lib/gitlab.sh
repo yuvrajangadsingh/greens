@@ -99,24 +99,57 @@ greens_mixed_discover_sources() {
   greens_mixed_discover_checkouts | cut -f1-3 | LC_ALL=C sort -t $'\t' -k2,2 -u
 }
 
+github_search_window() {
+  local query="$1" field="$2" from="$3" to="$4" output="$5" q total mid
+  q="$query $field:$(greens_utc_date "$from")..$(greens_utc_date "$to")"
+  # The first page carries the count. Search stops at 1,000 results per
+  # query, so a window with more is split instead of paged through.
+  # ponytail: no pacing, so thousands of results per type can still hit the
+  # 30 searches a minute limit; back off on Retry-After if that shows up.
+  if ! greens_gh_api_as "$SOURCE_API_HOST" "$SOURCE_USERNAME" -X GET search/issues \
+      -f q="$q" -f per_page=100 > "$output.window"; then
+    log "ERROR: GitHub request failed for $SOURCE_API_HOST/$SOURCE_ORGANIZATION" >&2
+    return 1
+  fi
+  total="$(jq '.total_count // 0' "$output.window")"
+  if ((total > 100 && total <= 1000)); then
+    if ! greens_gh_api_as "$SOURCE_API_HOST" "$SOURCE_USERNAME" --paginate -X GET search/issues \
+        -f q="$q" -f per_page=100 -f page=2 >> "$output.window"; then
+      log "ERROR: GitHub request failed for $SOURCE_API_HOST/$SOURCE_ORGANIZATION" >&2
+      return 1
+    fi
+    total="$(jq -s 'map(.total_count // 0) | max // 0' "$output.window")"
+  fi
+  if ((total > 1000)); then
+    ((to > from)) || { log "ERROR: over 1,000 GitHub results in one second for $SOURCE_API_HOST/$SOURCE_ORGANIZATION" >&2; return 1; }
+    mid=$(((from + to) / 2))
+    github_search_window "$query" "$field" "$from" "$mid" "$output" &&
+      github_search_window "$query" "$field" "$((mid + 1))" "$to" "$output"
+    return
+  fi
+  # A search that times out still answers, with only what it found so far.
+  if jq -se 'any(.[]; .incomplete_results == true)' "$output.window" > /dev/null; then
+    log "ERROR: GitHub search timed out for $SOURCE_API_HOST/$SOURCE_ORGANIZATION; the next run retries" >&2
+    return 1
+  fi
+  cat "$output.window" >> "$output.raw"
+}
+
 github_api_records() {
   local kind="$1" output="$2" owner_type="$3" query date_field label qualifier
   case "$owner_type" in
     User) qualifier="user:$SOURCE_ORGANIZATION" ;;
     Organization) qualifier="org:$SOURCE_ORGANIZATION" ;;
-    *) log "ERROR: unsupported GitHub owner type for $SOURCE_API_HOST/$SOURCE_ORGANIZATION: $owner_type"; return 1 ;;
+    *) log "ERROR: unsupported GitHub owner type for $SOURCE_API_HOST/$SOURCE_ORGANIZATION: $owner_type" >&2; return 1 ;;
   esac
   case "$kind" in
-    prs) query="type:pr author:$SOURCE_USERNAME $qualifier created:>=$since_date"; date_field=created_at; label="prs" ;;
-    issues) query="type:issue author:$SOURCE_USERNAME $qualifier created:>=$since_date"; date_field=created_at; label="issues" ;;
-    reviews) query="type:pr reviewed-by:$SOURCE_USERNAME $qualifier updated:>=$since_date"; date_field=updated_at; label="reviews" ;;
+    prs) query="type:pr author:$SOURCE_USERNAME $qualifier"; date_field=created_at; label="prs" ;;
+    issues) query="type:issue author:$SOURCE_USERNAME $qualifier"; date_field=created_at; label="issues" ;;
+    reviews) query="type:pr reviewed-by:$SOURCE_USERNAME $qualifier"; date_field=updated_at; label="reviews" ;;
     *) return 1 ;;
   esac
-  if ! greens_gh_api_as "$SOURCE_API_HOST" "$SOURCE_USERNAME" --paginate -X GET search/issues \
-      -f q="$query" -f per_page=100 > "$output.raw"; then
-    log "ERROR: GitHub request failed for $SOURCE_API_HOST/$SOURCE_ORGANIZATION"
-    return 1
-  fi
+  : > "$output.raw"
+  github_search_window "$query" "${date_field%_at}" "$since_epoch" "$run_epoch" "$output" || return 1
   jq -sc --arg host "$SOURCE_API_HOST" --arg org "$SOURCE_ORGANIZATION" \
     --arg kind "$label" --arg date_field "$date_field" --argjson since "$since_epoch" --argjson until "$run_epoch" '
     [.[].items[]?] | unique_by(.id)[] |
@@ -446,7 +479,7 @@ greens_mixed_sync() {
   local sources checkouts source_index identity url key bare source_file state_scope state_dir checkpoint_file repodir
   local SOURCE_PROVIDER SOURCE_API_HOST SOURCE_ORGANIZATION SOURCE_USERNAME EMAILS SINCE ACTIVITY_TYPES ACCESS_MODE
   local GITLAB_HOST GITLAB_USERNAME project_path project_id project_features gitlab_user_id api_enabled
-  local since_epoch since_date run_epoch lower updated old_types checkpoint kind objects iid object_file pid failed count event_file owner_type transport_only
+  local since_epoch run_epoch lower updated old_types checkpoint kind objects iid object_file pid failed count event_file owner_type transport_only
   local commit_identity cached_project_id cached_project_file
   local -a workers
   umask 077
@@ -465,7 +498,7 @@ greens_mixed_sync() {
     SOURCE_ORGANIZATION="$(greens_indexed_value "$source_index" ORGANIZATION)"; SOURCE_USERNAME="$(greens_indexed_value "$source_index" USERNAME)"
     EMAILS="$(greens_indexed_value "$source_index" EMAILS)"; SINCE="$(greens_indexed_value "$source_index" SINCE)"; ACTIVITY_TYPES="$(greens_indexed_value "$source_index" ACTIVITY_TYPES)"; ACCESS_MODE="$(greens_source_access_mode "$source_index")"
     transport_only=0; [[ "$ACTIVITY_TYPES" != commits ]] || transport_only=1
-    since_epoch="$(greens_epoch "$SINCE")" || { log "ERROR: invalid SINCE for source $source_index"; return 1; }; since_date="${SINCE%% *}"
+    since_epoch="$(greens_epoch "$SINCE")" || { log "ERROR: invalid SINCE for source $source_index"; return 1; }
     project_path="$(greens_project_display_name "$identity")"; key="$(printf '%s' "$identity" | greens_hash)"; bare="$(greens_bare_cache_dir)/$key.git"; source_file="$RUN_TMP/$key.records"; : > "$source_file"
     state_scope="$(printf '%s\n' "$SOURCE_PROVIDER" "$SOURCE_API_HOST" "$SOURCE_ORGANIZATION" "$SOURCE_USERNAME" "$EMAILS" "$SINCE" "$ACTIVITY_TYPES" "$ACCESS_MODE" | greens_hash)"
     state_dir="$CACHE_DIR/activity-state/$(greens_scheduler_id)-$state_scope"; checkpoint_file="$state_dir/$key.checkpoint"
