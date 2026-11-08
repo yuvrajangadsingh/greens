@@ -533,6 +533,9 @@ greens_sources_setup() {
   # Retain legacy GITHUB_TOKEN: it may be the only saved source credential.
   # Fresh sync processes load it from this owner-only config as before.
   greens_replace_config "$CONFIG_FILE" '^(WORK_DIRS?|SCAN_MODE|SOURCE_PROVIDER|SOURCE_COUNT|SOURCE_[0-9]+_.*|REMOTE_PREFIX|GITHUB_(ORG|USERNAME)|GITLAB_(HOST|REMOTE_HOST|USERNAME)|EMAILS|SINCE|ACTIVITY_TYPES|PERSONAL_GH_USER|MIRROR_(EMAIL|NAME|URL|DIR)|COPY_MESSAGES(_ACK)?|SCHEDULER|SYNC_HOUR|GREENS_LEGACY_(TIMESTAMPS|COPIED_MESSAGES))$' "${save_keys[@]}"
+  # The directory may only exist now. Resolve the path again so the scheduler
+  # ID matches the one every later run derives from it.
+  CONFIG_FILE="$(greens_config_path "$CONFIG_FILE")"
   ok "Saved configuration to $CONFIG_FILE"
   sync_path="$(greens_sync_path "$SCRIPT_DIR/sync.sh")"
   if confirm "Run the initial sync now?"; then
