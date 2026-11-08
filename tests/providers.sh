@@ -88,7 +88,7 @@ if [[ -f "$TEST_ROOT/project-checkpoint-fixture" ]]; then
       else echo '{"id":17,"merge_requests_enabled":false}'; fi; exit 0 ;;
     projects/1[78]/issues\?*)
       project="${4#projects/}"; project="${project%%/*}"
-      if [[ "$4" == *updated_after=2021-01-01* ]]; then
+      if [[ "$4" == *"updated_after=$FIXTURE_SINCE_UTC"* ]]; then
         printf '[{"id":%s01,"iid":1,"author":{"id":42},"created_at":"2021-02-03T12:00:00Z"}]\n' "$project"
       else echo '[]'; fi; exit 0 ;;
     projects/1[78]/issues/1/discussions*)
@@ -1607,6 +1607,8 @@ for schema in indexed legacy; do
       SOURCE_PROVIDER=gitlab GITLAB_HOST=forge.example GITLAB_USERNAME=fixture EMAILS=author@example.test SINCE=2021-01-01 ACTIVITY_TYPES=issues,comments
       greens_save_config "$CONFIG_FILE" WORK_DIR SOURCE_PROVIDER GITLAB_HOST GITLAB_USERNAME EMAILS SINCE ACTIVITY_TYPES
     fi
+    # SINCE is local midnight, so its UTC form depends on the timezone running the tests.
+    export FIXTURE_SINCE_UTC; FIXTURE_SINCE_UTC="$(greens_utc_date "$(greens_epoch 2021-01-01)")"
     touch "$TEST_ROOT/project-checkpoint-fixture"
     FIXTURE_VISIBILITY=PUBLIC run_sync
     [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 2 ]] || fail "$schema initial issue/discussion collection"
