@@ -236,6 +236,22 @@ grep -q 'Add another work directory' "$TEST_ROOT/dialog-output" || fail "setup d
 if grep -qE 'separate GitHub accounts|Work GitHub org/owner name' "$TEST_ROOT/dialog-output"; then
   fail "GitLab-only setup displayed GitHub source prompts"
 fi
+# First use into a config directory that doesn't exist yet: setup's job and
+# the first sync must use the ID that later runs derive once it exists.
+(
+  cd "$TEST_ROOT"
+  {
+    printf '%s\n\nforge.example\nauthor@example.test\ncommits, mrs, issues, prs, commits\nfixture\n2021-01-01\n' "$WORK_DIR"
+    printf 'fixture\nmirror@example.test\ngreens\n'
+    printf 'https://github.com/fixture/mirror\n%s\ncron\n0\nn\n' "$TEST_ROOT/fresh-mirror"
+  } | SCAN_MODE=in-root ACTIVITY_TYPES=commits,prs,issues CONTRIB_MIRROR_CONFIG=./fresh-profile/config bash "$ROOT/sync.sh" > "$TEST_ROOT/fresh-output" 2>&1 || {
+    cat "$TEST_ROOT/fresh-output"; fail "first use into a new config directory";
+  }
+  CONFIG_FILE="$(greens_config_path ./fresh-profile/config)"
+  crontab -l | grep -q "# $(greens_scheduler_id)$" || fail "setup installed its job under another ID: $(crontab -l)"
+  [[ -f "$(LOG_DIR="$HOME/.contrib-mirror/logs" greens_stamp_path)" ]] || fail "first sync recorded success under another ID: $(ls "$HOME/.contrib-mirror/logs")"
+  greens_remove_cron
+)
 
 # Older setup versions could leave an early default before the latest saved
 # value. Loading must use the last assignment and the next save must clean it.

@@ -1210,6 +1210,9 @@ SINCE="$since"; SYNC_HOUR="$sync_hour"
 greens_save_config "$CONFIG_FILE" SOURCE_PROVIDER WORK_DIR EMAILS REMOTE_PREFIX MIRROR_DIR \
   GITHUB_USERNAME PERSONAL_GH_USER MIRROR_EMAIL MIRROR_NAME ACTIVITY_TYPES \
   COPY_MESSAGES COPY_MESSAGES_ACK SINCE SYNC_HOUR
+# The directory may only exist now. Resolve the path again so the scheduler
+# ID matches the one every later run derives from it.
+CONFIG_FILE="$(greens_config_path "$CONFIG_FILE")"
 if [[ -n "${DETECTED_TOKEN:-}" ]]; then
   # shellcheck disable=SC2034
   GITHUB_TOKEN="$DETECTED_TOKEN"

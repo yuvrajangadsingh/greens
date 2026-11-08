@@ -1210,6 +1210,8 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
   if [[ ! -f "$CONFIG_FILE" ]]; then
     exit 1
   fi
+  # Setup may have just created the directory; derive IDs from the resolved path, as setup did.
+  CONFIG_FILE="$(greens_config_path "$CONFIG_FILE")"
   # Reload config written by setup
   # shellcheck source=/dev/null
   greens_source_config "$CONFIG_FILE"
