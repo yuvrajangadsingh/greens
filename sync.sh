@@ -1428,7 +1428,7 @@ fetch_github_activity() {
   # PRs created
   if [[ "$ACTIVITY_TYPES" == *"prs"* ]]; then
     greens_gh_as "${GH_HOST:-github.com}" "$GITHUB_USERNAME" greens_run gh search prs --author="$GITHUB_USERNAME" --created=">=$since_date" \
-      --owner="$org" --json createdAt --jq '.[].createdAt' 2>/dev/null | \
+      --owner="$org" --limit 1000 --json createdAt --jq '.[].createdAt' 2>/dev/null | \
       while read -r ts; do
         if [[ -n "$ts" ]]; then iso_to_git_format "$ts"; fi
       done
@@ -1437,7 +1437,7 @@ fetch_github_activity() {
   # PR reviews
   if [[ "$ACTIVITY_TYPES" == *"reviews"* ]]; then
     greens_gh_as "${GH_HOST:-github.com}" "$GITHUB_USERNAME" greens_run gh search prs --reviewed-by="$GITHUB_USERNAME" --updated=">=$since_date" \
-      --owner="$org" --json updatedAt --jq '.[].updatedAt' 2>/dev/null | \
+      --owner="$org" --limit 1000 --json updatedAt --jq '.[].updatedAt' 2>/dev/null | \
       while read -r ts; do
         if [[ -n "$ts" ]]; then iso_to_git_format "$ts"; fi
       done
@@ -1446,7 +1446,7 @@ fetch_github_activity() {
   # Issues created
   if [[ "$ACTIVITY_TYPES" == *"issues"* ]]; then
     greens_gh_as "${GH_HOST:-github.com}" "$GITHUB_USERNAME" greens_run gh search issues --author="$GITHUB_USERNAME" --created=">=$since_date" \
-      --owner="$org" --json createdAt --jq '.[].createdAt' 2>/dev/null | \
+      --owner="$org" --limit 1000 --json createdAt --jq '.[].createdAt' 2>/dev/null | \
       while read -r ts; do
         if [[ -n "$ts" ]]; then iso_to_git_format "$ts"; fi
       done
@@ -1472,7 +1472,7 @@ fetch_github_activity_with_messages() {
 
   if [[ "$ACTIVITY_TYPES" == *"prs"* ]]; then
     greens_gh_as "${GH_HOST:-github.com}" "$GITHUB_USERNAME" greens_run gh search prs --author="$GITHUB_USERNAME" --created=">=$since_date" \
-      --owner="$org" --json createdAt --jq '.[].createdAt' 2>/dev/null | \
+      --owner="$org" --limit 1000 --json createdAt --jq '.[].createdAt' 2>/dev/null | \
       while read -r ts; do
         if [[ -n "$ts" ]]; then printf '%s\tPR activity\n' "$(iso_to_git_format "$ts")"; fi
       done
@@ -1480,7 +1480,7 @@ fetch_github_activity_with_messages() {
 
   if [[ "$ACTIVITY_TYPES" == *"reviews"* ]]; then
     greens_gh_as "${GH_HOST:-github.com}" "$GITHUB_USERNAME" greens_run gh search prs --reviewed-by="$GITHUB_USERNAME" --updated=">=$since_date" \
-      --owner="$org" --json updatedAt --jq '.[].updatedAt' 2>/dev/null | \
+      --owner="$org" --limit 1000 --json updatedAt --jq '.[].updatedAt' 2>/dev/null | \
       while read -r ts; do
         if [[ -n "$ts" ]]; then printf '%s\tReview activity\n' "$(iso_to_git_format "$ts")"; fi
       done
@@ -1488,7 +1488,7 @@ fetch_github_activity_with_messages() {
 
   if [[ "$ACTIVITY_TYPES" == *"issues"* ]]; then
     greens_gh_as "${GH_HOST:-github.com}" "$GITHUB_USERNAME" greens_run gh search issues --author="$GITHUB_USERNAME" --created=">=$since_date" \
-      --owner="$org" --json createdAt --jq '.[].createdAt' 2>/dev/null | \
+      --owner="$org" --limit 1000 --json createdAt --jq '.[].createdAt' 2>/dev/null | \
       while read -r ts; do
         if [[ -n "$ts" ]]; then printf '%s\tIssue activity\n' "$(iso_to_git_format "$ts")"; fi
       done
