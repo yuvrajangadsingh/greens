@@ -59,7 +59,9 @@ case "$*" in
     if [[ "$*" == *org:otherteam* ]]; then
       echo '{"items":[{"id":99,"created_at":"2021-01-02T12:00:00Z","repository_url":"https://api.github.com/repos/otherteam/repo"}]}'
     else echo '{"items":[]}'; fi ;;
-  'search issues --author=alice '*|'search issues --author=ALICE '*) [[ "$GH_TOKEN" == fixture-alice ]] || exit 1; echo '2021-01-02T12:00:00Z' ;;
+  'search issues --author=alice '*|'search issues --author=ALICE '*)
+    # The CLI returns 30 results unless asked for more; 1,000 is the API's cap.
+    [[ "$GH_TOKEN" == fixture-alice && "$*" == *' --limit 1000 '* ]] || exit 1; echo '2021-01-02T12:00:00Z' ;;
   'repo view '*) echo PUBLIC ;;
   'api --hostname '*' probe/'*)
     actor="${4#probe/}"
