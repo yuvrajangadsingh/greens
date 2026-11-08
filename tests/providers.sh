@@ -190,7 +190,7 @@ case "$*" in
   'api --hostname github.example repos/acme/app --jq .id') echo 701 ;;
   'api --hostname github.example repos/acme/old --jq .id'|'api --hostname github.example repos/AcMe/Old --jq .id'|'api --hostname github.example repos/acme/new --jq .id'|'api --hostname github.example repos/acme/third --jq .id') echo 801 ;;
   'api --hostname github.example repos/acme/fork --jq .id') echo 802 ;;
-  api\ --hostname\ github.example\ --paginate\ -X\ GET\ search/issues*)
+  api\ --hostname\ github.example\ *-X\ GET\ search/issues*)
     [[ "${GH_TOKEN:-}" == fixture-token-fixture-gh ]] || exit 1
     if [[ -f "$TEST_ROOT/github-rename-fixture" ]]; then echo '{"items":[]}'; exit 0; fi
     if [[ "$*" == *'type:issue'* ]]; then
@@ -464,6 +464,37 @@ SCAN_MODE=in-root
 [[ "$(greens_mixed_discover_sources | wc -l | tr -d ' ')" == 2 ]] || fail "mixed discovery ignored in-root mode"
 SCAN_MODE=recursive
 [[ "$(greens_mixed_discover_sources | wc -l | tr -d ' ')" == 2 ]] || fail "mixed discovery did not deduplicate recursive checkouts"
+# GitHub search stops at 1,000 results, so a window reporting more is split in two.
+(
+  SOURCE_API_HOST=github.example SOURCE_USERNAME=fixture-gh SOURCE_ORGANIZATION=acme
+  since_epoch=1609459200 run_epoch=1612137600
+  # The month reports 1,500 results and its second half 150; the first half
+  # has one. Each response holds one record, dated at its window's start.
+  greens_gh_api_as() {
+    local arg q from mode=one total=1
+    for arg; do
+      case "$arg" in q=*) q="${arg#q=}" ;; --paginate) mode=all ;; page=*) mode="$mode from ${arg#page=}" ;; esac
+    done
+    printf '%s %s\n' "$mode" "${q##*created:}" >> "$TEST_ROOT/split-queries"
+    from="${q##*created:}"; from="${from%%..*}"
+    [[ "$from" == *T*Z ]] || from=2021-01-10T00:00:00Z
+    case "$q" in *2021-01-01T00:00:00Z..2021-02-01T00:00:00Z) total=1500 ;; *2021-01-16T12:00:01Z..*) total=150 ;; esac
+    printf '{"total_count":%s,"items":[{"id":%s,"created_at":"%s","repository_url":"https://github.example/api/v3/repos/acme/app"}]}\n' \
+      "$total" "${from//[!0-9]/}${mode//[!0-9]/}" "$from"
+  }
+  github_api_records prs "$TEST_ROOT/split" User > "$TEST_ROOT/split-records"
+  # One page each for the month and its halves; only the 150-result half pages on from page 2.
+  printf '%s\n' 'one 2021-01-01T00:00:00Z..2021-02-01T00:00:00Z' 'one 2021-01-01T00:00:00Z..2021-01-16T12:00:00Z' \
+    'one 2021-01-16T12:00:01Z..2021-02-01T00:00:00Z' 'all from 2 2021-01-16T12:00:01Z..2021-02-01T00:00:00Z' > "$TEST_ROOT/split-expected"
+  cmp -s "$TEST_ROOT/split-queries" "$TEST_ROOT/split-expected" || fail "search over 1,000 results was not split into adjacent windows: $(cat "$TEST_ROOT/split-queries")"
+  [[ "$(jq -r .date "$TEST_ROOT/split-records" | tr '\n' '|')" == '2021-01-01 00:00:00 +0000|2021-01-16 12:00:01 +0000|2021-01-16 12:00:01 +0000|' ]] ||
+    fail "split search lost records: $(cat "$TEST_ROOT/split-records")"
+  # A search that timed out must fail, and say so on stderr, not in the records.
+  greens_gh_api_as() { echo '{"total_count":5,"incomplete_results":true,"items":[]}'; }
+  log() { printf '%s\n' "$*"; }
+  if github_api_records prs "$TEST_ROOT/timeout" User > "$TEST_ROOT/timeout-out" 2> "$TEST_ROOT/timeout-err"; then fail "accepted a search that timed out"; fi
+  { grep -q 'timed out' "$TEST_ROOT/timeout-err" && [[ ! -s "$TEST_ROOT/timeout-out" ]]; } || fail "search timeout was not reported on stderr"
+)
 printf 'personal-gh\n' > "$TEST_ROOT/github-example-active"
 FIXTURE_VISIBILITY=PUBLIC run_sync
 [[ "$(git -C "$MIRROR_DIR" log --format=%B | grep -c '^Greens-Activity: ')" == 13 ]] || { cat "$TEST_ROOT/output"; fail "mixed provider activity count"; }
