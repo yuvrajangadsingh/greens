@@ -1176,6 +1176,7 @@ echo "PASS: cron preserves setup PATH with spaces and percent signs"
   grep -q 'Initial sync failed' "$TEST_ROOT/initial-failure-output" || fail "initial sync failure was hidden"
   grep -q 'Setup saved, but the initial sync failed' "$TEST_ROOT/initial-failure-output" || fail "fresh setup did not finish"
   if grep -q 'Setup complete' "$TEST_ROOT/initial-failure-output"; then fail "fresh setup reported success after a failed sync"; fi
+  grep -q 'Include private contributions on my profile' "$TEST_ROOT/initial-failure-output" || fail "setup did not mention the private contributions setting"
   CONFIG_FILE="$alias_failure_config"
   schedule_id="$(greens_scheduler_id)"
   crontab -l | grep "# $schedule_id$" > "$TEST_ROOT/failure-schedule"
