@@ -63,6 +63,12 @@ fi
 # Source config file if it exists
 # shellcheck disable=SC1090
 [[ -f "$CONFIG_FILE" ]] && greens_source_config "$CONFIG_FILE"
+# Matches what setup treats as legacy: no sources, but a legacy field set
+# before the defaults below fill them in.
+greens_pre19_config=0
+if [[ "${SOURCE_COUNT:-0}" -eq 0 && "${SOURCE_PROVIDER:-github}" == github && -n "${WORK_DIR:-}${SOURCE_PROVIDER:-}${REMOTE_PREFIX:-}" ]]; then
+  greens_pre19_config=1
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Atomic config writes. The config can hold a PAT; every write path is
@@ -1051,6 +1057,9 @@ case "${1:-}" in
     if [[ "${SOURCE_COUNT:-0}" -eq 0 && "${SOURCE_PROVIDER:-github}" != gitlab ]]; then
       echo "  Remote prefix: ${REMOTE_PREFIX:-not set}"
     fi
+    if [[ "$greens_pre19_config" == 1 ]]; then
+      echo "  Format:       pre-1.9 (run greens --setup once to convert it)"
+    fi
     if [[ "${SOURCE_COUNT:-0}" -eq 0 ]]; then
       echo "  Emails:       ${EMAILS:-not set}"
     fi
@@ -1576,6 +1585,7 @@ if [[ "${SOURCE_PROVIDER:-github}" == gitlab || "${SOURCE_PROVIDER:-github}" == 
   exit
 fi
 
+if [[ "$greens_pre19_config" == 1 ]]; then log "This config uses the pre-1.9 format. Run greens --setup once to convert it; your current settings are offered as defaults."; fi
 log "Starting contribution mirror sync"
 log ""
 log "Step 1/5: Finding work repos in $WORK_DIR"
