@@ -21,7 +21,7 @@ while [[ -L "$SCRIPT_SOURCE" ]]; do
   esac
 done
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd)"
-VERSION="1.8.2"
+VERSION="1.9.0"
 
 # Config file location. Config uses ${VAR:-value} so env vars take precedence.
 CONFIG_FILE="${CONTRIB_MIRROR_CONFIG:-$HOME/.contrib-mirror/config}"
