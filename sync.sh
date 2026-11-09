@@ -947,6 +947,7 @@ case "${1:-}" in
              echo "             Configure recursive scanning or immediate child folders only"
              echo "  --status   Show current config and sync status"
              echo "  --resync   Wipe mirror history (local + remote) and sync fresh"
+             echo "             (pre-1.9 GitHub configs only)"
              echo "  --privacy-migrate [--keep-messages]"
              echo "             Scrub the mirror history: rewrite it so the dashboard README,"
              echo "             old identities and copied messages are removed from the"
