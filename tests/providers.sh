@@ -227,6 +227,7 @@ dialog_config="$TEST_ROOT/dialog/config"
 bash -c 'source "$1"; [[ "$SCAN_MODE" == in-root && "$SOURCE_COUNT" == 1 && "$SOURCE_1_PROVIDER" == gitlab && "$SOURCE_1_API_HOST" == forge.example && "$SOURCE_1_ACTIVITY_TYPES" == commits,mrs,issues && "$MIRROR_EMAIL" == mirror@example.test && "$SCHEDULER" == manual && -z "${SOURCE_PROVIDER:-}" ]]' bash "$dialog_config" || fail "dialog did not persist choices"
 grep -q 'Activity types for forge.example/team \[commits,mrs,issues\]' "$TEST_ROOT/dialog-output" || fail "GitLab setup did not migrate prs to mrs"
 CONTRIB_MIRROR_CONFIG="$dialog_config" bash "$ROOT/sync.sh" --status > "$TEST_ROOT/in-root-status"
+if grep -q 'pre-1.9' "$TEST_ROOT/in-root-status"; then fail "current-format status called the config pre-1.9"; fi
 grep -Fq "$WORK_DIR (1 repos)" "$TEST_ROOT/in-root-status" || fail "status ignored in-root scan mode"
 dialog_hash="$(git hash-object "$dialog_config")"
 printf 'n\n' | CONTRIB_MIRROR_CONFIG="$dialog_config" bash "$ROOT/setup.sh" > "$TEST_ROOT/dialog-rerun-output" 2>&1 || fail "setup rerun summary"

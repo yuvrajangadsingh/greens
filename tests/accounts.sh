@@ -367,6 +367,9 @@ grep -qx username=url-user "$ACCOUNT_TEST/url-credentials" || fail "commit-only 
     cat "$ACCOUNT_TEST/legacy-output"; fail "legacy account isolation";
   }
   [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 2 ]] || fail "legacy source API activity was skipped"
+  grep -q 'pre-1.9 format. Run greens --setup' "$ACCOUNT_TEST/legacy-output" || fail "legacy sync did not suggest converting the config"
+  CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$ROOT/sync.sh" --status > "$ACCOUNT_TEST/legacy-status" 2>&1
+  grep -qF 'Format:       pre-1.9 (run greens --setup once to convert it)' "$ACCOUNT_TEST/legacy-status" || { cat "$ACCOUNT_TEST/legacy-status"; fail "legacy status did not show the old format"; }
   if grep -q 'Cloning source.git' "$ACCOUNT_TEST/legacy-output"; then fail "upgrade did not reuse its existing bare cache"; fi
   [[ -d "$CACHE_DIR/bare/$(greens_scheduler_id)/source.git" ]] || fail "upgrade cache was not namespaced"
   rm "$ACCOUNT_TEST/no-personal-cli"
