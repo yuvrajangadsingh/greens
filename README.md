@@ -8,7 +8,7 @@ If you commit to private/org repos all day but your GitHub profile looks empty, 
   <img src="assets/demo.svg" alt="greens demo" width="600">
 </p>
 
-> Windows 10/11 support is in beta in v1.8.0. If you try it on a real machine, please share results in [Discussions](https://github.com/yuvrajangadsingh/greens/discussions) for reports and [Issues](https://github.com/yuvrajangadsingh/greens/issues) for bugs.
+> Windows 10/11 support is in beta. If you try it on a real machine, please share results in [Discussions](https://github.com/yuvrajangadsingh/greens/discussions) for reports and [Issues](https://github.com/yuvrajangadsingh/greens/issues) for bugs.
 
 ## Install
 
@@ -64,13 +64,16 @@ authentication, scheduling, and troubleshooting.
 
 
 <details>
-<summary>Manual install (any OS)</summary>
+<summary>Manual install (macOS/Linux)</summary>
 
 ```bash
 git clone https://github.com/yuvrajangadsingh/greens.git
 cd greens
-bash setup.sh
+bash install.sh --local
 ```
+
+This links the checkout into ~/.local/bin and starts setup. Keep the checkout
+in place and add ~/.local/bin to PATH. On Windows, use the steps above.
 
 </details>
 
@@ -88,7 +91,7 @@ Then just run `greens` (macOS/Linux) or `greens.cmd` (Windows). Setup wizard run
 
 No source code, file paths, branch names, or messages ever leave your machine (messages only if you explicitly opt in to copying commit subjects). Work repo **names** appear in exactly one place — the dashboard README — and that is only written while the mirror is positively verified private via the GitHub CLI. Public or unverifiable mirrors get empty commits and nothing else.
 
-**Works with any git remote.** Your source repos can be on GitHub, GitLab, Bitbucket, or self-hosted. greens scans the local clone, not the remote. The mirror destination is GitHub (GitLab/Bitbucket mirror support is [planned](https://github.com/yuvrajangadsingh/greens/issues/1)).
+**Works with any git remote.** Your source repos can be on GitHub, GitLab, Bitbucket, or self-hosted. greens finds them through your local clones and fetches history from each clone's remote. A local-only source reads its clones (commits only) and never fetches from that source's remote. The mirror destination is GitHub (GitLab/Bitbucket mirror support is [planned](https://github.com/yuvrajangadsingh/greens/issues/1)).
 
 ## Usage
 
@@ -352,7 +355,7 @@ run `FORCE=1 greens`.
 | "clone failed" | Check SSH access: `ssh -T git@github.com` |
 | "gh CLI not authenticated" | Run `gh auth login --hostname HOST` for every configured GitHub host |
 | "glab actor mismatch" | Run `glab auth login --hostname HOST` with the configured GitLab actor |
-| Empty contribution graph | Wait 24h for GitHub to update, or check mirror repo has commits |
+| Empty contribution graph | Wait 24h for GitHub to update and check the mirror has commits. For a private mirror, turn on Private contributions (your profile page, Contribution settings above the calendar). Commits count only if `MIRROR_EMAIL` is an email on your GitHub account or its noreply address |
 | Wrong timestamps | Check `SOURCE_N_EMAILS` (or legacy `EMAILS`) against commit author emails |
 | Mirror has wrong commits | Run `greens --resync` to wipe and re-sync |
 | "not verified PRIVATE" refusal (exit 3) | Make the mirror private + `gh auth login`, or scrub with `greens --privacy-migrate` |
