@@ -22,7 +22,7 @@ Config dir stays `~/.contrib-mirror` for backward compat.
 
 GitHub Actions runs on every push to main and on tag pushes:
 - `test-scripts` — tests --version, --help, --status, --reset, setup wizard (runs always)
-- `test-brew` — tests brew tap + install + upgrade (runs only on v* tags)
+- `test-brew` (Release workflow, after both taps are updated) installs the new formula, checks its version, and runs upgrade
 
 ## Key files
 

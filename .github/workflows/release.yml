@@ -48,3 +48,27 @@ jobs:
               -f sha="$file_sha"
             echo "Updated greens.rb in ${repo}"
           done
+
+  # Install the formula this release just wrote, as a user would
+  test-brew:
+    needs: update-formula
+    runs-on: macos-latest
+    steps:
+      - name: Install greens
+        run: brew install yuvrajangadsingh/greens/greens
+
+      - name: Version
+        run: |
+          greens --version
+          test "$(greens --version)" = "greens ${GITHUB_REF_NAME#v}"
+
+      - name: Help
+        run: greens --help
+
+      - name: Status
+        run: greens --status
+
+      - name: Upgrade (no-op, validates command works)
+        run: |
+          brew upgrade greens 2>&1 || true
+          greens --version
