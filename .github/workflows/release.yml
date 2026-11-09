@@ -70,5 +70,5 @@ jobs:
 
       - name: Upgrade (no-op, validates command works)
         run: |
-          brew upgrade greens 2>&1 || true
-          greens --version
+          brew upgrade greens
+          test "$(greens --version)" = "greens ${GITHUB_REF_NAME#v}"
