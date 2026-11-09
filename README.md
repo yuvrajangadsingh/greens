@@ -103,7 +103,7 @@ greens --setup --remove-work-dir ~/old-work  # remove a saved repository root
 greens --status           # show config and sync status
 greens --setup            # reconfigure; retain saved mode (recursive initially)
 greens --setup --recursive  # explicitly restore recursive scanning
-greens --resync           # wipe and re-sync from scratch
+greens --resync           # wipe and re-sync (pre-1.9 GitHub configs only)
 greens --privacy-migrate  # rewrite mirror history (upgrade from <= 1.8.1)
 greens --reset            # remove everything
 ```
@@ -347,6 +347,26 @@ run `FORCE=1 greens`.
 </details>
 
 <details>
+<summary>How do I start over with a clean mirror?</summary>
+
+Pre-1.9 GitHub configs can run `greens --resync`. If the mirror still has the
+old dashboard README, run `greens --privacy-migrate` first.
+
+Current configs never rewrite mirror history. To start over:
+
+1. If the wrong commits came from source history that was rewritten since,
+   move the `activity-state` folder out of greens' cache directory first
+   (`~/.contrib-mirror/cache`, or your `CACHE_DIR` if you set one), or greens
+   replays them from its cache. Changing emails, start date, activity types or access
+   mode already starts a fresh cache.
+2. Run `greens --setup`, fix the source settings, and enter a new mirror repo
+   URL (setup offers to create it) and an unused local mirror directory.
+3. Delete the old mirror repo on GitHub. While it exists, its commits keep
+   counting on your graph.
+
+</details>
+
+<details>
 <summary>Troubleshooting</summary>
 
 | Problem | Solution |
@@ -357,7 +377,7 @@ run `FORCE=1 greens`.
 | "glab actor mismatch" | Run `glab auth login --hostname HOST` with the configured GitLab actor |
 | Empty contribution graph | Wait 24h for GitHub to update and check the mirror has commits. For a private mirror, turn on Private contributions (your profile page, Contribution settings above the calendar). Commits count only if `MIRROR_EMAIL` is an email on your GitHub account or its noreply address |
 | Wrong timestamps | Check `SOURCE_N_EMAILS` (or legacy `EMAILS`) against commit author emails |
-| Mirror has wrong commits | Run `greens --resync` to wipe and re-sync |
+| Mirror has wrong commits | See "How do I start over with a clean mirror?" above |
 | "not verified PRIVATE" refusal (exit 3) | Make the mirror private + `gh auth login`, or scrub with `greens --privacy-migrate` |
 | Dashboard README missing | The mirror isn't verified private — check `gh auth status` and the repo's visibility |
 | "MIRROR_EMAIL is not set" (exit 2) | Run `greens --setup` and set your personal GitHub email |
