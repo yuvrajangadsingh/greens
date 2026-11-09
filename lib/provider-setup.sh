@@ -183,7 +183,7 @@ greens_sources_setup() {
   local scan hosts class groups gitpath repodir url identity host rest organization
   local record provider api domain detected choice ssh_domain existing_source_count existing_sources
   local aliases saved_aliases alias username emails since types access_mode defaults meta i key owner branch default_email personal_default retry sync_path retry_username git_access account_selected api_access
-  local scheduler_prompt scheduler_default scheduler_values scheduler_error mirror_url_changed=0 initial_sync_failed=0
+  local scheduler_prompt scheduler_default scheduler_values scheduler_error mirror_url_changed=0 initial_sync_failed=0 mirror_private
   local -a save_keys
   for key in git jq gh; do command -v "$key" >/dev/null || { fail "Install $key, then rerun setup."; return 1; }; done
   existing_source_count="${SOURCE_COUNT:-0}"
@@ -494,7 +494,8 @@ greens_sources_setup() {
   owner="${owner#github.com/}"
   greens_gh_same_account "${owner%%/*}" "$PERSONAL_GH_USER" || { fail "Choose a github.com repository owned by $PERSONAL_GH_USER."; return 1; }
   if ! meta="$(greens_gh_api_as github.com "$PERSONAL_GH_USER" "repos/$owner" 2>/dev/null)"; then confirm "Create private GitHub repository $owner?" || return 1; greens_gh_as github.com "$PERSONAL_GH_USER" greens_run gh repo create "$owner" --private --description "Timestamp-only work contribution mirror"; meta="$(greens_gh_api_as github.com "$PERSONAL_GH_USER" "repos/$owner")"; fi
-  if [[ "$(jq -r .private <<< "$meta")" != true ]]; then warn "This public mirror exposes exact work timestamps."; [[ "$(prompt 'Type PUBLIC to use this public mirror' '')" == PUBLIC ]] || return 1; fi
+  mirror_private="$(jq -r .private <<< "$meta")"
+  if [[ "$mirror_private" != true ]]; then warn "This public mirror exposes exact work timestamps."; [[ "$(prompt 'Type PUBLIC to use this public mirror' '')" == PUBLIC ]] || return 1; fi
   branch="$(jq -er .default_branch <<< "$meta")"; MIRROR_DIR="$(greens_required 'Local mirror directory' "${MIRROR_DIR:-$CONFIG_DIR/mirror}")"; MIRROR_DIR="${MIRROR_DIR/#\~/$HOME}"
   mkdir -p "$(dirname "$MIRROR_DIR")"; MIRROR_DIR="$(cd "$(dirname "$MIRROR_DIR")" && pwd)/$(basename "$MIRROR_DIR")"
   while IFS= read -r path; do case "$MIRROR_DIR/" in "$path/"*) fail "Choose a mirror directory outside every work directory."; return 1 ;; esac; done <<< "$WORK_DIRS"
@@ -557,6 +558,9 @@ greens_sources_setup() {
     warn "Setup saved, but the initial sync failed. Run greens to retry, and greens --status to inspect scheduling."
   else
     ok "Setup complete. Run greens --status to inspect configuration and scheduling."
+  fi
+  if [[ "$mirror_private" == true ]]; then
+    info "Your mirror is private. Visitors see its squares only if 'Include private contributions on my profile' is on: https://github.com/settings/profile"
   fi
 }
 
