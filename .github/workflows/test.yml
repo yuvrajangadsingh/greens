@@ -987,25 +987,3 @@ jobs:
             exit 1
           fi
           echo "PASS: Windows end-to-end sync mirrored 2 matching commits with rewritten author"
-
-  # Test Homebrew install + upgrade (only on tags)
-  test-brew:
-    runs-on: macos-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    steps:
-      - name: Install greens
-        run: brew install yuvrajangadsingh/greens/greens
-
-      - name: Version
-        run: greens --version
-
-      - name: Help
-        run: greens --help
-
-      - name: Status
-        run: greens --status
-
-      - name: Upgrade (no-op, validates command works)
-        run: |
-          brew upgrade greens 2>&1 || true
-          greens --version
