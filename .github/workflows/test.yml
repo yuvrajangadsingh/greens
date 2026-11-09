@@ -993,10 +993,8 @@ jobs:
     runs-on: macos-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
-      - name: Tap and install greens
-        run: |
-          brew tap yuvrajangadsingh/greens
-          brew install greens
+      - name: Install greens
+        run: brew install yuvrajangadsingh/greens/greens
 
       - name: Version
         run: greens --version
