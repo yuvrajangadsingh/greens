@@ -183,7 +183,7 @@ greens_sources_setup() {
   local scan hosts class groups gitpath repodir url identity host rest organization
   local record provider api domain detected choice ssh_domain existing_source_count existing_sources
   local aliases saved_aliases alias username emails since types access_mode defaults meta i key owner branch default_email personal_default retry sync_path retry_username git_access account_selected api_access
-  local scheduler_prompt scheduler_default scheduler_values scheduler_error mirror_url_changed=0
+  local scheduler_prompt scheduler_default scheduler_values scheduler_error mirror_url_changed=0 initial_sync_failed=0
   local -a save_keys
   for key in git jq gh; do command -v "$key" >/dev/null || { fail "Install $key, then rerun setup."; return 1; }; done
   existing_source_count="${SOURCE_COUNT:-0}"
@@ -541,6 +541,7 @@ greens_sources_setup() {
   if confirm "Run the initial sync now?"; then
     if ! FORCE=1 CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$sync_path"; then
       warn "Initial sync failed. Continuing setup; run greens to retry."
+      initial_sync_failed=1
     fi
   fi
   # Keep the previous jobs until the replacement is successfully installed.
@@ -552,7 +553,11 @@ greens_sources_setup() {
     win) greens_install_windows_task "$sync_path" "$SYNC_HOUR" ;;
   esac
   greens_remove_all_schedulers "$sync_path" "$SCHEDULER"
-  ok "Setup complete. Run greens --status to inspect configuration and scheduling."
+  if [[ "$initial_sync_failed" == 1 ]]; then
+    warn "Setup saved, but the initial sync failed. Run greens to retry, and greens --status to inspect scheduling."
+  else
+    ok "Setup complete. Run greens --status to inspect configuration and scheduling."
+  fi
 }
 
 greens_provider_setup() { greens_sources_setup; }
