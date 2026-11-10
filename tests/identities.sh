@@ -205,3 +205,37 @@ echo "PASS: independent SSH/HTTPS Git ports, complete remote collection, and ide
   [[ "$(git -C "$MIRROR_DIR" rev-list --count HEAD)" == 1 ]] || fail "IPv6 rerun duplicated activity"
 ) || fail "bracketed IPv6 identity regression"
 echo "PASS: bracketed IPv6 SCP/URI aliases group together and mirror each activity once"
+
+# Reviews are dated by when each was submitted, one record per review keyed by
+# its node id, with 100 PRs per GraphQL request.
+(
+  review_bin="$IDENTITY_TEST/review-bin"; mkdir -p "$review_bin"
+  cat > "$review_bin/gh" <<'MOCK'
+#!/bin/bash
+case "$*" in
+  'api --hostname github.com '*'search/issues '*)
+    case "$*" in *'page=2'*) from=100 to=150 ;; *) from=0 to=100 ;; esac
+    jq -nc --argjson from "$from" --argjson to "$to" '{total_count: 150, items: [range($from; $to) as $i | {id: $i, node_id: "PR_\($i)", updated_at: "2021-03-05T10:00:00Z"}]}' ;;
+  'api --hostname github.com graphql --input '*)
+    [[ ! -f "$REVIEW_LOG.fail" ]] || exit 1
+    grep -qF 'last: 100) { nodes { id submittedAt }' "${*: -1}" || exit 1
+    jq -c '[.variables.user, (.variables.ids | length), .variables.ids[0]]' "${*: -1}" >> "$REVIEW_LOG"
+    jq -c '.variables.ids[0] as $pr | {data: {nodes: [{repository: {nameWithOwner: "team/repo"}, reviews: {nodes: [{id: "\($pr)_R1", submittedAt: "2021-02-01T09:00:00Z"}, {id: "\($pr)_R2", submittedAt: "2021-03-01T09:00:00Z"}, {id: "\($pr)_R3", submittedAt: null}]}}, null, {repository: {nameWithOwner: "team/other"}, reviews: {nodes: [{id: "\($pr)_R4", submittedAt: "2020-12-31T09:00:00Z"}]}}]}}' "${*: -1}" ;;
+  *) exit 1 ;;
+esac
+MOCK
+  chmod +x "$review_bin/gh"
+  export PATH="$review_bin:$PATH" REVIEW_LOG="$IDENTITY_TEST/review-log" GREENS_COMMAND_GH_TOKEN=fixture GREENS_GH_VERIFY_ACTOR=0
+  SOURCE_API_HOST=github.com SOURCE_ORGANIZATION=team SOURCE_USERNAME=reviewer
+  CACHE_DIR="$IDENTITY_TEST/review-cache" CONFIG_FILE="$IDENTITY_TEST/review-config"
+  since_epoch="$(greens_epoch 2021-01-01)"; run_epoch="$(greens_epoch 2021-04-01)"
+  github_api_records reviews "$IDENTITY_TEST/reviews" Organization > "$IDENTITY_TEST/review-records" || fail "review collection"
+  [[ "$(cat "$REVIEW_LOG")" == '["reviewer",100,"PR_0"]'$'\n''["reviewer",50,"PR_100"]' ]] || fail "review requests were not batched by 100 PRs: $(cat "$REVIEW_LOG")"
+  [[ "$(jq -r '[.key, .epoch, .date, .project] | @tsv' "$IDENTITY_TEST/review-records")" == "github.com/team/github/review/PR_0_R1	1612170000	2021-02-01 09:00:00 +0000	team/repo
+github.com/team/github/review/PR_0_R2	1614589200	2021-03-01 09:00:00 +0000	team/repo
+github.com/team/github/review/PR_100_R1	1612170000	2021-02-01 09:00:00 +0000	team/repo
+github.com/team/github/review/PR_100_R2	1614589200	2021-03-01 09:00:00 +0000	team/repo" ]] || fail "reviews were not dated by submission: $(cat "$IDENTITY_TEST/review-records")"
+  touch "$REVIEW_LOG.fail"
+  if github_api_records reviews "$IDENTITY_TEST/reviews" Organization > /dev/null 2>&1; then fail "a failed review request was accepted"; fi
+) || fail "review dating regression"
+echo "PASS: GitHub reviews are dated by submission, keyed by node id, and batched"

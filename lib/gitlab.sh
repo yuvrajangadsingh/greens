@@ -150,13 +150,35 @@ github_api_records() {
   esac
   : > "$output.raw"
   github_search_window "$query" "${date_field%_at}" "$since_epoch" "$run_epoch" "$output" || return 1
+  [[ "$kind" != reviews ]] || { github_review_records "$output"; return; }
   jq -sc --arg host "$SOURCE_API_HOST" --arg org "$SOURCE_ORGANIZATION" \
     --arg kind "$label" --arg date_field "$date_field" --argjson since "$since_epoch" --argjson until "$run_epoch" '
     [.[].items[]?] | unique_by(.id)[] |
     .[$date_field] as $date | ($date|fromdateiso8601) as $epoch |
     select($epoch >= $since and $epoch <= $until) |
-    {key:($host+"/"+$org+"/github/"+$kind+"/"+(.id|tostring)+(if $kind=="reviews" then "/"+$date else "" end)),epoch:$epoch,date:($date|sub("Z$";" +0000")|sub("T";" ")),kind:$kind,project:(.repository_url|split("/repos/")|last)}' \
+    {key:($host+"/"+$org+"/github/"+$kind+"/"+(.id|tostring)),epoch:$epoch,date:($date|sub("Z$";" +0000")|sub("T";" ")),kind:$kind,project:(.repository_url|split("/repos/")|last)}' \
     "$output.raw"
+}
+
+# Search finds the PRs, but a PR's update time moves after a review. GraphQL
+# gives this user's reviews on those PRs with when each was submitted.
+# ponytail: newest 100 reviews per PR by this user; page them if anyone hits that.
+github_review_records() {
+  local output="$1" ids
+  jq -c '[.items[]?]' "$output.raw" | jq -sc 'add // [] | unique_by(.id) | map(.node_id) | . as $ids | range(0; length; 100) | $ids[.:. + 100]' > "$output.batches"
+  : > "$output.reviews"
+  while IFS= read -r ids; do
+    jq -n --argjson ids "$ids" --arg user "$SOURCE_USERNAME" '{query: "query($ids: [ID!]!, $user: String!) { nodes(ids: $ids) { ... on PullRequest { repository { nameWithOwner } reviews(author: $user, last: 100) { nodes { id submittedAt } } } } }", variables: {ids: $ids, user: $user}}' > "$output.query"
+    if ! greens_gh_api_as "$SOURCE_API_HOST" "$SOURCE_USERNAME" graphql --input "$output.query" >> "$output.reviews"; then
+      log "ERROR: GitHub review request failed for $SOURCE_API_HOST/$SOURCE_ORGANIZATION" >&2
+      return 1
+    fi
+  done < "$output.batches"
+  jq -sc --arg host "$SOURCE_API_HOST" --arg org "$SOURCE_ORGANIZATION" --argjson since "$since_epoch" --argjson until "$run_epoch" '
+    [.[].data.nodes[]? | select(. != null) | .repository.nameWithOwner as $project | .reviews.nodes[] | select(.submittedAt != null) |
+      (.submittedAt | fromdateiso8601) as $epoch | select($epoch >= $since and $epoch <= $until) |
+      {key: ($host + "/" + $org + "/github/review/" + .id), epoch: $epoch, date: (.submittedAt | sub("Z$"; " +0000") | sub("T"; " ")), kind: "reviews", project: $project}] |
+    unique_by(.key)[]' "$output.reviews"
 }
 
 greens_source_access_mode() {
