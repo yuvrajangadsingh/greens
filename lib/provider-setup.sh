@@ -189,11 +189,21 @@ greens_sources_setup() {
   existing_source_count="${SOURCE_COUNT:-0}"
   if [[ -f "$CONFIG_FILE" ]]; then
     had_config=1; greens_show_existing_config; echo "" >&2
+    if [[ "$existing_source_count" -eq 0 && ( -n "${WORK_DIR:-}" || -n "${SOURCE_PROVIDER:-}" || -n "${REMOTE_PREFIX:-}" ) ]]; then
+      legacy_schema=1
+    fi
     # setup_remove_dirs is initialized by setup.sh before this file is sourced.
     # shellcheck disable=SC2154
     if [[ "${#setup_remove_dirs[@]}" -eq 0 ]]; then
       answer="$(prompt 'Rerun setup using these values as defaults? (y/N)' 'n')"
-      [[ "$answer" =~ ^[Yy]$ ]] || return 0
+      if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+        if [[ "$legacy_schema" == 1 ]]; then
+          info "Nothing changed. This config stays in the pre-1.9 format until you answer y."
+        else
+          info "Nothing changed."
+        fi
+        return 0
+      fi
     else
       info "Work-directory removal requested; continuing setup with existing values as defaults."
     fi
@@ -201,11 +211,6 @@ greens_sources_setup() {
     fail "--remove-work-dir requires an existing configuration."
     return 1
   fi
-  if [[ "$had_config" == 1 && "$existing_source_count" -eq 0 &&
-        ( -n "${WORK_DIR:-}" || -n "${SOURCE_PROVIDER:-}" || -n "${REMOTE_PREFIX:-}" ) ]]; then
-    legacy_schema=1
-  fi
-
   existing_dirs="${WORK_DIRS:-${WORK_DIR:-}}"
   if [[ -n "$existing_dirs" ]]; then
     dirs="$existing_dirs"

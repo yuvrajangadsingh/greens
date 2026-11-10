@@ -370,6 +370,10 @@ grep -qx username=url-user "$ACCOUNT_TEST/url-credentials" || fail "commit-only 
   grep -q 'pre-1.9 format. Run greens --setup' "$ACCOUNT_TEST/legacy-output" || fail "legacy sync did not suggest converting the config"
   CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$ROOT/sync.sh" --status > "$ACCOUNT_TEST/legacy-status" 2>&1
   grep -qF 'Format:       pre-1.9 (run greens --setup once to convert it)' "$ACCOUNT_TEST/legacy-status" || { cat "$ACCOUNT_TEST/legacy-status"; fail "legacy status did not show the old format"; }
+  cp "$CONFIG_FILE" "$ACCOUNT_TEST/legacy-config-before"
+  printf '\n' | CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$ROOT/setup.sh" > "$ACCOUNT_TEST/legacy-decline" 2>&1 || { cat "$ACCOUNT_TEST/legacy-decline"; fail "declined legacy setup rerun"; }
+  grep -qF 'Nothing changed. This config stays in the pre-1.9 format until you answer y.' "$ACCOUNT_TEST/legacy-decline" || { cat "$ACCOUNT_TEST/legacy-decline"; fail "declined setup rerun did not say nothing changed"; }
+  cmp -s "$CONFIG_FILE" "$ACCOUNT_TEST/legacy-config-before" || fail "declined setup rerun changed the config"
   if grep -q 'Cloning source.git' "$ACCOUNT_TEST/legacy-output"; then fail "upgrade did not reuse its existing bare cache"; fi
   [[ -d "$CACHE_DIR/bare/$(greens_scheduler_id)/source.git" ]] || fail "upgrade cache was not namespaced"
   rm "$ACCOUNT_TEST/no-personal-cli"
