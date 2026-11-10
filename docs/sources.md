@@ -175,8 +175,8 @@ GitHub reviews are opt-in. Each review is mirrored once, on the day it was
 submitted. Only your newest 100 reviews on any one pull request are seen.
 Earlier versions used the pull request's update time, which moves after a
 review. Their squares stay, since greens never rewrites the mirror, and
-they can't be matched to a review, so a review an earlier version mirrored gets
-one more square, on the day it was submitted. Generic Git has no API activity. `COPY_MESSAGES` remains global and is disabled for the indexed mixed
+they can't be matched to a review, so a review an earlier version mirrored can
+get one more square, on the day it was submitted. Generic Git has no API activity. `COPY_MESSAGES` remains global and is disabled for the indexed mixed
 provider format so source titles and commit subjects do not leak.
 
 ## Sync behavior
