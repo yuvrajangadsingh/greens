@@ -758,6 +758,62 @@ grep -qx "gui/$(id -u)/$label" "$TEST_ROOT/launchctl-calls" || fail "reset did n
 grep -qx "gui/$(id -u)/com.greens" "$TEST_ROOT/launchctl-calls" || fail "reset did not boot out legacy launchd label"
 echo "PASS: scoped and legacy launchd reset"
 
+# --status reads this configuration's own scheduled job (last failure and
+# logs), ignores another configuration's agent, and names a pre-1.9 agent.
+mkdir -p "$TEST_ROOT/status-bin" "$TEST_ROOT/status-home/.contrib-mirror"
+cat > "$TEST_ROOT/status-bin/launchctl" <<'MOCK'
+#!/bin/bash
+[[ "$1 $2" == "print gui/$(id -u)/$STATUS_LABEL" ]] || exit 1
+printf '\tstdout path = /logs/sync.out.log\n\tstderr path = /logs/sync.err.log\n'
+if [[ -n "${STATUS_SIGNAL:-}" ]]; then printf '\tlast terminating signal = %s\n' "$STATUS_SIGNAL"; else printf '\tlast exit code = %s\n' "$STATUS_EXIT"; fi
+MOCK
+cat > "$TEST_ROOT/status-bin/systemctl" <<'MOCK'
+#!/bin/bash
+[[ -n "${STATUS_RESULT:-}" ]] || exit 1
+[[ "$2" != show ]] || printf 'Result=%s\nNRestarts=%s\n' "$STATUS_RESULT" "$STATUS_RESTARTS"
+MOCK
+cat > "$TEST_ROOT/status-bin/crontab" <<'MOCK'
+#!/bin/bash
+[[ -n "${STATUS_CRON:-}" ]] || exit 1
+printf '%s\n' "$STATUS_CRON"
+MOCK
+printf '#!/bin/bash\nexit 1\n' > "$TEST_ROOT/status-bin/schtasks.exe"
+chmod +x "$TEST_ROOT/status-bin/"*
+status_of() { env "$@" PATH="$TEST_ROOT/status-bin:$PATH" bash "$ROOT/sync.sh" --status > "$TEST_ROOT/job-status" 2>&1 || { cat "$TEST_ROOT/job-status"; fail "status run: $*"; }; }
+status_has() { grep -qxF "$1" "$TEST_ROOT/job-status" || { cat "$TEST_ROOT/job-status"; fail "$2"; }; }
+status_of STATUS_LABEL="$label" STATUS_EXIT=1 CONTRIB_MIRROR_CONFIG="$CONFIG_FILE"
+status_has "  Scheduler:    launchd ($label)" "status did not name this configuration's launchd job"
+status_has "  Last run:     failed (exit 1)" "status hid the failed launchd run"
+status_has "  Log:          /logs/sync.out.log" "status did not show the launchd log"
+status_has "  Error log:    /logs/sync.err.log" "status did not show the launchd error log"
+status_of STATUS_LABEL="$label" STATUS_EXIT="78: EX_CONFIG" CONTRIB_MIRROR_CONFIG="$CONFIG_FILE"
+status_has "  Last run:     failed (exit 78: EX_CONFIG)" "status hid a named launchd exit code"
+status_of STATUS_LABEL="$label" STATUS_SIGNAL="Terminated: 15" CONTRIB_MIRROR_CONFIG="$CONFIG_FILE"
+status_has "  Last run:     failed (Terminated: 15)" "status hid a launchd signal death"
+status_of STATUS_LABEL="$label" STATUS_EXIT=0 CONTRIB_MIRROR_CONFIG="$CONFIG_FILE"
+! grep -q "Last run:" "$TEST_ROOT/job-status" || fail "status reported a successful launchd run as failed"
+status_of STATUS_LABEL=com.greens.other STATUS_EXIT=0 CONTRIB_MIRROR_CONFIG="$CONFIG_FILE"
+status_has "  Scheduler:    none (manual)" "status counted another configuration's launchd job"
+status_of STATUS_RESULT=exit-code STATUS_RESTARTS=0 CONTRIB_MIRROR_CONFIG="$CONFIG_FILE"
+status_has "  Last run:     failed (exit-code)" "status hid a failed systemd run"
+! grep -q "Restarts:" "$TEST_ROOT/job-status" || fail "status reported systemd restarts that never happened"
+status_of STATUS_RESULT=success STATUS_RESTARTS=2 CONTRIB_MIRROR_CONFIG="$CONFIG_FILE"
+status_has "  Restarts:     2 after failed runs" "status hid systemd retries after a failure"
+! grep -q "Last run:" "$TEST_ROOT/job-status" || fail "status reported a successful systemd run as failed"
+printf '# status fixture\n' > "$TEST_ROOT/status-home/.contrib-mirror/config"
+status_home_id="$(CONFIG_FILE="$(greens_config_path "$TEST_ROOT/status-home/.contrib-mirror/config")" greens_scheduler_id)"
+status_of STATUS_CRON="0 7 * * * /bin/bash sync.sh >> /custom-log-dir/sync.log 2>&1 # $status_home_id" HOME="$TEST_ROOT/status-home" CONTRIB_MIRROR_CONFIG="$TEST_ROOT/status-home/.contrib-mirror/config"
+status_has "  Scheduler:    cron" "status missed this configuration's cron job"
+status_has "  Log:          /custom-log-dir/sync.log" "status showed a cron log path the job does not use"
+status_of STATUS_CRON="0 7 * * * /bin/bash $ROOT/sync.sh >> /old-logs/sync.log 2>&1" HOME="$TEST_ROOT/status-home" CONTRIB_MIRROR_CONFIG="$TEST_ROOT/status-home/.contrib-mirror/config"
+status_has "  Log:          /old-logs/sync.log" "status showed a legacy cron log path the job does not use"
+status_of STATUS_CRON="0 7 * * * /bin/bash $ROOT/sync.sh >> /old-logs/sync.log 2>&1" CONTRIB_MIRROR_CONFIG="$CONFIG_FILE"
+status_has "  Scheduler:    none (manual)" "status gave a custom configuration the default configuration's legacy cron job"
+status_of STATUS_LABEL=com.greens STATUS_EXIT=0 HOME="$TEST_ROOT/status-home" CONTRIB_MIRROR_CONFIG="$TEST_ROOT/status-home/.contrib-mirror/config"
+status_has "  Scheduler:    launchd, pre-1.9 job com.greens (run greens --setup to replace it)" "status hid the pre-1.9 launchd job"
+status_has "  Log:          /logs/sync.out.log" "status hid the pre-1.9 launchd log"
+echo "PASS: status reports this configuration's scheduled job, its last failure and logs"
+
 # Exercise preflight with real terminal descriptors. Prompts must read stdin,
 # while repository rows use their own descriptor throughout the loop.
 cat > "$TEST_ROOT/terminal-preflight" <<'FIXTURE'

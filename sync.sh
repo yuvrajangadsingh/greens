@@ -1104,15 +1104,44 @@ case "${1:-}" in
       echo "  GitLab host:  ${GITLAB_HOST:-gitlab.com}"
       echo "  GitLab user:  ${GITLAB_USERNAME:-authenticated user}"
     fi
+    # v1.8.2 jobs have no config selector; they belong to the default config.
+    status_default_config=0
+    [[ "$CONFIG_FILE" != "$(greens_config_path "$HOME/.contrib-mirror/config")" ]] || status_default_config=1
+    status_label="$(greens_launchd_label)"
+    if [[ "$status_default_config" == 1 ]] && ! launchctl print "gui/$(id -u)/$status_label" >/dev/null 2>&1; then
+      status_label=com.greens
+    fi
     if systemctl --user is-enabled "$(greens_scheduler_id).timer" >/dev/null 2>&1; then
       echo "  Scheduler:    systemd ($(greens_scheduler_id).timer)"
       systemctl --user list-timers "$(greens_scheduler_id).timer" --no-pager
-    elif launchctl list 2>/dev/null | grep -q "com.greens"; then
-      echo "  Scheduler:    launchd (active)"
-    elif crontab -l 2>/dev/null | grep -q "# $(greens_scheduler_id)$"; then
+      # Result resets to success when a retry starts; NRestarts still shows it.
+      status_job="$(systemctl --user show -p Result -p NRestarts "$(greens_scheduler_id).service" 2>/dev/null || true)"
+      status_result="$(sed -n 's/^Result=//p' <<< "$status_job")"
+      status_restarts="$(sed -n 's/^NRestarts=//p' <<< "$status_job")"
+      [[ -z "$status_result" || "$status_result" == success ]] || echo "  Last run:     failed ($status_result)"
+      [[ ! "$status_restarts" =~ ^[1-9][0-9]*$ ]] || echo "  Restarts:     $status_restarts after failed runs"
+      echo "  Log:          journalctl --user -u $(greens_scheduler_id).service"
+    elif status_job="$(launchctl print "gui/$(id -u)/$status_label" 2>/dev/null)"; then
+      if [[ "$status_label" == com.greens ]]; then
+        echo "  Scheduler:    launchd, pre-1.9 job com.greens (run greens --setup to replace it)"
+      else
+        echo "  Scheduler:    launchd ($status_label)"
+      fi
+      # "78: EX_CONFIG" style codes; a signal death has no exit code line.
+      status_exit="$(sed -n 's/^[[:space:]]*last exit code = //p' <<< "$status_job" | head -1)"
+      status_signal="$(sed -n 's/^[[:space:]]*last terminating signal = //p' <<< "$status_job" | head -1)"
+      if [[ -n "$status_signal" ]]; then
+        echo "  Last run:     failed ($status_signal)"
+      elif [[ "${status_exit%%:*}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "  Last run:     failed (exit $status_exit)"
+      fi
+      echo "  Log:          $(sed -n 's/^[[:space:]]*stdout path = //p' <<< "$status_job" | head -1)"
+      echo "  Error log:    $(sed -n 's/^[[:space:]]*stderr path = //p' <<< "$status_job" | head -1)"
+    elif status_job="$(crontab -l 2>/dev/null | grep "# $(greens_scheduler_id)$")" ||
+         { [[ "$status_default_config" == 1 ]] && status_job="$(crontab -l 2>/dev/null | grep -F "$SCRIPT_DIR/sync.sh" | grep -v '# greens-')"; }; then
       echo "  Scheduler:    cron"
-    elif crontab -l 2>/dev/null | grep -F "$SCRIPT_DIR/sync.sh" | grep -v '# greens-' >/dev/null; then
-      echo "  Scheduler:    cron"
+      # The redirect the job was installed with, not today's LOG_DIR.
+      echo "  Log:          $(sed -n 's/.* >> \(.*\) 2>&1.*/\1/p' <<< "$status_job" | head -1)"
     elif schtasks.exe /Query /TN "greens-daily-sync" 2>/dev/null | grep -qi "greens"; then
       echo "  Scheduler:    Windows Task Scheduler (active)"
     else
