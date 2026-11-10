@@ -721,9 +721,10 @@ greens_install_launchd() {
 <key>Label</key><string>$label_xml</string>
 <key>ProgramArguments</key><array><string>/bin/bash</string><string>$script_xml</string></array>
 <key>StartCalendarInterval</key><dict><key>Hour</key><integer>$hour</integer><key>Minute</key><integer>0</integer></dict>
+<key>RunAtLoad</key><true/>
 <key>StandardOutPath</key><string>$log_dir_xml/sync.out.log</string>
 <key>StandardErrorPath</key><string>$log_dir_xml/sync.err.log</string>
-<key>EnvironmentVariables</key><dict><key>CONTRIB_MIRROR_CONFIG</key><string>$config_xml</string><key>PATH</key><string>$path_xml</string></dict>
+<key>EnvironmentVariables</key><dict><key>CONTRIB_MIRROR_CONFIG</key><string>$config_xml</string><key>PATH</key><string>$path_xml</string><key>GREENS_SYNC_HOUR</key><string>$hour</string></dict>
 </dict></plist>
 EOF
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
