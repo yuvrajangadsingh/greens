@@ -162,7 +162,7 @@ and in the [provider guide](docs/gitlab.md).
 | Commits | Yes (always) |
 | PRs opened | Yes (with `gh` CLI) |
 | Issues opened | Yes (with `gh` CLI) |
-| PR reviews | Opt-in only (GitHub exposes PR `updatedAt`, not review time — timestamps are unstable, so it's off by default) |
+| PR reviews | Opt-in. Each review lands on the day it was submitted. Pre-1.9 configs still use the PR's last update time, which can move to a later day |
 
 Setup saves `SOURCE_N_USERNAME` for each GitHub host/organization and requires a
 matching authenticated `gh` session. Legacy configurations can still use
