@@ -1597,7 +1597,16 @@ fi
 today="$(date '+%Y-%m-%d')"
 if [[ "${FORCE:-0}" != "1" ]] && [[ -f "$SUCCESS_STAMP_FILE" ]]; then
   last_success_date="$(cat "$SUCCESS_STAMP_FILE" 2>/dev/null || true)"
-  if [[ "$last_success_date" == "$today" ]]; then
+  synced_today=0
+  [[ "$last_success_date" != "$today" ]] || synced_today=1
+  # launchd also starts its job at login. Once the scheduled hour has come,
+  # only a sync that finished in or after that hour counts for today.
+  if [[ "$synced_today" == 1 && "${GREENS_SYNC_HOUR:-}" =~ ^[0-9]{1,2}$ ]] && ((10#$(date +%H) >= 10#$GREENS_SYNC_HOUR)); then
+    stamp_time="$(stat -c %Y "$SUCCESS_STAMP_FILE" 2>/dev/null || stat -f %m "$SUCCESS_STAMP_FILE" 2>/dev/null || echo 0)"
+    stamp_at="$(date -d "@$stamp_time" '+%Y-%m-%d %H' 2>/dev/null || date -r "$stamp_time" '+%Y-%m-%d %H')"
+    if [[ "${stamp_at% *}" != "$today" ]] || ((10#${stamp_at#* } < 10#$GREENS_SYNC_HOUR)); then synced_today=0; fi
+  fi
+  if [[ "$synced_today" == 1 ]]; then
     log "Already synced today ($today). Set FORCE=1 to run anyway."
     exit 0
   fi

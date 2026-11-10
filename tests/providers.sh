@@ -251,6 +251,23 @@ fi
   CONFIG_FILE="$(greens_config_path ./fresh-profile/config)"
   crontab -l | grep -q "# $(greens_scheduler_id)$" || fail "setup installed its job under another ID: $(crontab -l)"
   [[ -f "$(LOG_DIR="$HOME/.contrib-mirror/logs" greens_stamp_path)" ]] || fail "first sync recorded success under another ID: $(ls "$HOME/.contrib-mirror/logs")"
+  # launchd also runs at login. Once its hour has come, only a sync that
+  # finished in or after that hour counts for today. The day and hour are fixed.
+  stamp="$(LOG_DIR="$HOME/.contrib-mirror/logs" greens_stamp_path)"
+  mkdir -p "$TEST_ROOT/fixed-hour"
+  printf '#!/bin/bash\ncase "$*" in\n  +%%H) echo "$FIXED_HOUR" ;;\n  +%%Y-%%m-%%d) echo "$FIXED_DAY" ;;\n  *) exec /bin/date "$@" ;;\nesac\n' > "$TEST_ROOT/fixed-hour/date"
+  chmod +x "$TEST_ROOT/fixed-hour/date"
+  FIXED_DAY="$(date +%Y-%m-%d)"
+  launchd_run() {
+    printf '%s\n' "$FIXED_DAY" > "$stamp"; touch -t "${FIXED_DAY//-/}$2" "$stamp"
+    FIXED_DAY="$FIXED_DAY" FIXED_HOUR="$1" PATH="$TEST_ROOT/fixed-hour:$PATH" CONTRIB_MIRROR_CONFIG=./fresh-profile/config bash "$ROOT/sync.sh" > "$TEST_ROOT/launchd-run" 2>&1 || { cat "$TEST_ROOT/launchd-run"; fail "launchd run at $1 after a sync at $2"; }
+    grep -q 'Already synced today' "$TEST_ROOT/launchd-run"
+  }
+  GREENS_SYNC_HOUR=18 launchd_run 09 0800 || fail "login run before the hour repeated today's sync"
+  if GREENS_SYNC_HOUR=18 launchd_run 18 0900; then fail "a morning sync stood in for the scheduled run"; fi
+  if GREENS_SYNC_HOUR=18 launchd_run 19 0900; then fail "a morning sync stood in for the evening run"; fi
+  GREENS_SYNC_HOUR=18 launchd_run 19 1830 || fail "evening login repeated the scheduled sync"
+  launchd_run 19 0900 || fail "a manual run ignored today's sync"
   greens_remove_cron
 )
 
@@ -1368,6 +1385,8 @@ assert agent["EnvironmentVariables"]["CONTRIB_MIRROR_CONFIG"] == config
 assert agent["StandardOutPath"] == str(pathlib.Path(logs) / "sync.out.log")
 assert agent["StandardErrorPath"] == str(pathlib.Path(logs) / "sync.err.log")
 assert agent["StartCalendarInterval"] == {"Hour": 7, "Minute": 0}
+assert agent["RunAtLoad"] is True
+assert agent["EnvironmentVariables"]["GREENS_SYNC_HOUR"] == "7"
 import os
 import subprocess
 env = dict(os.environ)
