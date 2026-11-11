@@ -54,7 +54,7 @@ fail()  { echo "  [✗] $*" >&2; }
 
 # Mask credentials in URLs (https://TOKEN@github.com/... -> https://****@github.com/...)
 mask_url() {
-  echo "$1" | sed 's|https://[^@]*@|https://****@|'
+  echo "$1" | sed -E 's|(https?)://[^@]*@|\1://****@|'
 }
 
 # Prompt for a mirror repo URL. Trims whitespace, rejects empty, loops until valid.

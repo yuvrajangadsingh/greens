@@ -183,7 +183,7 @@ greens_sources_setup() {
   local scan hosts class groups gitpath repodir url identity host rest organization
   local record provider api domain detected choice ssh_domain existing_source_count existing_sources
   local aliases saved_aliases alias username emails since types access_mode defaults meta i key owner branch default_email personal_default retry sync_path retry_username git_access account_selected api_access
-  local scheduler_prompt scheduler_default scheduler_values scheduler_error mirror_url_changed=0 initial_sync_failed=0 initial_sync_ran=0 mirror_private
+  local scheduler_prompt scheduler_default scheduler_values scheduler_error mirror_url_changed=0 mirror_checkout initial_sync_failed=0 initial_sync_ran=0 mirror_private
   local -a save_keys
   for key in git jq gh; do command -v "$key" >/dev/null || { fail "Install $key, then rerun setup."; return 1; }; done
   existing_source_count="${SOURCE_COUNT:-0}"
@@ -491,7 +491,10 @@ greens_sources_setup() {
   greens_gh_same_account "$(greens_gh_api_as github.com "$PERSONAL_GH_USER" user --jq .login)" "$PERSONAL_GH_USER" || { fail "GitHub account does not match $PERSONAL_GH_USER."; return 1; }
   default_email="$(greens_gh_api_as github.com "$PERSONAL_GH_USER" user/emails --jq '.[] | select(.verified and .primary) | .email' 2>/dev/null || true)"
   MIRROR_EMAIL="$(greens_required 'Personal GitHub email' "${MIRROR_EMAIL:-$default_email}")"; MIRROR_NAME="$(greens_required 'Mirror author name' "${MIRROR_NAME:-greens}")"
-  url="${MIRROR_URL:-https://github.com/$PERSONAL_GH_USER/work-contributions-mirror}"
+  # Before 1.9 only MIRROR_DIR was saved; its checkout knows the repo name.
+  mirror_checkout="${MIRROR_DIR:-$CONFIG_DIR/mirror}"; mirror_checkout="${mirror_checkout/#\~/$HOME}"; url="${MIRROR_URL:-}"
+  if [[ -z "$url" && -d "$mirror_checkout/.git" ]]; then url="$(git -C "$mirror_checkout" config remote.origin.url || true)"; fi
+  url="${url:-https://github.com/$PERSONAL_GH_USER/work-contributions-mirror}"
   printf 'GitHub mirror URL [%s]: ' "$(mask_url "$url")" >&2
   read -r answer || { fail "Setup input ended."; return 1; }
   if [[ -n "$answer" ]]; then MIRROR_URL="$answer"; mirror_url_changed=1; else MIRROR_URL="$url"; fi

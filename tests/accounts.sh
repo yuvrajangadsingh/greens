@@ -377,6 +377,14 @@ grep -qx username=url-user "$ACCOUNT_TEST/url-credentials" || fail "commit-only 
   if grep -q 'Cloning source.git' "$ACCOUNT_TEST/legacy-output"; then fail "upgrade did not reuse its existing bare cache"; fi
   [[ -d "$CACHE_DIR/bare/$(greens_scheduler_id)/source.git" ]] || fail "upgrade cache was not namespaced"
   rm "$ACCOUNT_TEST/no-personal-cli"
+  # Only MIRROR_DIR was saved before 1.9, possibly with a literal ~. Accepting
+  # the defaults must keep its custom repo.
+  # shellcheck disable=SC2088
+  MIRROR_DIR='~/../legacy-mirror' greens_save_config "$CONFIG_FILE" MIRROR_DIR
+  { printf 'y\n'; printf '\n%.0s' {1..30}; } | SCHEDULER=manual CONTRIB_MIRROR_CONFIG="$CONFIG_FILE" bash "$ROOT/setup.sh" > "$ACCOUNT_TEST/legacy-upgrade" 2>&1 || {
+    cat "$ACCOUNT_TEST/legacy-upgrade"; fail "legacy upgrade with a custom mirror name";
+  }
+  bash -c 'source "$1"; [[ "$MIRROR_URL" == https://github.com/bob/legacy-mirror ]]' bash "$CONFIG_FILE" || fail "legacy upgrade did not keep the mirror origin"
 )
 [[ ! -e "$ACCOUNT_TEST/switched" ]] || fail "legacy sync changed the shared account"
 
