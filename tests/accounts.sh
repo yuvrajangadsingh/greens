@@ -467,7 +467,8 @@ fi
 if [[ -n "$operation" ]]; then
   case "$url" in
     https://github.com/team/repo|https://github.com/team/repo.git|https://alice@github.com/TeAm/RePo)
-      if [[ -f "$ACCOUNT_TEST/native-source-only" ]]; then
+      if [[ -f "$ACCOUNT_TEST/native-source-only" || -f "$ACCOUNT_TEST/gh-token-no-access" ]]; then
+        [[ ! -f "$ACCOUNT_TEST/gh-token-no-access" || "${GH_TOKEN:-}" != fixture-alice ]] || exit 1
         credentials="$(printf 'protocol=https\nhost=github.com\n\n' | "$REAL_GIT" credential fill)"
         [[ "$credentials" == *password=fixture-native-source* ]] || exit 1
       else [[ "${GH_TOKEN:-}" == fixture-alice ]] || exit 1; fi ;;
@@ -567,6 +568,17 @@ FORCE=1 CONTRIB_MIRROR_CONFIG="$ACCOUNT_TEST/ssh-config" bash "$ROOT/sync.sh" > 
   }
   [[ "$("$REAL_GIT" -C "$MIRROR_DIR" rev-list --count HEAD)" == 1 ]] || fail "legacy native source rerun duplicated activity"
   rm "$ACCOUNT_TEST/native-source-only"
+  # gh has a token for alice, but it cannot read the repo. Commits-only access
+  # must fall back to the native credentials that work.
+  touch "$ACCOUNT_TEST/gh-token-no-access"
+  GREENS_GIT_TRANSPORT_ONLY=1 greens_source_git github github.com alice https://github.com/team/repo.git "$WORK_DIR/repo" \
+    ls-remote https://github.com/team/repo.git HEAD > "$ACCOUNT_TEST/gh-no-access-output" 2>&1 || {
+    cat "$ACCOUNT_TEST/gh-no-access-output"; fail "a gh token without repo access hid working Git credentials";
+  }
+  grep -q "retrying with Git's own credentials" "$ACCOUNT_TEST/gh-no-access-output" || fail "the native retry was not reported"
+  if GREENS_GIT_TRANSPORT_ONLY=0 greens_source_git github github.com alice https://github.com/team/repo.git "$WORK_DIR/repo" \
+    ls-remote https://github.com/team/repo.git HEAD > /dev/null 2>&1; then fail "an API source fell back to native Git credentials"; fi
+  rm "$ACCOUNT_TEST/gh-token-no-access"
 ) || fail "legacy native source authentication regression"
 echo "PASS: legacy default API selections retain native Git source credentials when gh login is unavailable"
 echo "PASS: concurrent API accounts and caches, URL credentials, clone hosts, account casing, and PAT priority"
