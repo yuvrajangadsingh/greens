@@ -231,7 +231,7 @@ greens_git_as() {
 
 # The URL here has already been expanded once, just as Git expands it.
 greens_git_as_transport() {
-  local provider="$1" host="$2" user="$3" url="$4" token="" verify_actor=1 authority userinfo="" url_password=0
+  local provider="$1" host="$2" user="$3" url="$4" token="" verify_actor=1 authority userinfo="" url_password=0 status=0
   local -a replay
   shift 4
   # A source checkout's own credential config goes first, so the account
@@ -268,7 +268,13 @@ greens_git_as_transport() {
     fi
     GREENS_COMMAND_GH_TOKEN="$token" GREENS_GH_VERIFY_ACTOR="$verify_actor" \
       greens_gh_as "$host" "$user" greens_run git ${replay[@]+"${replay[@]}"} \
-      -c "credential.https://$authority.helper=" -c "credential.https://$authority.helper=!gh auth git-credential" "$@"
+      -c "credential.https://$authority.helper=" -c "credential.https://$authority.helper=!gh auth git-credential" "$@" || status=$?
+    # Commits only: a gh token that can't read this repo (revoked, or an SSO org
+    # it isn't authorized for) must not hide Git credentials that work. A
+    # timeout (124, or 137 after the kill) would only time out again.
+    [[ "$status" != 0 && "$status" != 124 && "$status" != 137 && "${GREENS_GIT_TRANSPORT_ONLY:-0}" == 1 ]] || return "$status"
+    echo "The gh login for $user could not reach $authority; retrying with Git's own credentials." >&2
+    GITHUB_TOKEN="${GITHUB_TOKEN:-}" greens_run git ${replay[@]+"${replay[@]}"} "$@"
   else
     GITHUB_TOKEN="${GITHUB_TOKEN:-}" greens_run git ${replay[@]+"${replay[@]}"} "$@"
   fi
