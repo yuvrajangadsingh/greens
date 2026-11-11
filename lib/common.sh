@@ -232,7 +232,11 @@ greens_git_as() {
 # The URL here has already been expanded once, just as Git expands it.
 greens_git_as_transport() {
   local provider="$1" host="$2" user="$3" url="$4" token="" verify_actor=1 authority userinfo="" url_password=0
+  local -a replay
   shift 4
+  # A source checkout's own credential config goes first, so the account
+  # overrides below still win. An explicit URL token skips it entirely.
+  replay=(); [[ -z "${GREENS_SOURCE_LOGINS:-}" ]] || replay=(-c "include.path=$GREENS_SOURCE_LOGINS")
   authority="${url#*://}"; authority="${authority%%/*}"
   if [[ "$authority" == *@* ]]; then
     userinfo="${authority%@*}"
@@ -252,7 +256,7 @@ greens_git_as_transport() {
   if [[ "$provider" == github && -n "$user" && "$url" == https://* && "$url_password" == 0 ]]; then
     if [[ "${GREENS_GIT_TRANSPORT_ONLY:-0}" == 1 ]]; then
       if ! token="$(greens_gh_token "$host" "$user" 0)"; then
-        GITHUB_TOKEN="${GITHUB_TOKEN:-}" greens_run git "$@"
+        GITHUB_TOKEN="${GITHUB_TOKEN:-}" greens_run git ${replay[@]+"${replay[@]}"} "$@"
         return
       fi
       # If gh has this account, a matching explicit PAT still takes priority.
@@ -263,10 +267,10 @@ greens_git_as_transport() {
       verify_actor=0
     fi
     GREENS_COMMAND_GH_TOKEN="$token" GREENS_GH_VERIFY_ACTOR="$verify_actor" \
-      greens_gh_as "$host" "$user" greens_run git \
+      greens_gh_as "$host" "$user" greens_run git ${replay[@]+"${replay[@]}"} \
       -c "credential.https://$authority.helper=" -c "credential.https://$authority.helper=!gh auth git-credential" "$@"
   else
-    GITHUB_TOKEN="${GITHUB_TOKEN:-}" greens_run git "$@"
+    GITHUB_TOKEN="${GITHUB_TOKEN:-}" greens_run git ${replay[@]+"${replay[@]}"} "$@"
   fi
 }
 
@@ -500,7 +504,7 @@ greens_source_transport() {
 # Run on the checkout's original origin with an exact A -> B rule. Starting
 # Git on the expanded B would incorrectly apply an unrelated B -> C rewrite.
 greens_source_git() (
-  local provider="$1" host="$2" user="$3" url="$4" repodir="$5" origin arg rule
+  local provider="$1" host="$2" user="$3" url="$4" repodir="$5" origin arg rule logins="" record value
   local -a args
   umask 077
   shift 5; args=()
@@ -515,9 +519,20 @@ greens_source_git() (
   # A file also quotes URL keys containing '=' and keeps URL credentials out
   # of the long-running transport's command-line config arguments.
   rule="$(mktemp "${RUN_TMP:-${TMPDIR:-/tmp}}/source-transport.XXXXXX")" || return 1
-  trap 'rm -f "$rule"' EXIT
+  trap 'rm -f "$rule" ${logins:+"$logins"}' EXIT
   git config --file "$rule" "url.$url.insteadOf" "$origin" || return 1
-  greens_git_as_transport "$provider" "$host" "$user" "$url" -c "include.path=$rule" ${args[@]+"${args[@]}"}
+  if [[ -n "$repodir" ]]; then
+    # Fetches run on the bare cache, which can't see the checkout's own
+    # credential config (repo-local, or a global includeIf "gitdir:"). Replay
+    # the checkout's helper list, starting from a reset.
+    logins="$(mktemp "${RUN_TMP:-${TMPDIR:-/tmp}}/source-logins.XXXXXX")" || return 1
+    git config --file "$logins" credential.helper "" || return 1
+    while IFS= read -r -d '' record; do
+      value=true; [[ "$record" != *$'\n'* ]] || value="${record#*$'\n'}"
+      git config --file "$logins" --add "${record%%$'\n'*}" "$value" || return 1
+    done < <(git -C "$repodir" config --null --get-regexp '^credential\.' 2>/dev/null)
+  fi
+  GREENS_SOURCE_LOGINS="$logins" greens_git_as_transport "$provider" "$host" "$user" "$url" -c "include.path=$rule" ${args[@]+"${args[@]}"}
 )
 
 greens_uri_path_encode() (

@@ -138,6 +138,20 @@ for context in worktree gitdir command; do
     greens_git_as github api.example alice "$rewritten_url" "${git_context[@]}" credential fill > "$ACCOUNT_TEST/rewrite-$context"
   grep -qx password=fixture-alice "$ACCOUNT_TEST/rewrite-$context" || fail "rewritten source helper did not use $context transport authority"
 done
+
+# Sync fetches into a bare cache. A login that only the checkout's own config
+# provides must still reach it, and gh's source account must still win on GitHub.
+git init --quiet "$ACCOUNT_TEST/local-login"
+git -C "$ACCOUNT_TEST/local-login" remote add origin https://git.example/team/repo
+git -C "$ACCOUNT_TEST/local-login" config credential.helper ''
+git -C "$ACCOUNT_TEST/local-login" config --add credential.helper '!printf "username=local\npassword=fixture-local\n"'
+git init --bare --quiet "$ACCOUNT_TEST/local-login.git"
+printf 'protocol=https\nhost=git.example\n\n' | GIT_TERMINAL_PROMPT=0 greens_source_git git git.example "" https://git.example/team/repo \
+  "$ACCOUNT_TEST/local-login" --git-dir="$ACCOUNT_TEST/local-login.git" credential fill > "$ACCOUNT_TEST/local-login-credentials" 2>&1 || true
+grep -qx username=local "$ACCOUNT_TEST/local-login-credentials" || fail "sync could not use the checkout's own Git login"
+printf 'protocol=https\nhost=github.com\n\n' | GIT_TERMINAL_PROMPT=0 greens_source_git github github.com alice https://github.com/team/repo \
+  "$ACCOUNT_TEST/local-login" --git-dir="$ACCOUNT_TEST/local-login.git" credential fill > "$ACCOUNT_TEST/local-login-github" 2>&1 || true
+grep -qx username=alice "$ACCOUNT_TEST/local-login-github" || fail "the checkout's Git login replaced the GitHub source account"
 git -C "$ACCOUNT_TEST/source" config --add url.https://clone.example:8443/team/.insteadOf git@rewritten-ssh:team/
 printf 'protocol=https\nhost=clone.example:8443\n\n' |
   greens_git_as github api.example alice git@rewritten-ssh:team/repo -C "$ACCOUNT_TEST/source" credential fill > "$ACCOUNT_TEST/rewrite-ssh"
@@ -234,6 +248,9 @@ for url_token in ghp_fixture_personal_token 0123456789abcdef0123456789abcdef0123
   printf 'protocol=https\nhost=github.com\nusername=%s\n\n' "$url_token" |
     GH_TOKEN=fixture-bob greens_git_as github github.com alice "https://$url_token@github.com/team/repo" credential fill > "$ACCOUNT_TEST/source-token-url-credentials"
   grep -qx "password=$url_token" "$ACCOUNT_TEST/source-token-url-credentials" || fail "source URL token was replaced by ambient credentials"
+  printf 'protocol=https\nhost=github.com\nusername=%s\n\n' "$url_token" | GH_TOKEN=fixture-bob greens_source_git github github.com alice \
+    "https://$url_token@github.com/team/repo" "$ACCOUNT_TEST/local-login" --git-dir="$ACCOUNT_TEST/local-login.git" credential fill > "$ACCOUNT_TEST/source-token-local-login"
+  grep -qx "password=$url_token" "$ACCOUNT_TEST/source-token-local-login" || fail "the checkout's Git login replaced a source URL token"
 done
 PERSONAL_GH_USER=bob
 git -C "$MIRROR_DIR" remote set-url origin https://bob@github.com/bob/mirror
